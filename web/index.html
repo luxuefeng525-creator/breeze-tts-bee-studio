@@ -397,6 +397,7 @@
           <p id="libraryDesc">0 个音色，0 个来自你的克隆。最近使用、标签和授权都集中在这里。</p>
         </div>
         <div class="head-actions">
+          <button class="btn" type="button" id="protoVoiceBtn">按原型建音色</button>
           <button class="btn" type="button" data-goto="clone">克隆新音色</button>
           <button class="btn-primary" type="button" data-goto="workbench">回到合成台</button>
         </div>
@@ -467,6 +468,10 @@
             </label>
             <span class="script-hint" id="scriptHint">用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气</span>
           </div>
+          <div class="scene-moods" id="sceneMoods" hidden>
+            <span class="scene-moods-label">场次氛围</span>
+            <div class="scene-mood-list" id="sceneMoodList"></div>
+          </div>
         </section>
 
         <section class="panel script-col-lines">
@@ -523,6 +528,7 @@
       <li><strong>调风格</strong>：情绪、口音、语速按需选择；高级参数里可以固定种子复现结果。</li>
       <li><strong>生成</strong>：点「生成语音」或按 Ctrl/⌘ + Enter。进度会显示当前在第几段。</li>
       <li><strong>试听与下载</strong>：生成完右侧播放器可直接试听和下载 WAV；历史里可以重播或复现。</li>
+      <li><strong>剧本台</strong>：按「角色：台词」写对白，<code>## 场次</code> 分组，<code>[情绪]</code> 标注语气。角色卡片定音色、默认情绪、语速与口音；场次可设氛围，对整场生效。合成完全剧可按需导出整轨、分行音频、时间轴与剧本。</li>
     </ol>
     <p class="help-note">数据全部保存在本机 <code>data/</code> 目录，不会上传到任何外部服务。</p>
   </div>
@@ -561,11 +567,72 @@
     <select class="input input-select" id="roleArchetype" aria-label="音色原型"></select>
     <label class="field-label" for="roleEmotion">默认情绪（留空 = 按台词自动判断）</label>
     <select class="input input-select" id="roleEmotion" aria-label="默认情绪"></select>
+    <label class="field-label" for="roleSpeed">语速倍率（0.9 慢 – 1.1 快，1 为原速）</label>
+    <input class="input" id="roleSpeed" type="number" min="0.5" max="2" step="0.05" value="1" aria-label="角色语速">
+    <label class="field-label" for="roleAccent">口音 / 方言（可选，会拼进每行指令）</label>
+    <select class="input input-select" id="roleAccent" aria-label="角色口音">
+      <option value="">（标准普通话，不加口音）</option>
+      <optgroup label="中文方言">
+        <option value="用标准普通话，发音标准，字正腔圆">标准普通话（强调咬字）</option>
+        <option value="带一点东北口音，语调爽朗上扬">东北话</option>
+        <option value="带一点四川口音，尾音略拖">四川话</option>
+        <option value="带一点贵州口音，语调平实">贵州话</option>
+        <option value="带一点湖南口音，语气干脆">湖南话</option>
+        <option value="带一点粤语腔的普通话，咬字偏硬">粤语腔</option>
+        <option value="带一点台湾腔，语气软糯">台湾腔</option>
+      </optgroup>
+      <optgroup label="外语口音">
+        <option value="Speak with a General American accent">美式英语</option>
+        <option value="Speak with a British Received Pronunciation accent">英式英语</option>
+      </optgroup>
+    </select>
     <label class="field-label" for="roleVoice">绑定音色</label>
     <select class="input input-select" id="roleVoice" aria-label="绑定音色"></select>
     <div class="dlg-actions">
       <button class="btn" type="button" data-close="roleDlg">取消</button>
       <button class="btn-primary" type="button" id="saveRoleBtn">保存</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="dlg" id="exportDlg" aria-label="导出剧本">
+  <div class="dlg-head">
+    <h2>导出</h2>
+    <button class="icon-btn" type="button" aria-label="关闭" data-close="exportDlg"><svg class="icon icon-sm"><use href="#i-x"/></svg></button>
+  </div>
+  <p class="dlg-sub" id="exportSub">勾选要放进 ZIP 的内容。整轨与分行音频要先合成才有。</p>
+  <div class="opt-list">
+    <label class="opt-row"><input type="checkbox" id="expFull" checked>
+      <span><strong>整轨音频</strong><em>full.wav · 按顺序拼接的全剧音频</em></span></label>
+    <label class="opt-row"><input type="checkbox" id="expLines" checked>
+      <span><strong>分行音频</strong><em>lines/ · 每行一个 WAV，方便剪辑时单独替换</em></span></label>
+    <label class="opt-row"><input type="checkbox" id="expTimeline" checked>
+      <span><strong>时间轴</strong><em>timeline.csv · 每行的起止秒数、角色、情绪与台词</em></span></label>
+    <label class="opt-row"><input type="checkbox" id="expScript" checked>
+      <span><strong>剧本文本</strong><em>script.txt · 回写标准格式，换设备也能接着改</em></span></label>
+  </div>
+  <div class="dlg-actions">
+    <button class="btn" type="button" data-close="exportDlg">取消</button>
+    <button class="btn-primary" type="button" id="exportConfirmBtn">下载 ZIP</button>
+  </div>
+</dialog>
+
+<dialog class="dlg" id="protoVoiceDlg" aria-label="按原型建音色">
+  <div class="dlg-head">
+    <h2>按原型建音色</h2>
+    <button class="icon-btn" type="button" aria-label="关闭" data-close="protoVoiceDlg"><svg class="icon icon-sm"><use href="#i-x"/></svg></button>
+  </div>
+  <p class="dlg-sub">选一个原型就能得到对应年龄与性别的声音，不用录音；描述可以自己改。</p>
+  <div class="dlg-form dlg-form-col">
+    <label class="field-label" for="protoArchetype">原型</label>
+    <select class="input input-select" id="protoArchetype" aria-label="音色原型"></select>
+    <label class="field-label" for="protoName">音色名</label>
+    <input class="input" id="protoName" placeholder="例如：旁白·沉稳">
+    <label class="field-label" for="protoInstruction">声音描述（会下发给模型）</label>
+    <textarea class="sheet sheet-input" id="protoInstruction" rows="3"></textarea>
+    <div class="dlg-actions">
+      <button class="btn" type="button" data-close="protoVoiceDlg">取消</button>
+      <button class="btn-primary" type="button" id="protoSaveBtn">创建音色</button>
     </div>
   </div>
 </dialog>

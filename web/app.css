@@ -325,6 +325,46 @@
   .script-progress-text{font-size:11.5px;color:var(--text-3);margin-top:6px;line-height:1.6}
   #scriptAudio{width:100%;margin-top:10px;height:34px}
 
+  /* ---- 场次氛围（F6）：一行一个场次，下拉即改即存 ---- */
+  .scene-moods{
+    flex:0 0 auto;display:flex;gap:10px;align-items:flex-start;
+    margin-top:8px;padding-top:9px;border-top:1px solid var(--line);
+  }
+  .scene-moods-label{flex:0 0 auto;font-size:12px;color:var(--text-3);padding-top:5px}
+  .scene-mood-list{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+  .scene-mood{
+    display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:999px;
+    padding:2px 4px 2px 10px;max-width:100%;
+  }
+  .scene-mood .scene-mood-name{
+    max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .scene-mood .input{
+    width:auto;min-width:82px;height:24px;padding:2px 24px 2px 8px;font-size:11.5px;
+    border-radius:999px;background-color:var(--surface);
+  }
+
+  /* ---- 导出弹层：勾选清单 ---- */
+  .opt-list{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+  .opt-row{
+    display:flex;gap:10px;align-items:flex-start;padding:11px 12px;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
+    cursor:pointer;transition:border-color .16s ease;
+  }
+  .opt-row:hover{border-color:var(--line-strong)}
+  .opt-row input{margin:3px 0 0;accent-color:var(--accent);flex:0 0 auto}
+  .opt-row span{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .opt-row strong{font-size:13px;font-weight:600;color:var(--text)}
+  .opt-row em{font-style:normal;font-size:11.5px;color:var(--text-3);line-height:1.6}
+  .opt-row.is-off{opacity:.45;pointer-events:none}
+
+  /* ---- 角色卡补充信息（原型 / 语速 / 口音）---- */
+  .role-meta{display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px;color:var(--text-3)}
+  .role-meta span{
+    border:1px solid var(--line);border-radius:999px;padding:1px 8px;background:var(--surface-2);
+  }
+
   /* 窄屏把分镜折到下面，而不是藏起来——进度、报错、整轨播放器都在那一列 */
   @media (max-width:1280px){
     .script-grid{grid-template-columns:200px minmax(0,1fr);height:auto}

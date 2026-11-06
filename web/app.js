@@ -287,7 +287,10 @@
     $("roleEmpty").hidden = state.roles.length > 0;
     const rShown = state.roles.slice(state.libRolePage * LIB_ROLE_PAGE,
                                      (state.libRolePage + 1) * LIB_ROLE_PAGE);
-    grid.innerHTML = rShown.map((r) => `
+    grid.innerHTML = rShown.map((r) => {
+      const arch = S.archetypes.find((a) => a.key === (r.archetype || "custom"));
+      const spd = Number(r.speed || 1);
+      return `
       <article class="role-card" data-rolecard="${esc(r.id)}">
         <header>
           <span class="voice-avatar">${esc((r.name || "?").slice(0, 1))}</span>
@@ -298,8 +301,15 @@
           <button class="icon-btn" type="button" data-roleedit="${esc(r.id)}" aria-label="编辑角色 ${esc(r.name)}"><svg class="icon icon-sm"><use href="#i-edit"/></svg></button>
           <button class="icon-btn del" type="button" data-roledel="${esc(r.id)}" aria-label="删除角色 ${esc(r.name)}"><svg class="icon icon-sm"><use href="#i-trash"/></svg></button>
         </header>
+        <div class="role-meta">
+          <span>${esc((arch && arch.label) || "自定义")}</span>
+          ${r.default_emotion ? `<span>默认 ${esc(r.default_emotion)}</span>` : ""}
+          ${spd !== 1 ? `<span>语速 ×${spd.toFixed(2).replace(/0$/, "")}</span>` : ""}
+          ${r.accent ? `<span>${esc(String(r.accent).slice(0, 12))}</span>` : ""}
+        </div>
         <p class="card-desc">${esc(r.description || "（没有简介）")}</p>
-      </article>`).join("");
+      </article>`;
+    }).join("");
     const rPages = Math.ceil(state.roles.length / LIB_ROLE_PAGE);
     if (rPages > 1) {
       grid.insertAdjacentHTML("beforeend",
@@ -347,6 +357,20 @@
     $("roleDesc").value = r ? (r.description || "") : "";
     $("roleArchetype").value = (r && r.archetype) || "custom";
     $("roleEmotion").value = (r && r.default_emotion) || "";
+    $("roleSpeed").value = r && r.speed ? Number(r.speed).toFixed(2).replace(/0$/, "") : "1";
+    // 口音来自固定下拉；老数据里可能有自定义值，补一个选项，
+    // 否则下拉显示为空、一保存就把原来的口音冲掉。
+    const accSel = $("roleAccent");
+    const acc = (r && r.accent) || "";
+    accSel.querySelectorAll("option[data-custom]").forEach((o) => o.remove());
+    if (acc && !Array.from(accSel.options).some((o) => o.value === acc)) {
+      const o = document.createElement("option");
+      o.value = acc;
+      o.textContent = acc;
+      o.dataset.custom = "1";
+      accSel.appendChild(o);
+    }
+    accSel.value = acc;
     const sel = $("roleVoice");
     sel.innerHTML = '<option value="">（不绑定）</option>' +
       state.voices.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join("");
@@ -363,6 +387,8 @@
       voice_id: $("roleVoice").value,
       archetype: $("roleArchetype").value || "custom",
       default_emotion: $("roleEmotion").value || "",
+      speed: parseFloat($("roleSpeed").value) || 1,
+      accent: $("roleAccent").value || "",
     };
     try {
       if (state.editRoleId) {
@@ -1533,7 +1559,7 @@
   // ============================================================ 剧本台
   const S = {
     list: [], current: null, lines: [], job: null, timer: null,
-    gap: 0.35, archetypes: [], emotions: [],
+    gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [],
   };
 
   // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
@@ -1587,6 +1613,7 @@
     }
     S.current = d;
     S.lines = d.lines || [];
+    S.scenes = d.scenes || [];
     S.gap = d.gap == null ? 0.35 : d.gap;
     $("scriptRaw").value = d.raw || "";
     $("scriptGap").value = S.gap;
@@ -1595,6 +1622,7 @@
     $("synthScriptBtn").disabled = false;
     $("exportScriptBtn").disabled = false;
     renderLines(d);
+    renderSceneMoods();
     renderScriptList();
     const full = audioUrl(d.full_wav);
     const audio = $("scriptAudio");
@@ -1650,6 +1678,39 @@
     $("scriptHint").classList.toggle("is-warn", bad > 0);
   }
 
+  // 场次氛围：以解析出的场次为准，一行一个下拉。改了立刻保存并重新解析，
+  // 行列表里的指令跟着变——用户能马上看到「这一场」到底影响了什么。
+  function renderSceneMoods() {
+    const box = $("sceneMoods");
+    const list = $("sceneMoodList");
+    const scenes = S.scenes || [];
+    box.hidden = !scenes.length;
+    if (!scenes.length) { list.innerHTML = ""; return; }
+
+    list.innerHTML = scenes.map((s, i) => {
+      const opts = ['<option value="">（无氛围）</option>']
+        .concat(S.moods.map((m) => `<option value="${esc(m.key)}">${esc(m.key)}</option>`));
+      // 词表之外的自定义氛围也要显示出来，否则下拉看着像「设置丢了」
+      if (s.mood && !S.moods.some((m) => m.key === s.mood)) {
+        opts.push(`<option value="${esc(s.mood)}">${esc(s.mood)}（自定义）</option>`);
+      }
+      return `<label class="scene-mood" title="对这一场的所有行生效，行内情绪优先">
+        <span class="scene-mood-name">${esc(s.name)}</span>
+        <select class="input input-select" data-scene="${i}" aria-label="场次「${esc(s.name)}」的氛围">${opts.join("")}</select>
+      </label>`;
+    }).join("");
+
+    list.querySelectorAll("select[data-scene]").forEach((sel) => {
+      const i = parseInt(sel.dataset.scene, 10);
+      sel.value = (S.scenes[i] && S.scenes[i].mood) || "";
+      sel.addEventListener("change", async () => {
+        if (!S.scenes[i]) return;
+        S.scenes[i].mood = sel.value;
+        if (await saveScript(true)) previewScriptNow();
+      });
+    });
+  }
+
   let _parseTimer = null;
   async function previewScriptNow() {
     if (!S.current) return;
@@ -1657,10 +1718,12 @@
     try {
       const d = await api(`/api/scripts/${S.current.id}/parse`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw, scenes: S.current.scenes || [] }),
+        body: JSON.stringify({ raw, scenes: S.scenes || S.current.scenes || [] }),
       });
       S.lines = d.lines || [];
+      if (d.scenes) S.scenes = d.scenes;
       renderLines(d);
+      renderSceneMoods();
     } catch (e) { /* 解析失败保持上一份结果，不打断输入 */ }
   }
 
@@ -1678,9 +1741,11 @@
           raw: $("scriptRaw").value,
           title: $("scriptTitleInput").value.trim() || "未命名剧本",
           gap: parseFloat($("scriptGap").value) || 0.35,
+          scenes: S.scenes || [],
         }),
       });
       S.current = { ...S.current, ...d };
+      if (d.scenes) S.scenes = d.scenes;
       $("scriptTitle").textContent = S.current.title;
       if (!quiet) toast("已保存");
       refreshScripts();
@@ -1816,9 +1881,91 @@
     } catch (e) { toast("重做失败：" + e.message, true); }
   }
 
-  function exportScript() {
+  // 导出：按勾选拼 parts。没有音频的项直接禁用而不是导出空包——
+  // 用户拿到只有 script.txt 的 ZIP 会以为合成丢了。
+  const EXPORT_IDS = {
+    full: "expFull", lines: "expLines", timeline: "expTimeline", script: "expScript",
+  };
+
+  function openExportDialog() {
     if (!S.current) return;
-    location.href = `/api/scripts/${S.current.id}/export`;
+    const hasFull = !!(S.current.full_wav);
+    const hasLines = (S.lines || []).some((l) => l.wav);
+    const setOpt = (key, ok) => {
+      const el = $(EXPORT_IDS[key]);
+      el.disabled = !ok;
+      el.checked = ok;
+      const row = el.closest(".opt-row");
+      if (row) row.classList.toggle("is-off", !ok);
+    };
+    setOpt("full", hasFull);
+    setOpt("lines", hasLines);
+    // 时间轴由拼接时算出：没有整轨就没有时间轴，勾了只会得到一行表头
+    setOpt("timeline", hasFull);
+    setOpt("script", true);
+
+    const rows = (S.lines || []).length;
+    $("exportSub").textContent = hasFull
+      ? `${rows} 行 · 整轨 ${Number(S.current.duration || 0).toFixed(1)} 秒 · 勾选要放进 ZIP 的内容`
+      : "这个剧本还没合成，音频与时间轴暂时不可选；现在只能导出剧本文本。";
+    $("exportDlg").showModal();
+  }
+
+  function confirmExport() {
+    if (!S.current) return;
+    const parts = Object.keys(EXPORT_IDS).filter((k) => {
+      const el = $(EXPORT_IDS[k]);
+      return el.checked && !el.disabled;
+    });
+    if (!parts.length) { toast("至少勾一项要导出的内容", true); return; }
+    $("exportDlg").close();
+    location.href = `/api/scripts/${S.current.id}/export?parts=${parts.join(",")}`;
+  }
+
+  // ---------------------------------------------------------------- 原型建音色
+  let _protoAutoName = "";
+  function fillProtoFromArchetype() {
+    const a = S.archetypes.find((x) => x.key === $("protoArchetype").value);
+    if (!a) return;
+    $("protoInstruction").value = a.instruction || "";
+    // 只在名字还是上一次自动填的（或空）时才覆盖：
+    // 用户手打了名字再换原型，不该被冲掉。
+    const cur = $("protoName").value.trim();
+    if (!cur || cur === _protoAutoName || /音色$/.test(cur)) {
+      _protoAutoName = (a.label || "原型") + "音色";
+      $("protoName").value = _protoAutoName;
+    }
+  }
+
+  function openProtoDialog() {
+    if (!S.archetypes.length) { toast("原型数据还没加载好，稍等一下再试", true); return; }
+    const sel = $("protoArchetype");
+    sel.innerHTML = S.archetypes.map((a) =>
+      `<option value="${esc(a.key)}">${esc(a.label)}</option>`).join("");
+    sel.value = S.archetypes.some((a) => a.key === "narrator") ? "narrator"
+      : (S.archetypes[0] ? S.archetypes[0].key : "custom");
+    _protoAutoName = "";
+    fillProtoFromArchetype();
+    $("protoVoiceDlg").showModal();
+  }
+
+  async function saveProtoVoice() {
+    const name = $("protoName").value.trim();
+    if (!name) { toast("给这个音色起个名字", true); return; }
+    try {
+      await api("/api/voices", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          type: "design",
+          instruction: $("protoInstruction").value.trim(),
+          archetype: $("protoArchetype").value,
+        }),
+      });
+      $("protoVoiceDlg").close();
+      await refreshVoices();
+      toast(`音色「${name}」已建好，去角色里绑定它就能用`);
+    } catch (e) { toast("创建失败：" + e.message, true); }
   }
 
   async function loadMeta() {
@@ -1826,6 +1973,7 @@
       const d = await api("/api/archetypes");
       S.archetypes = d.archetypes || [];
       S.emotions = d.emotions || [];
+      S.moods = d.moods || [];
       const sel = $("roleArchetype");
       if (sel) {
         sel.innerHTML = S.archetypes.map((a) =>
@@ -1838,6 +1986,9 @@
         emo.innerHTML = '<option value="">（跟随文本自动判断）</option>' +
           S.emotions.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
       }
+      // 角色卡上的原型名来自这份元数据：boot 时角色先于它加载完，
+      // 不补一次渲染就会把每个角色都显示成「自定义」。
+      if (state.roles.length) renderRoles();
     } catch (e) { /* 元数据缺失不阻塞主流程 */ }
   }
 
@@ -1855,7 +2006,11 @@
   function bindScript() {
     $("newScriptBtn").addEventListener("click", newScript);
     $("synthScriptBtn").addEventListener("click", synthScript);
-    $("exportScriptBtn").addEventListener("click", exportScript);
+    $("exportScriptBtn").addEventListener("click", openExportDialog);
+    $("exportConfirmBtn").addEventListener("click", confirmExport);
+    $("protoVoiceBtn").addEventListener("click", openProtoDialog);
+    $("protoArchetype").addEventListener("change", fillProtoFromArchetype);
+    $("protoSaveBtn").addEventListener("click", saveProtoVoice);
     $("stopScriptBtn").addEventListener("click", async () => {
       if (!S.job) return;
       try { await api(`/api/scripts/jobs/${S.job}/stop`, { method: "POST", body: "{}" }); } catch (e) { /* 忽略 */ }
