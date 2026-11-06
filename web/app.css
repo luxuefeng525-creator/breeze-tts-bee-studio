@@ -239,3 +239,94 @@
   .voice-warn>span{flex:1;min-width:0;color:var(--text-2)}
   .voice-warn .icon{color:var(--warning);flex:0 0 auto}
   .voice-warn .btn{flex:0 0 auto}
+
+  /* ---- 剧本台（第 4 屏）---- */
+  body[data-screen="script"] #screen-script{display:block}
+  .script-grid{
+    display:grid;grid-template-columns:238px minmax(0,1fr) 372px;gap:14px;
+    align-items:stretch;min-height:0;height:calc(100vh - 190px);
+  }
+  .script-col-list,.script-col-edit,.script-col-lines{min-height:0;overflow:hidden}
+  .script-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;min-height:0;padding-right:2px}
+  .script-item{
+    display:flex;flex-direction:column;gap:3px;text-align:left;padding:10px 12px;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
+    color:var(--text-2);transition:border-color .16s ease,background-color .16s ease;
+  }
+  .script-item:hover{border-color:var(--line-strong);color:var(--text)}
+  .script-item.active{border-color:var(--accent);background:var(--accent-soft);color:var(--text)}
+  .script-item strong{font-size:13.5px;font-weight:600}
+  .script-item span{font-size:11.5px;color:var(--text-3)}
+
+  .script-title-input{width:100%;margin:8px 0 6px;flex:0 0 auto}
+  .script-raw{
+    flex:1 1 auto;min-height:0;width:100%;resize:none;overflow-y:auto;
+    font-family:var(--font-mono);font-size:13.5px;line-height:1.9;
+    padding:12px 14px;white-space:pre-wrap;
+  }
+  .script-toolbar{display:flex;align-items:center;gap:14px;flex:0 0 auto;margin-top:8px}
+  .script-field{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-3)}
+  .script-field .input{width:74px;text-align:center;padding:6px 8px}
+  .script-hint{font-size:11.5px;color:var(--text-3);margin-left:auto;text-align:right}
+  .script-hint.is-warn{color:var(--warning)}
+
+  .script-lines{display:flex;flex-direction:column;gap:5px;overflow-y:auto;min-height:0;flex:1 1 auto}
+  .script-errors{
+    padding:8px 10px;margin-bottom:6px;border-radius:var(--r-sm);
+    background:rgba(232,138,120,.10);border:1px solid rgba(232,138,120,.28);
+    color:var(--danger);font-size:12px;line-height:1.7;
+  }
+  /* 两行布局：第一行是标签与状态，第二行整幅放台词。
+     单行 6 列会把台词挤成「那天一…」，读不出内容。 */
+  .script-line{
+    display:grid;gap:3px 7px;padding:7px 9px;
+    grid-template-columns:22px auto auto minmax(0,1fr) 14px auto;
+    grid-template-areas:
+      "no role emo . state acts"
+      "text text text text text text";
+    align-items:center;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
+    font-size:12.5px;
+  }
+  .line-no{grid-area:no}
+  .line-role{grid-area:role}
+  .line-emotion{grid-area:emo}
+  .line-state{grid-area:state}
+  .line-acts{grid-area:acts}
+  .line-text{
+    grid-area:text;white-space:normal;word-break:break-word;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;line-height:1.6;
+  }
+  .script-line.pending{opacity:.9}
+  .script-line.running{border-color:var(--accent);background:var(--accent-soft)}
+  .script-line.failed{border-color:rgba(232,138,120,.45);background:rgba(232,138,120,.07)}
+  .line-no{font-family:var(--font-mono);font-size:11px;color:var(--text-disabled)}
+  .line-role{
+    font-size:11.5px;padding:1px 8px;border-radius:999px;white-space:nowrap;
+    border:1px solid hsl(var(--h) 45% 34%);color:hsl(var(--h) 70% 68%);
+    background:hsl(var(--h) 45% 16% / .55);
+  }
+  .line-emotion{
+    font-size:11px;color:var(--text-3);white-space:nowrap;
+    border:1px solid var(--line);border-radius:999px;padding:1px 7px;
+  }
+  .line-emotion em{font-style:normal;margin-left:4px;color:var(--text-disabled)}
+  .line-text{color:var(--text-2)}
+  .line-state{font-size:12px;text-align:center}
+  .line-state.done{color:var(--success)}
+  .line-state.failed{color:var(--danger)}
+  .line-acts{display:flex;gap:2px;opacity:.55}
+  .script-line:hover .line-acts{opacity:1}
+  .line-acts .icon-btn{width:22px;height:22px}
+  .line-acts .icon-btn:disabled{opacity:.3;cursor:not-allowed}
+
+  .script-progress{flex:0 0 auto;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+  .script-progress-text{font-size:11.5px;color:var(--text-3);margin-top:6px;line-height:1.6}
+  #scriptAudio{width:100%;margin-top:10px;height:34px}
+
+  /* 窄屏把分镜折到下面，而不是藏起来——进度、报错、整轨播放器都在那一列 */
+  @media (max-width:1280px){
+    .script-grid{grid-template-columns:200px minmax(0,1fr);height:auto}
+    .script-col-lines{grid-column:1 / -1;max-height:40vh}
+  }

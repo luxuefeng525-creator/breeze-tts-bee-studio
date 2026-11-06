@@ -114,6 +114,9 @@
     } catch (e) { /* 忽略 */ }
     if (name === "library") renderLibrary();
     if (name === "clone") refreshCloneState();
+    if (name === "script") refreshScripts();
+    // 切走就别再轮询：后台还在打接口、改的是隐藏 DOM，用户也看不到
+    if (name !== "script" && S.timer) { clearTimeout(S.timer); S.timer = null; }
     if (name === "workbench") {
       // 从隐藏状态切回来，textarea 在 display:none 时量不出高度，必须重算
       requestAnimationFrame(() => updatePaper());
@@ -342,6 +345,8 @@
     $("roleDlgTitle").textContent = r ? "编辑角色" : "新建角色";
     $("roleName").value = r ? r.name : "";
     $("roleDesc").value = r ? (r.description || "") : "";
+    $("roleArchetype").value = (r && r.archetype) || "custom";
+    $("roleEmotion").value = (r && r.default_emotion) || "";
     const sel = $("roleVoice");
     sel.innerHTML = '<option value="">（不绑定）</option>' +
       state.voices.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join("");
@@ -356,6 +361,8 @@
       name,
       description: $("roleDesc").value.trim(),
       voice_id: $("roleVoice").value,
+      archetype: $("roleArchetype").value || "custom",
+      default_emotion: $("roleEmotion").value || "",
     };
     try {
       if (state.editRoleId) {
@@ -1174,6 +1181,7 @@
       if (b) selectRole(b.dataset.role);
     });
     $("newRoleBtn").addEventListener("click", () => openRoleDialog(null));
+    $("roleArchetype").addEventListener("change", prefillArchetypeEmotion);
     $("saveRoleBtn").addEventListener("click", saveRole);
     $("roleGrid").addEventListener("click", async (e) => {
       const ed = e.target.closest("[data-roleedit]");
@@ -1504,11 +1512,13 @@
     setWorkbenchState("empty");
     await Promise.all([refreshVoices(), refreshRoles(), refreshHistory(), refreshModel()]);
     await refreshDict();
+    bindScript();
+    await loadMeta();
     setInterval(refreshModel, 15000);
     // 深链：?screen=clone|library
     try {
       const s = new URLSearchParams(location.search).get("screen");
-      if (s === "clone" || s === "library" || s === "workbench") setScreen(s);
+      if (s === "clone" || s === "library" || s === "workbench" || s === "script") setScreen(s);
     } catch (e) { /* 忽略 */ }
     // 波形装饰
     document.querySelectorAll("[data-wave]").forEach((el) => {
@@ -1516,6 +1526,363 @@
       const seed = parseInt(el.dataset.seed || "1", 10);
       el.innerHTML = Array.from({ length: n }, (_, i) =>
         `<span style="height:${18 + ((i * 37 + seed * 13) % 64)}%"></span>`).join("");
+    });
+  }
+
+
+  // ============================================================ 剧本台
+  const S = {
+    list: [], current: null, lines: [], job: null, timer: null,
+    gap: 0.35, archetypes: [], emotions: [],
+  };
+
+  // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
+  // 音频路由挂在 /api/audio/ 下且支持子路径。
+  const audioUrl = (rel) => (rel ? "/api/audio/" + String(rel).replace(/^audio\//, "") : "");
+
+  const EMOTION_SOURCE = {
+    explicit: "标注", role: "角色默认", auto: "自动推断", neutral: "中性",
+  };
+
+  function roleHue(name) {
+    let h = 0;
+    for (const ch of String(name || "")) h = (h * 31 + ch.charCodeAt(0)) % 360;
+    return h;
+  }
+
+  // 只刷新左栏列表；传 id 才顺便打开。注意不要默认重开当前剧本——
+  // 那会用服务端数据覆盖用户刚输入还没保存的内容。
+  async function refreshScripts(selectId) {
+    try {
+      S.list = await api("/api/scripts");
+    } catch (e) {
+      S.list = [];
+    }
+    renderScriptList();
+    if (selectId && S.list.some((s) => s.id === selectId)) await openScript(selectId);
+  }
+
+  function renderScriptList() {
+    const box = $("scriptList");
+    $("scriptCount").textContent = `${S.list.length} 个`;
+    if (!S.list.length) {
+      box.innerHTML = '<div class="empty-hint">还没有剧本<br>点右上角「新建剧本」开始</div>';
+      return;
+    }
+    box.innerHTML = S.list.map((s) => `
+      <button type="button" class="script-item${S.current && S.current.id === s.id ? " active" : ""}"
+              data-script="${esc(s.id)}">
+        <strong>${esc(s.title || "未命名剧本")}</strong>
+        <span>${s.line_count || 0} 行 · ${s.duration ? s.duration.toFixed(1) + " 秒" : "未合成"}</span>
+      </button>`).join("");
+  }
+
+  async function openScript(id) {
+    let d;
+    try {
+      d = await api("/api/scripts/" + id);
+    } catch (e) {
+      toast(e.message, true);
+      return;
+    }
+    S.current = d;
+    S.lines = d.lines || [];
+    S.gap = d.gap == null ? 0.35 : d.gap;
+    $("scriptRaw").value = d.raw || "";
+    $("scriptGap").value = S.gap;
+    $("scriptTitleInput").value = d.title || "";
+    $("scriptTitle").textContent = d.title || "未命名剧本";
+    $("synthScriptBtn").disabled = false;
+    $("exportScriptBtn").disabled = false;
+    renderLines(d);
+    renderScriptList();
+    const full = audioUrl(d.full_wav);
+    const audio = $("scriptAudio");
+    if (full) { audio.src = full; audio.hidden = false; } else { audio.hidden = true; audio.removeAttribute("src"); }
+  }
+
+  function renderLines(d) {
+    const box = $("scriptLines");
+    const lines = (d && d.lines) || S.lines || [];
+    $("lineCount").textContent = `${lines.length} 行`;
+    $("scriptMeta").textContent = lines.length
+      ? `${lines.length} 行 · 约 ${Math.round(d.estimate || 0)} 秒${S.current && S.current.duration ? " · 已合成 " + S.current.duration.toFixed(1) + " 秒" : ""}`
+      : "还没有台词";
+
+    if (!lines.length) {
+      box.innerHTML = '<div class="empty-hint">解析后会在这里逐行显示：谁说的、什么情绪、念到第几句。</div>';
+      return;
+    }
+    const errs = (d && d.errors) || [];
+    const errBox = errs.length
+      ? `<div class="script-errors">${errs.slice(0, 4).map((e) =>
+          `<div>第 ${e.line} 行：${esc(e.reason)}</div>`).join("")}</div>`
+      : "";
+
+    box.innerHTML = errBox + lines.map((l) => {
+      const hue = roleHue(l.role_name);
+      const stat = l.status === "done" ? "done" : l.status === "failed" ? "failed" : "pending";
+      const mark = stat === "done" ? "✓" : stat === "failed" ? "✕" : "";
+      return `
+        <div class="script-line ${stat}" data-line-idx="${l.idx}">
+          <span class="line-no">${String(l.idx + 1).padStart(2, "0")}</span>
+          <span class="line-role" style="--h:${hue}">${esc(l.role_name)}</span>
+          <span class="line-emotion" title="情绪来源：${esc(EMOTION_SOURCE[l.emotion_source] || "")}">
+            ${esc(l.emotion)}<em>${esc(EMOTION_SOURCE[l.emotion_source] || "")}</em>
+          </span>
+          <span class="line-text">${esc(l.text)}</span>
+          <span class="line-state ${stat}">${mark}</span>
+          <span class="line-acts">
+            <button class="icon-btn" type="button" data-playline="${l.idx}" title="试听这一行" ${l.wav ? "" : "disabled"}>
+              <svg class="icon icon-sm"><use href="#i-play"/></svg>
+            </button>
+            <button class="icon-btn" type="button" data-redoline="${l.idx}" title="只重做这一行">
+              <svg class="icon icon-sm"><use href="#i-refresh"/></svg>
+            </button>
+          </span>
+        </div>`;
+    }).join("");
+
+    const bad = errs.length;
+    $("scriptHint").textContent = bad
+      ? `有 ${bad} 处需要修一下（见下方分镜顶部）`
+      : "用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气";
+    $("scriptHint").classList.toggle("is-warn", bad > 0);
+  }
+
+  let _parseTimer = null;
+  async function previewScriptNow() {
+    if (!S.current) return;
+    const raw = $("scriptRaw").value;
+    try {
+      const d = await api(`/api/scripts/${S.current.id}/parse`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw, scenes: S.current.scenes || [] }),
+      });
+      S.lines = d.lines || [];
+      renderLines(d);
+    } catch (e) { /* 解析失败保持上一份结果，不打断输入 */ }
+  }
+
+  function schedulePreview() {
+    clearTimeout(_parseTimer);
+    _parseTimer = setTimeout(previewScriptNow, 350);
+  }
+
+  async function saveScript(quiet) {
+    if (!S.current) return false;
+    try {
+      const d = await api("/api/scripts/" + S.current.id, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          raw: $("scriptRaw").value,
+          title: $("scriptTitleInput").value.trim() || "未命名剧本",
+          gap: parseFloat($("scriptGap").value) || 0.35,
+        }),
+      });
+      S.current = { ...S.current, ...d };
+      $("scriptTitle").textContent = S.current.title;
+      if (!quiet) toast("已保存");
+      refreshScripts();
+      return true;
+    } catch (e) {
+      toast("保存失败：" + e.message, true);
+      return false;
+    }
+  }
+
+  async function newScript() {
+    try {
+      const d = await api("/api/scripts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "未命名剧本", raw: "" }),
+      });
+      await refreshScripts(d.id);
+      $("scriptRaw").focus();
+    } catch (e) { toast("新建失败：" + e.message, true); }
+  }
+
+  async function synthScript() {
+    if (!S.current) return;
+    // 保存失败还继续，服务端用的就是上一版文本：用户看到的行数与合出来的内容对不上
+    const saved = await saveScript(true);
+    if (!saved) { toast("文本没保存成功，先解决再合成", true); return; }
+    $("synthScriptBtn").disabled = true;
+    $("stopScriptBtn").hidden = false;
+    $("scriptProgress").hidden = false;
+    $("scriptBar").style.width = "2%";
+    $("scriptProgressText").textContent = "正在启动…";
+    try {
+      const r = await api(`/api/scripts/${S.current.id}/synth`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resume: true }),
+      });
+      if (r.total === 0) {
+        toast("所有行都已合成完成，无需重做");
+        finishJob();
+        return;
+      }
+      if (r.skipped) toast(`跳过已完成 ${r.skipped} 行，本次合成 ${r.total} 行`);
+      S.job = r.job_id;
+      pollJob(r.job_id, r.total);
+    } catch (e) {
+      toast(e.message, true);
+      finishJob();
+    }
+  }
+
+  function finishJob() {
+    $("synthScriptBtn").disabled = false;
+    $("stopScriptBtn").hidden = true;
+    clearTimeout(S.timer);
+  }
+
+  function pollJob(jobId, total) {
+    let strikes = 0;
+    const tick = async () => {
+      let d;
+      try {
+        d = await api("/api/scripts/jobs/" + jobId);
+        strikes = 0;
+      } catch (e) {
+        // 一次网络抖动不该终止整个轮询：合成还在跑，界面却停在原处，
+        // 用户会以为卡死。连续失败才判定任务失联。
+        strikes += 1;
+        if (strikes < 5) {
+          S.timer = setTimeout(tick, 2000);
+          return;
+        }
+        toast("与任务失去联系：" + e.message, true);
+        finishJob();
+        return;
+      }
+      const done = d.done + d.failed;
+      const pct = Math.min(99, Math.round((done / Math.max(1, d.total)) * 100));
+      $("scriptBar").style.width = Math.max(2, pct) + "%";
+      const cur = d.rows && d.rows[d.current] ? d.rows[d.current] : null;
+      const eta = d.eta == null ? "正在估算剩余" : `预计还需 ${Math.round(d.eta)} 秒`;
+      $("scriptProgressText").textContent =
+        `第 ${Math.min(done + 1, d.total)}/${d.total} 行 · ${cur ? cur.role_name + "：" + (cur.text || "").slice(0, 12) : ""} · ${eta}`;
+      renderJobRows(d.rows);
+      if (d.state === "running") {
+        S.timer = setTimeout(tick, 1500);
+      } else {
+        $("scriptBar").style.width = "100%";
+        $("scriptProgressText").textContent =
+          d.state === "stopped" ? `已停止（完成 ${d.done} 行，可再次点合成继续）`
+                                : `完成：${d.done} 行成功${d.failed ? "，" + d.failed + " 行失败" : ""}`;
+        finishJob();
+        // 只重载同一个剧本：用户可能已经切到别的剧本并改了内容，
+        // 这时整页重开会把未保存的编辑冲掉。
+        if (S.current && S.current.id === d.script_id) {
+          await openScript(S.current.id);
+          if (d.state === "done" && !d.failed) toast("整轨已生成，可直接播放或导出");
+        } else {
+          refreshScripts();
+          if (d.state === "done") toast("剧本已合成完成");
+        }
+      }
+    };
+    tick();
+  }
+
+  function renderJobRows(rows) {
+    if (!rows) return;
+    // 按 data-line-idx 定位：续做时 rows 只含本次要做的行（键是 idx），
+    // 用 DOM 序号取值会整体错位，把状态标到别的台词上。
+    document.querySelectorAll("#scriptLines .script-line").forEach((el) => {
+      const row = rows[el.dataset.lineIdx];
+      if (!row) return;
+      el.classList.remove("pending", "running", "done", "failed");
+      el.classList.add(row.state === "pending" ? "pending" : row.state);
+      const mark = el.querySelector(".line-state");
+      if (mark) {
+        mark.className = "line-state " + (row.state === "done" ? "done" : row.state === "failed" ? "failed" : "pending");
+        mark.textContent = row.state === "done" ? "✓" : row.state === "failed" ? "✕" : "";
+        if (row.error) mark.title = row.error;
+      }
+    });
+  }
+
+  async function redoLine(idx) {
+    if (!S.current) return;
+    toast("正在重做这一行…");
+    try {
+      await api(`/api/scripts/${S.current.id}/lines/${idx}/redo`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      await openScript(S.current.id);
+      toast("这一行已更新");
+    } catch (e) { toast("重做失败：" + e.message, true); }
+  }
+
+  function exportScript() {
+    if (!S.current) return;
+    location.href = `/api/scripts/${S.current.id}/export`;
+  }
+
+  async function loadMeta() {
+    try {
+      const d = await api("/api/archetypes");
+      S.archetypes = d.archetypes || [];
+      S.emotions = d.emotions || [];
+      const sel = $("roleArchetype");
+      if (sel) {
+        sel.innerHTML = S.archetypes.map((a) =>
+          `<option value="${esc(a.key)}">${esc(a.label)}</option>`).join("");
+      }
+      const emo = $("roleEmotion");
+      if (emo) {
+        // 第一项是「跟随文本」：没有它，每个角色都被钉死一个情绪，
+        // 标点/关键词推断就永远没机会生效。
+        emo.innerHTML = '<option value="">（跟随文本自动判断）</option>' +
+          S.emotions.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join("");
+      }
+    } catch (e) { /* 元数据缺失不阻塞主流程 */ }
+  }
+
+  function prefillArchetypeEmotion() {
+    const sel = $("roleArchetype");
+    const emo = $("roleEmotion");
+    if (!sel || !emo) return;
+    const spec = S.archetypes.find((a) => a.key === sel.value);
+    // 「中性」等于没有倾向：预填它会让这个角色永远不再走自动推断，
+    // 只有疲惫/温柔这种真正有指向的原型才预填。
+    const mood = spec && spec.default_emotion;
+    emo.value = (mood && mood !== "中性") ? mood : "";
+  }
+
+  function bindScript() {
+    $("newScriptBtn").addEventListener("click", newScript);
+    $("synthScriptBtn").addEventListener("click", synthScript);
+    $("exportScriptBtn").addEventListener("click", exportScript);
+    $("stopScriptBtn").addEventListener("click", async () => {
+      if (!S.job) return;
+      try { await api(`/api/scripts/jobs/${S.job}/stop`, { method: "POST", body: "{}" }); } catch (e) { /* 忽略 */ }
+    });
+    $("scriptList").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-script]");
+      if (b) openScript(b.dataset.script);
+    });
+    $("scriptRaw").addEventListener("input", schedulePreview);
+    $("scriptRaw").addEventListener("blur", () => saveScript(true));
+    $("scriptTitleInput").addEventListener("blur", () => saveScript(true));
+    $("scriptGap").addEventListener("change", () => saveScript(true));
+    $("scriptLines").addEventListener("click", (e) => {
+      const play = e.target.closest("[data-playline]");
+      if (play) {
+        const idx = parseInt(play.dataset.playline, 10);
+        const line = (S.lines || [])[idx];
+        if (line && line.wav) {
+          const a = $("scriptAudio");
+          a.src = audioUrl(line.wav);
+          a.hidden = false;
+          a.play().catch(() => {});
+        }
+        return;
+      }
+      const redo = e.target.closest("[data-redoline]");
+      if (redo) redoLine(parseInt(redo.dataset.redoline, 10));
     });
   }
 
