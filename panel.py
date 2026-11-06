@@ -1995,11 +1995,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err("type must be design|clone|direction")
             # W2-7: 创建阶段允许文稿为空（草稿态）——正确流程是
             # 上传 → 质检 → 校对文稿 → 保存；强制校验放在 PUT（定稿）阶段。
+            # 原型音色（F9）：只给 archetype 时用原型描述预填指令，
+            # 让「按原型建音色」一次 POST 就能落库，不必前端拼文案。
+            arch = str(d.get("archetype") or "").strip()
+            instruction = str(d.get("instruction") or "").strip()
+            if not instruction and arch:
+                from tts_pipeline.script import ARCHETYPES
+                instruction = ((ARCHETYPES.get(arch) or {}).get("instruction") or "").strip()
             voice = {
                 "id": _new_id("v"),
                 "name": d["name"],
                 "type": vtype,
-                "instruction": d.get("instruction", ""),
+                "instruction": instruction,
+                "archetype": arch,
                 "ref_audio": None,
                 "ref_text": d.get("ref_text", ""),
                 "cfg_scale": float(d.get("cfg_scale", 4)),
@@ -2081,9 +2089,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err("invalid json")
             if not d.get("name"):
                 return self._err("name required")
+            # 剧本按名字找角色：同名角色会让后建的那个静默顶掉前一个，
+            # 作者以为在改"雪峰"，实际合成用的是另一个人的音色。
+            wanted = str(d["name"]).strip()
+            if any(str(r.get("name") or "").strip() == wanted for r in _load("roles.json")):
+                return self._err(f"已经有同名角色「{wanted}」了，换一个名字，或直接编辑那个角色")
+            try:
+                speed = float(d.get("speed") or 1.0)
+            except (TypeError, ValueError):
+                speed = 1.0
             role = {
                 "id": _new_id("r"),
-                "name": d["name"],
+                "name": wanted,
                 "description": d.get("description", ""),
                 "voice_id": d.get("voice_id"),
                 # 剧本台依赖这两个字段：原型决定音色描述，默认情绪决定该角色的基调
@@ -2092,6 +2109,9 @@ class Handler(BaseHTTPRequestHandler):
                 # 若在这里填「中性」，会让所有无标签行都恒为中性，
                 # 标点与关键词推断永远不触发。
                 "default_emotion": d.get("default_emotion") or "",
+                # 角色的语速与口音：同一句话由不同角色念出来，快慢与腔调也该不同
+                "speed": min(2.0, max(0.5, speed)),
+                "accent": str(d.get("accent") or "").strip(),
                 "defaults": d.get("defaults") or {"cfg_scale": 4, "seed": 42},
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -2489,7 +2509,7 @@ class Handler(BaseHTTPRequestHandler):
             def _apply(items, _vid=vid):
                 for v in items:
                     if v["id"] == _vid:
-                        for k in ("name", "type", "instruction", "ref_text"):
+                        for k in ("name", "type", "instruction", "ref_text", "archetype"):
                             if k in d:
                                 v[k] = d[k]
                         if "cfg_scale" in d:
@@ -2511,13 +2531,28 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/roles/"):
             rid = path.rsplit("/", 1)[-1]
+            # 改名也要查重：剧本按名字找角色，重名等于让一行的音色随机漂移
+            if "name" in d:
+                wanted = str(d["name"]).strip()
+                if not wanted:
+                    return self._err("角色名不能为空")
+                if any(r["id"] != rid and str(r.get("name") or "").strip() == wanted
+                       for r in _load("roles.json")):
+                    return self._err(f"已经有同名角色「{wanted}」了")
             def _apply(items, _rid=rid):
                 for r in items:
                     if r["id"] == _rid:
-                        for k in ("name", "description", "voice_id", "defaults",
-                                  "archetype", "default_emotion"):
+                        for k in ("description", "voice_id", "defaults",
+                                  "archetype", "default_emotion", "accent"):
                             if k in d:
                                 r[k] = d[k]
+                        if "name" in d:
+                            r["name"] = str(d["name"]).strip()
+                        if "speed" in d:
+                            try:
+                                r["speed"] = min(2.0, max(0.5, float(d["speed"])))
+                            except (TypeError, ValueError):
+                                pass
                         return {"found": r}
                 return {"found": None}
 

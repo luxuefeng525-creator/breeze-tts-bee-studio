@@ -82,6 +82,23 @@ EMOTIONS: dict[str, str] = {
     "疲惫": "声音虚弱，气息不足，语速缓慢",
 }
 
+# ---------------------------------------------------------------------------
+# 场次氛围
+# ---------------------------------------------------------------------------
+# 氛围是「一整场戏的底色」，会拼在每行指令的最前面（见 build_instruction）。
+# 与情绪的区别：情绪修饰「这一句怎么说」，氛围修饰「这一场在哪里、什么气压」。
+# 认不出的值按自由指令原样下发，作者写「雨夜，压低声音」也能生效。
+MOODS: dict[str, str] = {
+    "": "",
+    "安静": "整体氛围安静，语速放缓，音量偏轻，气息收住",
+    "紧张": "整体氛围紧张，语速略快，气息压低，句尾收得干脆",
+    "欢快": "整体氛围欢快，语调上扬，节奏轻快",
+    "悲伤": "整体氛围悲伤，语速放慢，声音低沉，尾音下沉",
+    "温暖": "整体氛围温暖，语气柔和，节奏舒展",
+    "压抑": "整体氛围压抑，声音闷而低，句与句之间留出空白",
+    "肃杀": "整体氛围肃杀，声音冷硬，咬字短促，不带多余情绪",
+}
+
 # 自动推断用的关键词（权重高于标点：写了「我哭了」比感叹号更可信）
 #
 # 必须是**词组**而不是拼接字符串：按字符匹配会让「岂有此理」里的「有」
@@ -206,6 +223,19 @@ def emotion_phrase(emotion: str) -> str:
     return EMOTIONS.get(emotion, emotion if emotion and emotion != NEUTRAL else "")
 
 
+def mood_phrase(mood: str) -> str:
+    """场次氛围 → 可下发的自然语言片段；认不出的原样返回。
+
+    与 emotion_phrase 一样，先查表再回退：作者写已知标签时得到打磨过的
+    指令文案，写自由描述时原样生效，两种写法都不会被吞掉。
+    """
+    key = (mood or "").strip()
+    if not key:
+        return ""
+    return MOODS.get(key, key)
+
+
+
 def build_instruction(base: str, emotion: str, scene_mood: str = "") -> str:
     """拼一行要下发的指令：场次氛围 → 音色/原型 → 情绪。
 
@@ -287,7 +317,7 @@ def parse_script(
         instruction = build_instruction(
             role_instructions.get(name, ""),
             emotion,
-            scene_moods.get(scene, "") if scene else "",
+            mood_phrase(scene_moods.get(scene, "")) if scene else "",
         )
 
         out.lines.append(ScriptLine(

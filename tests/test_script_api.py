@@ -354,3 +354,123 @@ def _wait_job(base_url, job_id, timeout=240):
             return state
         time.sleep(2)
     raise AssertionError(f"任务超时: {state}")
+
+
+# ---------------------------------------------------------------- F6 场次氛围
+def test_scene_mood_roundtrip_and_instruction(base_url):
+    """氛围要能存、能读回，并且真的进到该场每一行的指令里。"""
+    voice = _mk_voice(base_url, "氛围测试音色", instruction="")
+    role = _mk_role(base_url, "氛围甲", voice["id"], "", "adult_m")
+    s = _mk_script(base_url, "## 深夜书店\n氛围甲：你来了。\n## 医院走廊\n氛围甲：别出声。")
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert [x["name"] for x in d["scenes"]] == ["深夜书店", "医院走廊"]
+        assert d["scenes"][0]["mood"] == "", d["scenes"]
+
+        code, d2 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "scenes": [{"name": "深夜书店", "mood": "紧张"}],
+        })
+        assert code == 200, d2
+        assert "语速略快" in d2["lines"][0]["instruction"], d2["lines"][0]
+        # 只给第一场设氛围，第二场不能跟着变
+        assert "语速略快" not in d2["lines"][1]["instruction"], d2["lines"][1]
+
+        code, d3 = _req(base_url + "/api/scripts/" + s["id"])
+        assert d3["scenes"][0]["mood"] == "紧张"
+        assert d3["scenes"][1]["mood"] == ""
+
+        # 解析预览同样要带氛围：前端每次改字都靠它刷新行列表
+        code, p = _json_req(base_url + f"/api/scripts/{s['id']}/parse", "POST", {
+            "raw": "## 深夜书店\n氛围甲：又来了。",
+        })
+        assert code == 200, p
+        assert p["scenes"][0]["mood"] == "紧张"
+        assert "语速略快" in p["lines"][0]["instruction"]
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/roles/" + role["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- F7 导出选项
+def test_export_selects_requested_parts(base_url):
+    """只勾文本时不打包音频；要音频但没合成则明确报错，而不是给空包。"""
+    s = _mk_script(base_url, "旁白：只有文本。")
+    try:
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script,timeline",
+                          timeout=30)
+        assert code == 200 and blob[:2] == b"PK", (code, blob[:40])
+        names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+        assert names == ["timeline.csv", "script.txt"], names
+
+        code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=full", timeout=30)
+        assert code == 400, (code, err)
+        assert "合成" in str(err.get("detail")), err
+
+        code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=video", timeout=30)
+        assert code == 400, (code, err)
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 角色语速 / 口音
+def test_role_speed_and_accent_reach_the_line(base_url):
+    voice = _mk_voice(base_url, "语速测试音色", instruction="")
+    code, role = _json_req(base_url + "/api/roles", "POST", {
+        "name": "语速甲", "voice_id": voice["id"], "archetype": "adult_m",
+        "speed": 0.8, "accent": "带一点东北口音，语调爽朗上扬",
+    })
+    assert code in (200, 201), role
+    s = _mk_script(base_url, "语速甲：你好。")
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        line = d["lines"][0]
+        assert line["speed"] == 0.8, line
+        assert "东北" in line["instruction"], line
+        first_hash = line["hash"]
+
+        # 改语速 → 行身份必须变，否则续做会拿旧音频冒充新参数的结果
+        code, _ = _json_req(base_url + "/api/roles/" + role["id"], "PUT", {"speed": 1.25})
+        assert code == 200
+        code, d2 = _req(base_url + "/api/scripts/" + s["id"])
+        assert d2["lines"][0]["speed"] == 1.25
+        assert d2["lines"][0]["hash"] != first_hash
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/roles/" + role["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- F9 原型音色
+def test_prototype_voice_from_archetype_needs_no_sample(base_url):
+    """只给原型就能建出可用音色：没有参考音频也不该报错。"""
+    code, v = _json_req(base_url + "/api/voices", "POST", {
+        "name": "原型旁白", "type": "design", "archetype": "narrator",
+    })
+    assert code in (200, 201), v
+    try:
+        assert v["archetype"] == "narrator"
+        assert "纪录片" in v["instruction"], v
+        assert not v.get("ref_audio")
+    finally:
+        _req(base_url + "/api/voices/" + v["id"], "DELETE")
+
+
+def test_duplicate_role_name_is_rejected(base_url):
+    """剧本按名字找角色：同名会让后建的静默顶掉先建的。"""
+    first = _mk_role(base_url, "重名甲")
+    second = _mk_role(base_url, "重名乙")
+    try:
+        code, err = _json_req(base_url + "/api/roles", "POST", {"name": "重名甲"})
+        assert code == 400, err
+        assert "同名" in str(err.get("detail")), err
+
+        code, err = _json_req(base_url + "/api/roles/" + second["id"], "PUT", {"name": "重名甲"})
+        assert code == 400, err
+
+        # 改回自己的名字不算冲突
+        code, ok = _json_req(base_url + "/api/roles/" + second["id"], "PUT", {"name": "重名乙"})
+        assert code == 200, ok
+    finally:
+        _req(base_url + "/api/roles/" + first["id"], "DELETE")
+        _req(base_url + "/api/roles/" + second["id"], "DELETE")

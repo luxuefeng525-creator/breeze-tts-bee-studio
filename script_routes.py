@@ -19,11 +19,13 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
 
 import panel as P
 from tts_pipeline.script import (
     ARCHETYPES,
     EMOTIONS,
+    MOODS,
     estimate_seconds,
     parse_script,
 )
@@ -31,6 +33,8 @@ from tts_pipeline.script import (
 MAX_LINES = 100          # 超过这个行数提示分批（8 GB 卡约 20-30 分钟）
 DEFAULT_GAP = 0.35
 DEFAULT_CFG = 4.0
+EXPORT_PARTS = ("full", "lines", "timeline", "script")
+DEFAULT_PARTS = ",".join(EXPORT_PARTS)
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
@@ -78,14 +82,32 @@ def _voices_by_id() -> dict[str, dict]:
 
 
 def _role_instruction(role: dict | None, voices: dict[str, dict]) -> str:
-    """角色要下发的音色描述：音色自带的指令优先，其次原型预填的描述。"""
+    """角色要下发的音色描述：音色自带的指令优先，其次原型预填的描述。
+
+    角色自己的「口音 / 方言」拼在最末：它属于表演方式，不该盖掉音色本身。
+    已经包含同一句口音时不重复追加，否则每行指令都会越来越长。
+    """
     if not role:
         return ""
     voice = voices.get(role.get("voice_id") or "")
     if voice and (voice.get("instruction") or "").strip():
-        return voice["instruction"].strip()
-    arch = ARCHETYPES.get(role.get("archetype") or "custom") or {}
-    return (arch.get("instruction") or "").strip()
+        base = voice["instruction"].strip()
+    else:
+        arch = ARCHETYPES.get(role.get("archetype") or "custom") or {}
+        base = (arch.get("instruction") or "").strip()
+    accent = (role.get("accent") or "").strip()
+    if accent and accent not in base:
+        base = f"{base}，{accent}" if base else accent
+    return base
+
+
+def _role_speed(role: dict | None) -> float:
+    """角色语速倍率，越界值夹到 0.5–2.0（与单条合成的 speed 口径一致）。"""
+    try:
+        value = float((role or {}).get("speed") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(2.0, max(0.5, value))
 
 
 def _role_default_emotion(role: dict | None) -> str:
@@ -106,14 +128,43 @@ def parse_for(script: dict):
     voices = _voices_by_id()
     defaults = {name: _role_default_emotion(r) for name, r in roles.items()}
     instr = {name: _role_instruction(r, voices) for name, r in roles.items()}
-    moods = {s.get("name", ""): s.get("mood", "") for s in script.get("scenes") or []}
+    moods = {s["name"]: s.get("mood", "") for s in _norm_scenes(script.get("scenes"))}
     return parse_script(script.get("raw", ""), defaults, instr, moods)
 
 
+def _norm_scenes(raw) -> list[dict]:
+    """场次配置统一成 [{name, mood}]。
+
+    早期数据/第三方调用可能只传名字字符串，直接当 dict 用会在解析时炸；
+    这里一次性收口，重名只保留第一条（否则氛围下拉会重复出现）。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if isinstance(item, str):
+            name, mood = item.strip(), ""
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            mood = str(item.get("mood") or "").strip()
+        else:
+            continue
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "mood": mood})
+    return out
+
+
+def _scenes_view(names: list[str], configured) -> list[dict]:
+    """以解析出的场次为准，氛围从已存配置里取（作者可能刚加了新场次）。"""
+    known = {s["name"]: s.get("mood", "") for s in _norm_scenes(configured)}
+    return [{"name": n, "mood": known.get(n, "")} for n in names]
+
+
 def _line_hash(row: dict) -> str:
-    """一行音频的身份：文本、角色、音色、指令任何一项变了就不该复用旧音频。"""
+    """一行音频的身份：文本、角色、音色、指令、语速任何一项变了就不该复用旧音频。"""
     raw = "|".join(str(row.get(k) or "") for k in
-                   ("text", "role_id", "voice_id", "instruction"))
+                   ("text", "role_id", "voice_id", "instruction", "speed"))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -132,6 +183,7 @@ def _enriched(script: dict, parsed) -> list[dict]:
         role = roles.get(line.role_name)
         row["role_id"] = role["id"] if role else None
         row["voice_id"] = (role or {}).get("voice_id") or None
+        row["speed"] = _role_speed(role)
         row["hash"] = _line_hash(row)
         rec = stored.get(line.idx) or {}
         fresh = rec.get("status") == "done" and rec.get("hash") == row["hash"]
@@ -143,7 +195,8 @@ def _enriched(script: dict, parsed) -> list[dict]:
 
 
 def _synth_line(text: str, role: dict | None, instruction: str,
-                cfg: float, seed: int, out_path: Path) -> tuple[float, str]:
+                cfg: float, seed: int, out_path: Path,
+                speed: float = 1.0) -> tuple[float, str]:
     """合成一行到 out_path，返回 (时长秒, 错误串)。"""
     voices = _voices_by_id()
     fields: dict[str, str] = {"text": text, "seed": str(seed)}
@@ -179,9 +232,10 @@ def _synth_line(text: str, role: dict | None, instruction: str,
             detail = raw[:160].decode("utf-8", "replace")
         return 0.0, str(detail)[:200]
 
-    wav = P.pcm_to_wav(raw)
+    pcm = P.resample_pcm(raw, speed) if abs(speed - 1.0) > 1e-6 else raw
+    wav = P.pcm_to_wav(pcm)
     out_path.write_bytes(wav)
-    return len(raw) / (P.SAMPLE_RATE * 2), ""
+    return len(pcm) / (P.SAMPLE_RATE * 2), ""
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +305,8 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
             t_line = time.time()
             try:
                 dur, err = _synth_line(row["text"], role, row.get("instruction", ""),
-                                       cfg, seed, out_dir / name)
+                                       cfg, seed, out_dir / name,
+                                       float(row.get("speed") or 1.0))
             except Exception as exc:          # 单行异常不该终止整部剧
                 dur, err = 0.0, f"{type(exc).__name__}: {exc}"[:200]
 
@@ -372,29 +427,57 @@ def _concat(script_id: str, gap: float) -> None:
 # ---------------------------------------------------------------------------
 # 导出
 # ---------------------------------------------------------------------------
-def _export_zip(script: dict) -> bytes:
+def _export_parts(raw_path: str) -> tuple[list[str], list[str]]:
+    """从查询串解析要打包的内容，返回 (有效项, 非法项)。
+
+    默认打全套，与 PRD 的「四件套」一致；显式传 parts 时按勾选来，
+    这样用户只要音频、或者只要时间轴时不至于被塞一包用不上的文件。
+    """
+    query = urlparse(raw_path or "").query
+    raw = (parse_qs(query).get("parts") or [DEFAULT_PARTS])[0]
+    asked = [p.strip() for p in raw.split(",") if p.strip()]
+    valid = [p for p in asked if p in EXPORT_PARTS]
+    invalid = [p for p in asked if p not in EXPORT_PARTS]
+    return valid, invalid
+
+
+def _audio_available(script: dict) -> bool:
+    """只查不建目录：导出检查不该在磁盘上留下空目录。"""
+    out_dir = P.AUDIOS / "scripts" / script["id"]
+    if not out_dir.is_dir():
+        return False
+    if (out_dir / "full.wav").is_file():
+        return True
+    return any(out_dir.glob("line_*.wav"))
+
+
+def _export_zip(script: dict, parts: list[str]) -> bytes:
     buf = io.BytesIO()
-    out_dir = _lines_dir(script["id"])
+    out_dir = P.AUDIOS / "scripts" / script["id"]
     parsed = parse_for(script)
     rows = _enriched(script, parsed)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        full = out_dir / "full.wav"
-        if full.is_file():
-            zf.write(full, "full.wav")
-        for row in rows:
-            p = out_dir / f"line_{row['idx']:03d}.wav"
-            if p.is_file():
-                # 序号在前保证唯一：两个角色清洗后可能同名，重名条目
-                # 在部分解压器里会互相覆盖
-                safe = P._safe_name(row["role_name"])[:24] or "line"
-                zf.write(p, f"lines/{row['idx'] + 1:02d}_{safe}.wav")
-        csv_buf = io.StringIO()
-        w = csv.writer(csv_buf)
-        w.writerow(["序号", "角色", "情绪", "起", "止", "台词"])
-        for t in script.get("timeline") or []:
-            w.writerow([t["idx"], t["role"], t["emotion"], t["start"], t["end"], t["text"]])
-        zf.writestr("timeline.csv", "\ufeff" + csv_buf.getvalue())
-        zf.writestr("script.txt", script.get("raw", ""))
+        if "full" in parts:
+            full = out_dir / "full.wav"
+            if full.is_file():
+                zf.write(full, "full.wav")
+        if "lines" in parts:
+            for row in rows:
+                p = out_dir / f"line_{row['idx']:03d}.wav"
+                if p.is_file():
+                    # 序号在前保证唯一：两个角色清洗后可能同名，重名条目
+                    # 在部分解压器里会互相覆盖
+                    safe = P._safe_name(row["role_name"])[:24] or "line"
+                    zf.write(p, f"lines/{row['idx'] + 1:02d}_{safe}.wav")
+        if "timeline" in parts:
+            csv_buf = io.StringIO()
+            w = csv.writer(csv_buf)
+            w.writerow(["序号", "角色", "情绪", "起", "止", "台词"])
+            for t in script.get("timeline") or []:
+                w.writerow([t["idx"], t["role"], t["emotion"], t["start"], t["end"], t["text"]])
+            zf.writestr("timeline.csv", "\ufeff" + csv_buf.getvalue())
+        if "script" in parts:
+            zf.writestr("script.txt", script.get("raw", ""))
     return buf.getvalue()
 
 
@@ -411,8 +494,10 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         h._json({
             "archetypes": [{"key": k, **v} for k, v in ARCHETYPES.items()],
             "emotions": list(EMOTIONS.keys()),
+            "moods": [{"key": k, "instruction": v} for k, v in MOODS.items() if k],
             "max_lines": MAX_LINES,
             "default_gap": DEFAULT_GAP,
+            "default_parts": list(EXPORT_PARTS),
         })
         return True
 
@@ -454,11 +539,28 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not script:
             h._err("剧本不存在", 404)
             return True
-        data = _export_zip(script)
+        parts, invalid = _export_parts(getattr(h, "path", path))
+        if invalid:
+            h._err("不认识的导出内容：" + "、".join(invalid)
+                   + f"（可选 {'/'.join(EXPORT_PARTS)}）")
+            return True
+        if not parts:
+            h._err("请至少勾选一项要导出的内容")
+            return True
+        wants_audio = bool({"full", "lines"} & set(parts))
+        if wants_audio and not _audio_available(script):
+            h._err("这个剧本还没有合成好的音频，先点「合成全剧」再导出")
+            return True
+        data = _export_zip(script, parts)
+        title = (script.get("title") or "剧本").strip() or "剧本"
+        ascii_name = f"script_{sid}.zip"
         h.send_response(200)
         h.send_header("Content-Type", "application/zip")
+        # 中文文件名必须走 RFC 5987 的 filename*，否则部分浏览器下载成乱码；
+        # 同时保留 ASCII 兜底名给不认 filename* 的客户端。
         h.send_header("Content-Disposition",
-                      f'attachment; filename="script_{sid}.zip"')
+                      f"attachment; filename=\"{ascii_name}\"; "
+                      f"filename*=UTF-8''{quote(f'{title}.zip')}")
         h.send_header("Content-Length", str(len(data)))
         h.send_header("Cache-Control", "no-store")
         h.end_headers()
@@ -472,13 +574,12 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             h._err("剧本不存在", 404)
             return True
         parsed = parse_for(script)
-        moods = {s.get("name", ""): s.get("mood", "") for s in script.get("scenes") or []}
         h._json({
             **{k: script.get(k) for k in
                ("id", "title", "raw", "gap", "duration", "full_wav",
                 "timeline", "cfg_scale", "seed", "updated_at")},
             # scenes 以解析结果为准（作者可能刚加了 ## 场次），mood 从已存配置里取
-            "scenes": [{"name": n, "mood": moods.get(n, "")} for n in parsed.scenes],
+            "scenes": _scenes_view(parsed.scenes, script.get("scenes")),
             "lines": _enriched(script, parsed),
             "errors": parsed.errors,
             "estimate": round(estimate_seconds(parsed), 1),
@@ -495,12 +596,12 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             return True
         script = _find(sid) or {"id": sid, "raw": "", "scenes": []}
         probe = {**script, "raw": d.get("raw", script.get("raw", "")),
-                 "scenes": d.get("scenes", script.get("scenes") or [])}
+                 "scenes": _norm_scenes(d.get("scenes", script.get("scenes") or []))}
         parsed = parse_for(probe)
         h._json({
             "lines": _enriched(probe, parsed),
             "errors": parsed.errors,
-            "scenes": parsed.scenes,
+            "scenes": _scenes_view(parsed.scenes, probe.get("scenes")),
             "estimate": round(estimate_seconds(parsed), 1),
             "max_lines": MAX_LINES,
         })
@@ -600,7 +701,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         name = f"line_{idx:03d}.wav"
         dur, err = _synth_line(row["text"], role, row.get("instruction", ""),
                                float(script.get("cfg_scale") if script.get("cfg_scale") is not None else DEFAULT_CFG),
-                               int(script.get("seed") if script.get("seed") is not None else 42), out_dir / name)
+                               int(script.get("seed") if script.get("seed") is not None else 42),
+                               out_dir / name, row.get("speed") or 1.0)
         if err:
             h._err(err)
             return True
@@ -642,7 +744,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "id": "s_" + uuid.uuid4().hex[:10],
             "title": str(d.get("title") or "未命名剧本"),
             "raw": raw,
-            "scenes": d.get("scenes") or [],
+            "scenes": _norm_scenes(d.get("scenes")),
             "gap": float(d.get("gap") or DEFAULT_GAP),
             "cfg_scale": float(d.get("cfg_scale") or DEFAULT_CFG),
             "seed": int(d.get("seed") or 42),
@@ -676,7 +778,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if "raw" in d:
             script["raw"] = str(d["raw"] or "")   # 存成字符串：dict 会让解析时炸
         if "scenes" in d:
-            script["scenes"] = d["scenes"] if isinstance(d["scenes"], list) else []
+            script["scenes"] = _norm_scenes(d["scenes"])
         for k, cast in (("gap", float), ("cfg_scale", float), ("seed", int)):
             if k in d:
                 script[k] = cast(d[k])

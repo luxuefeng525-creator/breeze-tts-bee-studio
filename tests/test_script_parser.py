@@ -6,11 +6,13 @@ import pytest
 from tts_pipeline.script import (
     ARCHETYPES,
     EMOTIONS,
+    MOODS,
     NEUTRAL,
     build_instruction,
     emotion_phrase,
     estimate_seconds,
     infer_emotion,
+    mood_phrase,
     parse_script,
     resolve_emotion,
 )
@@ -179,3 +181,39 @@ def test_seven_base_archetypes_present():
 def test_every_archetype_default_emotion_is_known():
     for key, spec in ARCHETYPES.items():
         assert spec["default_emotion"] in EMOTIONS, key
+
+
+# ---------------------------------------------------------------- 场次氛围（F6）
+def test_scene_mood_becomes_instruction_prefix():
+    raw = "## 深夜书店\n雪峰：你来了。"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR, {"深夜书店": "紧张"})
+    ins = p.lines[0].instruction
+    # 氛围先于音色，模型先读情境再读人设
+    assert ins.index(MOODS["紧张"]) < ins.index(ROLE_INSTR["雪峰"])
+
+
+def test_scene_mood_does_not_leak_into_other_scenes():
+    raw = "## 甲\n雪峰：一。\n## 乙\n雪峰：二。"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR, {"甲": "安静"})
+    assert MOODS["安静"] in p.lines[0].instruction
+    assert MOODS["安静"] not in p.lines[1].instruction
+
+
+def test_free_form_scene_mood_passes_through():
+    raw = "## 雨夜\n雪峰：走吧。"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR, {"雨夜": "雨声很大，压低声音"})
+    assert "雨声很大" in p.lines[0].instruction
+
+
+def test_unknown_mood_key_is_treated_as_free_text():
+    assert mood_phrase("不要用华丽的语气") == "不要用华丽的语气"
+    assert mood_phrase("") == ""
+    assert mood_phrase("安静") == MOODS["安静"]
+
+
+def test_line_emotion_still_wins_over_scene_mood():
+    raw = "## 甲\n雪峰[愤怒]：你再说一遍？"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR, {"甲": "安静"})
+    ins = p.lines[0].instruction
+    # 两者都在，但情绪排在氛围之后、音色之后——行内标注不被氛围盖掉
+    assert MOODS["安静"] in ins and emotion_phrase("愤怒") in ins
