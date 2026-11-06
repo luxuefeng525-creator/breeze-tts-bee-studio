@@ -65,6 +65,14 @@ def _json_req(url, method, payload):
     return _req(url, method, json.dumps(payload).encode(), "application/json")
 
 
+def _req_with_headers(url, method="GET", body=None, ctype=None, timeout=60):
+    r = urllib.request.Request(url, data=body, method=method)
+    if ctype:
+        r.add_header("Content-Type", ctype)
+    with urllib.request.urlopen(r, timeout=timeout) as resp:
+        return resp.status, resp.read(), dict(resp.headers)
+
+
 def _upstream_online(base_url) -> bool:
     code, _ = _req(base_url + "/api/model")
     return code == 200
@@ -228,6 +236,11 @@ def test_synth_job_lifecycle_and_concat(base_url):
         # 单行重录只动那一行
         code, redo = _json_req(base_url + f"/api/scripts/{s['id']}/lines/1/redo", "POST", {})
         assert code == 200 and redo.get("duration"), redo
+        # 重录后这一行必须仍是 done：漏写 hash 会让它变回 pending，
+        # 音频在盘上却听不到（试听按钮灰、整轨里也没它）
+        code, after = _req(base_url + "/api/scripts/" + s["id"])
+        assert after["lines"][1]["status"] == "done", after["lines"][1]
+        assert after["lines"][1]["wav"], after["lines"][1]
     finally:
         _req(base_url + "/api/scripts/" + s["id"], "DELETE")
         _req(base_url + "/api/roles/" + role["id"], "DELETE")
@@ -392,23 +405,116 @@ def test_scene_mood_roundtrip_and_instruction(base_url):
         _req(base_url + "/api/voices/" + voice["id"], "DELETE")
 
 
+def test_scene_mood_survives_temporary_scene_removal(base_url):
+    """作者临时删掉/改名场次再改回来，已配好的氛围不该在普通保存里丢。"""
+    s = _mk_script(base_url, "## 深夜书店\n旁白：你来了。")
+    try:
+        code, _ = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "scenes": [{"name": "深夜书店", "mood": "安静"}],
+        })
+        assert code == 200
+
+        # 场次行暂时消失（改稿中途），保存一次
+        code, _ = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "raw": "旁白：你来了。", "scenes": [],
+        })
+        assert code == 200
+        # 场次改回来，配置要能跟着回来
+        code, d = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "raw": "## 深夜书店\n旁白：你来了。", "scenes": [],
+        })
+        assert code == 200, d
+        assert d["scenes"][0]["mood"] == "安静", d["scenes"]
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
 # ---------------------------------------------------------------- F7 导出选项
-def test_export_selects_requested_parts(base_url):
-    """只勾文本时不打包音频；要音频但没合成则明确报错，而不是给空包。"""
+def _seed_audio_files(script_id: str) -> None:
+    """给每一行写占位 WAV 并拼一次整轨。
+
+    只测「导出怎么打包」时不值得跑推理：按真实流程把行状态落成 done 再
+    `_concat`，得到与合成完成后完全一致的磁盘结构。
+    """
+    import script_routes as SR
+
+    script = next(s for s in P._load("scripts.json") if s["id"] == script_id)
+    rows = SR._enriched(script, SR.parse_for(script))
+    out_dir = P.AUDIOS / "scripts" / script_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for row in rows:
+        name = f"line_{row['idx']:03d}.wav"
+        (out_dir / name).write_bytes(P.pcm_to_wav(b"\x00" * P.SAMPLE_RATE))
+        SR._persist_line(script_id, row["idx"], {
+            "status": "done",
+            "wav": f"audio/scripts/{script_id}/{name}",
+            "hash": row["hash"],
+            "duration": 0.5,
+        })
+    SR._concat(script_id, 0.35)
+
+
+def test_export_only_packs_requested_parts(base_url):
+    """勾了什么就只给什么：盘上有音频也不能塞进只要文本的包。"""
+    s = _mk_script(base_url, "旁白：第一句。\n旁白：第二句。", title="第一幕/雨夜")
+    try:
+        _seed_audio_files(s["id"])
+
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script", timeout=30)
+        assert code == 200 and blob[:2] == b"PK", (code, blob[:40])
+        assert zipfile.ZipFile(io.BytesIO(blob)).namelist() == ["script.txt"]
+
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=full,lines",
+                          timeout=30)
+        names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
+        assert "full.wav" in names, names
+        assert len([n for n in names if n.startswith("lines/")]) == 2, names
+        assert "script.txt" not in names and "timeline.csv" not in names, names
+
+        # 中文标题走 RFC 5987；标题里的 "/" 必须被编码，否则浏览器整段忽略
+        code, _, headers = _req_with_headers(
+            base_url + f"/api/scripts/{s['id']}/export?parts=timeline")
+        cd = headers.get("Content-Disposition", "")
+        assert "filename*=UTF-8''" in cd, cd
+        assert "%2F" in cd and "%E9%9B%A8%E5%A4%9C" in cd, cd
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+def test_export_blocks_stale_full_audio(base_url):
+    """台词改了但那一行没重做时，整轨与时间轴是上一版的，必须拒绝导出。"""
+    s = _mk_script(base_url, "旁白：第一句。\n旁白：第二句。")
+    try:
+        _seed_audio_files(s["id"])
+        code, _ = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "raw": "旁白：改过的第一句。\n旁白：第二句。",
+        })
+        assert code == 200, _
+
+        code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=full", timeout=30)
+        assert code == 400, (code, err)
+        assert "重做" in str(err.get("detail")), err
+
+        # 只要文本仍然可以导出（文本永远是最新的）
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script", timeout=30)
+        assert code == 200 and blob[:2] == b"PK"
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+def test_export_rejects_audio_when_not_synthesized(base_url):
+    """要音频却没合成：明确报错，而不是给一个只有文本的包。"""
     s = _mk_script(base_url, "旁白：只有文本。")
     try:
-        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script,timeline",
-                          timeout=30)
-        assert code == 200 and blob[:2] == b"PK", (code, blob[:40])
-        names = zipfile.ZipFile(io.BytesIO(blob)).namelist()
-        assert names == ["timeline.csv", "script.txt"], names
-
         code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=full", timeout=30)
         assert code == 400, (code, err)
         assert "合成" in str(err.get("detail")), err
 
         code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=video", timeout=30)
         assert code == 400, (code, err)
+
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script", timeout=30)
+        assert code == 200 and zipfile.ZipFile(io.BytesIO(blob)).namelist() == ["script.txt"]
     finally:
         _req(base_url + "/api/scripts/" + s["id"], "DELETE")
 

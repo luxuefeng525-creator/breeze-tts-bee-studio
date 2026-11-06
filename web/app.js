@@ -1652,7 +1652,8 @@
       const stat = l.status === "done" ? "done" : l.status === "failed" ? "failed" : "pending";
       const mark = stat === "done" ? "✓" : stat === "failed" ? "✕" : "";
       return `
-        <div class="script-line ${stat}" data-line-idx="${l.idx}">
+        <div class="script-line ${stat}" data-line-idx="${l.idx}"
+             title="${esc(l.instruction ? "下发的指令：" + l.instruction : "没有额外指令（用默认语气）")}">
           <span class="line-no">${String(l.idx + 1).padStart(2, "0")}</span>
           <span class="line-role" style="--h:${hue}">${esc(l.role_name)}</span>
           <span class="line-emotion" title="情绪来源：${esc(EMOTION_SOURCE[l.emotion_source] || "")}">
@@ -1679,7 +1680,7 @@
   }
 
   // 场次氛围：以解析出的场次为准，一行一个下拉。改了立刻保存并重新解析，
-  // 行列表里的指令跟着变——用户能马上看到「这一场」到底影响了什么。
+  // 行列表随新指令重算（悬停某一行能看到实际下发的指令）。
   function renderSceneMoods() {
     const box = $("sceneMoods");
     const list = $("sceneMoodList");
@@ -1732,28 +1733,41 @@
     _parseTimer = setTimeout(previewScriptNow, 350);
   }
 
-  async function saveScript(quiet) {
-    if (!S.current) return false;
-    try {
-      const d = await api("/api/scripts/" + S.current.id, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          raw: $("scriptRaw").value,
-          title: $("scriptTitleInput").value.trim() || "未命名剧本",
-          gap: parseFloat($("scriptGap").value) || 0.35,
-          scenes: S.scenes || [],
-        }),
-      });
-      S.current = { ...S.current, ...d };
-      if (d.scenes) S.scenes = d.scenes;
-      $("scriptTitle").textContent = S.current.title;
-      if (!quiet) toast("已保存");
-      refreshScripts();
-      return true;
-    } catch (e) {
-      toast("保存失败：" + e.message, true);
-      return false;
-    }
+  // 保存串行化：失焦保存与氛围下拉的 change 几乎同时触发，两个 PUT 都
+  // 整数组写 scenes，后到的旧值会把刚选的氛围覆盖掉。排队 + 执行时才读
+  // DOM，保证发出去的是最后一版。
+  let _saveChain = Promise.resolve();
+
+  function saveScript(quiet) {
+    if (!S.current) return Promise.resolve(false);
+    const id = S.current.id;
+    const run = async () => {
+      try {
+        const d = await api("/api/scripts/" + id, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            raw: $("scriptRaw").value,
+            title: $("scriptTitleInput").value.trim() || "未命名剧本",
+            gap: parseFloat($("scriptGap").value) || 0.35,
+            scenes: S.scenes || [],
+          }),
+        });
+        // 用户可能已经切到别的剧本：只更新同一个剧本的界面状态
+        if (S.current && S.current.id === id) {
+          S.current = { ...S.current, ...d };
+          if (d.scenes) S.scenes = d.scenes;
+          $("scriptTitle").textContent = S.current.title;
+        }
+        if (!quiet) toast("已保存");
+        refreshScripts();
+        return true;
+      } catch (e) {
+        toast("保存失败：" + e.message, true);
+        return false;
+      }
+    };
+    _saveChain = _saveChain.then(run, run);
+    return _saveChain;
   }
 
   async function newScript() {
@@ -1887,10 +1901,13 @@
     full: "expFull", lines: "expLines", timeline: "expTimeline", script: "expScript",
   };
 
-  function openExportDialog() {
+  async function openExportDialog() {
     if (!S.current) return;
+    // 导出读的是磁盘上的内容：先把当前编辑存进去，否则 script.txt 是上一版
+    if (!(await saveScript(true))) return;
     const hasFull = !!(S.current.full_wav);
     const hasLines = (S.lines || []).some((l) => l.wav);
+    const pending = (S.lines || []).filter((l) => l.status !== "done").length;
     const setOpt = (key, ok) => {
       const el = $(EXPORT_IDS[key]);
       el.disabled = !ok;
@@ -1898,28 +1915,60 @@
       const row = el.closest(".opt-row");
       if (row) row.classList.toggle("is-off", !ok);
     };
-    setOpt("full", hasFull);
+    // 有行待重做时整轨与时间轴都是上一版的：宁可禁掉，也不交付文不对音的文件
+    const freshFull = hasFull && pending === 0;
+    setOpt("full", freshFull);
     setOpt("lines", hasLines);
-    // 时间轴由拼接时算出：没有整轨就没有时间轴，勾了只会得到一行表头
-    setOpt("timeline", hasFull);
+    // 时间轴由拼接时算出：没有整轨就没有可用的时间轴
+    setOpt("timeline", freshFull);
     setOpt("script", true);
 
     const rows = (S.lines || []).length;
-    $("exportSub").textContent = hasFull
-      ? `${rows} 行 · 整轨 ${Number(S.current.duration || 0).toFixed(1)} 秒 · 勾选要放进 ZIP 的内容`
-      : "这个剧本还没合成，音频与时间轴暂时不可选；现在只能导出剧本文本。";
+    $("exportSub").textContent = pending
+      ? `还有 ${pending} 行没合成或台词改过还没重做。整轨与时间轴都是上一版的，先「合成全剧」再导出。`
+      : (hasFull
+          ? `${rows} 行 · 整轨 ${Number(S.current.duration || 0).toFixed(1)} 秒 · 勾选要放进 ZIP 的内容`
+          : "这个剧本还没合成，音频与时间轴暂时不可选；现在只能导出剧本文本。");
     $("exportDlg").showModal();
   }
 
-  function confirmExport() {
+  async function confirmExport() {
     if (!S.current) return;
     const parts = Object.keys(EXPORT_IDS).filter((k) => {
       const el = $(EXPORT_IDS[k]);
       return el.checked && !el.disabled;
     });
     if (!parts.length) { toast("至少勾一项要导出的内容", true); return; }
-    $("exportDlg").close();
-    location.href = `/api/scripts/${S.current.id}/export?parts=${parts.join(",")}`;
+    const btn = $("exportConfirmBtn");
+    btn.disabled = true;
+    try {
+      // 用 fetch 而不是 location.href：后者在 4xx 时会把 JSON 错误当页面渲染，
+      // 用户看到一屏 {"detail": "…"}，还不知道怎么回去。
+      const resp = await fetch(`/api/scripts/${S.current.id}/export?parts=${parts.join(",")}`);
+      if (!resp.ok) {
+        let msg = `导出失败（HTTP ${resp.status}）`;
+        try {
+          const j = await resp.json();
+          if (j && j.detail) msg = j.detail;
+        } catch (e) { /* 非 JSON 响应，保留状态码 */ }
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${($("scriptTitleInput").value.trim() || "剧本")}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      $("exportDlg").close();
+      toast("已导出 ZIP");
+    } catch (e) {
+      toast(e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ---------------------------------------------------------------- 原型建音色

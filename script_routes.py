@@ -441,34 +441,48 @@ def _export_parts(raw_path: str) -> tuple[list[str], list[str]]:
     return valid, invalid
 
 
-def _audio_available(script: dict) -> bool:
-    """只查不建目录：导出检查不该在磁盘上留下空目录。"""
+def _export_plan(script: dict, parts: list[str]) -> tuple[list[dict], str]:
+    """检查每个 part 是否真的可导出，返回 (已完成的行, 错误说明)。
+
+    「有没有音频」是个全局布尔，拿它放行会让用户导出空的那一半：只有整轨时
+    parts=lines 会得到空的 lines/，只有分行时 parts=full 会没有 full.wav。
+    更要紧的是**旧音频**：改完台词后 full.wav 与 timeline 还是上一版，而
+    script.txt 是新文本，三份文件互相矛盾，用户完全看不出来。
+    """
+    rows = _enriched(script, parse_for(script))
+    done = [r for r in rows if r["status"] == "done" and r.get("wav")]
+    pending = len(rows) - len(done)
     out_dir = P.AUDIOS / "scripts" / script["id"]
-    if not out_dir.is_dir():
-        return False
-    if (out_dir / "full.wav").is_file():
-        return True
-    return any(out_dir.glob("line_*.wav"))
+
+    if "full" in parts and not (out_dir / "full.wav").is_file():
+        return done, "还没有整轨音频，先点「合成全剧」再导出"
+    if "lines" in parts and not done:
+        return done, "还没有合成好的分行音频，先点「合成全剧」再导出"
+    if ("full" in parts or "timeline" in parts) and pending:
+        return done, (f"还有 {pending} 行没合成，或台词改过还没重做；"
+                      "整轨与时间轴都是上一版的，先合成再导出")
+    return done, ""
 
 
-def _export_zip(script: dict, parts: list[str]) -> bytes:
+def _export_zip(script: dict, parts: list[str], rows: list[dict]) -> bytes:
     buf = io.BytesIO()
     out_dir = P.AUDIOS / "scripts" / script["id"]
-    parsed = parse_for(script)
-    rows = _enriched(script, parsed)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if "full" in parts:
             full = out_dir / "full.wav"
             if full.is_file():
                 zf.write(full, "full.wav")
         if "lines" in parts:
+            # 只写状态为 done 的行：磁盘上残留的旧 line_XXX.wav 属于上一版
+            # 台词，混进导出包就是文不对音。
             for row in rows:
                 p = out_dir / f"line_{row['idx']:03d}.wav"
-                if p.is_file():
-                    # 序号在前保证唯一：两个角色清洗后可能同名，重名条目
-                    # 在部分解压器里会互相覆盖
-                    safe = P._safe_name(row["role_name"])[:24] or "line"
-                    zf.write(p, f"lines/{row['idx'] + 1:02d}_{safe}.wav")
+                if not p.is_file():
+                    continue
+                # 序号在前保证唯一：两个角色清洗后可能同名，重名条目
+                # 在部分解压器里会互相覆盖
+                safe = P._safe_name(row["role_name"])[:24] or "line"
+                zf.write(p, f"lines/{row['idx'] + 1:02d}_{safe}.wav")
         if "timeline" in parts:
             csv_buf = io.StringIO()
             w = csv.writer(csv_buf)
@@ -547,20 +561,21 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not parts:
             h._err("请至少勾选一项要导出的内容")
             return True
-        wants_audio = bool({"full", "lines"} & set(parts))
-        if wants_audio and not _audio_available(script):
-            h._err("这个剧本还没有合成好的音频，先点「合成全剧」再导出")
+        rows, why = _export_plan(script, parts)
+        if why:
+            h._err(why)
             return True
-        data = _export_zip(script, parts)
-        title = (script.get("title") or "剧本").strip() or "剧本"
+        data = _export_zip(script, parts, rows)
+        title = (script.get("title") or "剧本").strip()[:40] or "剧本"
         ascii_name = f"script_{sid}.zip"
         h.send_response(200)
         h.send_header("Content-Type", "application/zip")
         # 中文文件名必须走 RFC 5987 的 filename*，否则部分浏览器下载成乱码；
         # 同时保留 ASCII 兜底名给不认 filename* 的客户端。
+        # safe="" 不能省：标题里的 "/" 留在 filename* 里会让浏览器整段忽略。
         h.send_header("Content-Disposition",
                       f"attachment; filename=\"{ascii_name}\"; "
-                      f"filename*=UTF-8''{quote(f'{title}.zip')}")
+                      f"filename*=UTF-8''{quote(f'{title}.zip', safe='')}")
         h.send_header("Content-Length", str(len(data)))
         h.send_header("Cache-Control", "no-store")
         h.end_headers()
@@ -707,10 +722,13 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             h._err(err)
             return True
         rel = f"audio/scripts/{sid}/{name}"
+        # 必须一起写 hash：续做与行状态都靠它判定，缺了会让刚重做好的行
+        # 在下次读取时又变回「未合成」，音频在盘上却听不到。
         _persist_line(sid, idx, {"status": "done", "wav": rel,
                                  "duration": round(dur, 3),
                                  "emotion": row.get("emotion"),
-                                 "role_name": row["role_name"], "text": row["text"]})
+                                 "role_name": row["role_name"], "text": row["text"],
+                                 "hash": row.get("hash", "")})
         _concat(sid, float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP))
         h._json({"ok": True, "idx": idx, "duration": round(dur, 3), "wav": rel})
         return True
@@ -778,7 +796,12 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if "raw" in d:
             script["raw"] = str(d["raw"] or "")   # 存成字符串：dict 会让解析时炸
         if "scenes" in d:
-            script["scenes"] = _norm_scenes(d["scenes"])
+            # 合并而不是整体替换：作者临时删掉或改名一行 `## 场次` 时，
+            # 那个场次配好的氛围不该在普通保存里被永久丢掉（改回来还能找回）。
+            merged = {s["name"]: s.get("mood", "") for s in _norm_scenes(script.get("scenes"))}
+            for s in _norm_scenes(d["scenes"]):
+                merged[s["name"]] = s.get("mood", "")
+            script["scenes"] = [{"name": n, "mood": m} for n, m in merged.items()]
         for k, cast in (("gap", float), ("cfg_scale", float), ("seed", int)):
             if k in d:
                 script[k] = cast(d[k])

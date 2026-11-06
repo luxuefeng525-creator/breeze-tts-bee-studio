@@ -1999,9 +1999,14 @@ class Handler(BaseHTTPRequestHandler):
             # 让「按原型建音色」一次 POST 就能落库，不必前端拼文案。
             arch = str(d.get("archetype") or "").strip()
             instruction = str(d.get("instruction") or "").strip()
-            if not instruction and arch:
+            if arch:
                 from tts_pipeline.script import ARCHETYPES
-                instruction = ((ARCHETYPES.get(arch) or {}).get("instruction") or "").strip()
+                if arch not in ARCHETYPES:
+                    # 拼错的原型会建出一个「没有音色描述」的空壳音色，
+                    # 用户以为选了少年女，实际听到的是默认发音人。
+                    return self._err(f"不认识的原型「{arch}」")
+                if not instruction:
+                    instruction = (ARCHETYPES[arch].get("instruction") or "").strip()
             voice = {
                 "id": _new_id("v"),
                 "name": d["name"],
@@ -2092,8 +2097,6 @@ class Handler(BaseHTTPRequestHandler):
             # 剧本按名字找角色：同名角色会让后建的那个静默顶掉前一个，
             # 作者以为在改"雪峰"，实际合成用的是另一个人的音色。
             wanted = str(d["name"]).strip()
-            if any(str(r.get("name") or "").strip() == wanted for r in _load("roles.json")):
-                return self._err(f"已经有同名角色「{wanted}」了，换一个名字，或直接编辑那个角色")
             try:
                 speed = float(d.get("speed") or 1.0)
             except (TypeError, ValueError):
@@ -2115,7 +2118,18 @@ class Handler(BaseHTTPRequestHandler):
                 "defaults": d.get("defaults") or {"cfg_scale": 4, "seed": 42},
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            _update_json("roles.json", lambda it: it.append(role))
+            # 查重放进 mutator：先查后写会让两个并发请求都通过检查，
+            # 最后写进两条同名角色——正是这次要根治的问题。
+            def _add(items, _role=role):
+                if any(str(r.get("name") or "").strip() == _role["name"] for r in items):
+                    raise _ValidationError(
+                        f"已经有同名角色「{_role['name']}」了，换一个名字，或直接编辑那个角色")
+                items.append(_role)
+
+            try:
+                _update_json("roles.json", _add)
+            except _ValidationError as exc:
+                return self._err(str(exc))
             self._json(role, 201)
             return
 
@@ -2531,23 +2545,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/roles/"):
             rid = path.rsplit("/", 1)[-1]
-            # 改名也要查重：剧本按名字找角色，重名等于让一行的音色随机漂移
-            if "name" in d:
-                wanted = str(d["name"]).strip()
-                if not wanted:
-                    return self._err("角色名不能为空")
-                if any(r["id"] != rid and str(r.get("name") or "").strip() == wanted
-                       for r in _load("roles.json")):
-                    return self._err(f"已经有同名角色「{wanted}」了")
-            def _apply(items, _rid=rid):
+            wanted = str(d.get("name") or "").strip() if "name" in d else None
+            if wanted is not None and not wanted:
+                return self._err("角色名不能为空")
+
+            def _apply(items, _rid=rid, _name=wanted):
                 for r in items:
                     if r["id"] == _rid:
+                        # 改名查重也放在锁内，否则两个并发改名都能通过
+                        if _name and any(x["id"] != _rid
+                                         and str(x.get("name") or "").strip() == _name
+                                         for x in items):
+                            raise _ValidationError(f"已经有同名角色「{_name}」了")
                         for k in ("description", "voice_id", "defaults",
                                   "archetype", "default_emotion", "accent"):
                             if k in d:
                                 r[k] = d[k]
-                        if "name" in d:
-                            r["name"] = str(d["name"]).strip()
+                        if _name:
+                            r["name"] = _name
                         if "speed" in d:
                             try:
                                 r["speed"] = min(2.0, max(0.5, float(d["speed"])))
@@ -2556,7 +2571,10 @@ class Handler(BaseHTTPRequestHandler):
                         return {"found": r}
                 return {"found": None}
 
-            res = _update_json("roles.json", _apply)
+            try:
+                res = _update_json("roles.json", _apply)
+            except _ValidationError as exc:
+                return self._err(str(exc))
             if not res.get("found"):
                 return self._err("role not found", 404)
             return self._json(res["found"])
