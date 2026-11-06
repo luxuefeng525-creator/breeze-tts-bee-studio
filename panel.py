@@ -30,7 +30,9 @@ PANEL_PORT = int(os.environ.get("BREEZE_PANEL_PORT") or 7861)
 API_BASE = os.environ.get("BREEZE_API_BASE") or "http://127.0.0.1:7860"  # 端口已冻结
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data"
+# 默认跟着代码走；允许覆写是为了让并行演练实例能读到同一份数据副本，
+# 否则金丝雀实例看到的是空库，回滚演练验证不到真实音色与历史。
+DATA = Path(os.environ.get("BREEZE_DATA") or (ROOT / "data")).resolve()
 REFS = DATA / "refs"
 AUDIOS = DATA / "audio"
 for d in (DATA, REFS, AUDIOS):
