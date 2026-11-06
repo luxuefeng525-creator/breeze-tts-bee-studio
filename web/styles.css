@@ -1,13 +1,14 @@
   @font-face{
     font-family:"Noto Sans SC";
-    src:local("Noto Sans SC"), url("/fonts/NotoSansSC-VF.ttf") format("truetype");
+    /* 仓库不含字体文件：引用不存在的路径会 404，浏览器随即静默退化 */
+    src:local("Noto Sans SC");
     font-weight:100 900;
     font-style:normal;
     font-display:swap;
   }
   @font-face{
     font-family:"Noto Serif SC";
-    src:local("Noto Serif SC"), url("/fonts/NotoSerifSC-VF.ttf") format("truetype");
+    src:local("Noto Serif SC");
     font-weight:200 900;
     font-style:normal;
     font-display:swap;

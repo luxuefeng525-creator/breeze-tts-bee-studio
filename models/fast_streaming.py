@@ -283,7 +283,8 @@ class FastBreezeStreamingRuntime:
                 # 绕开 torch 2.9 + Windows 静态启动器的 triton 初始化 bug。
                 compile_layers=(
                     self._fast_depth_decoder
-                    and not os.environ.get("BREEZE_DEPTH_GRAPH_NO_COMPILE")
+                    and os.environ.get("BREEZE_DEPTH_GRAPH_NO_COMPILE", "0")
+                    .strip().lower() not in ("1", "true", "yes", "on")
                 ),
                 batch_size=depth_bucket_sizes[0],
                 bucket_sizes=depth_bucket_sizes,

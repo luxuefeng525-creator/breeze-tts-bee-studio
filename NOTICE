@@ -48,11 +48,17 @@ non-commercial purposes.
 
 THIRD-PARTY COMPONENTS
 ----------------------
-Runtime dependencies are permissively licensed and introduce no copyleft
-obligation: torch and torchaudio (BSD-3-Clause), transformers (Apache-2.0),
-numpy (BSD-3-Clause and others), fastapi (MIT), uvicorn (BSD-3-Clause),
-soundfile (BSD-3-Clause), qwen-tts (Apache-2.0), python-multipart
-(Apache-2.0), huggingface-hub (Apache-2.0), pytest (MIT).
+The Python packages this project depends on are permissively licensed: torch
+and torchaudio (BSD-3-Clause), transformers (Apache-2.0), numpy (BSD-3-Clause
+and others), fastapi (MIT), uvicorn (BSD-3-Clause), soundfile (BSD-3-Clause),
+qwen-tts (Apache-2.0), python-multipart (Apache-2.0), huggingface-hub
+(Apache-2.0), pytest (MIT).
+
+One caveat, because "permissive" describes the Python code and not always what
+ships inside a wheel: the soundfile wheel bundles libsndfile, which is
+LGPL-2.1. If you redistribute a packaged environment instead of installing
+from PyPI, treat libsndfile as LGPL and comply with it (notice, and the
+relinking requirement). Nothing in this repository links against it.
 
 RESPONSIBILITY FOR INPUTS AND VOICES
 ------------------------------------
