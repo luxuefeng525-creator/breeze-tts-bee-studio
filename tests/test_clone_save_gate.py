@@ -172,3 +172,73 @@ def test_placeholder_transcript_blocks_synthesis(base_url):
     assert "占位符" in err.get("detail", ""), err
 
     _req(base_url + "/api/voices/" + vid, "DELETE")
+
+
+def _multipart_fields(fields):
+    """按字段拼 multipart 请求体。"""
+    b = uuid.uuid4().hex
+    crlf = "\r\n"
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{b}{crlf}Content-Disposition: form-data; name=\"{k}\"{crlf}{crlf}{v}{crlf}")
+    parts.append(f"--{b}--{crlf}")
+    return "".join(parts).encode(), f"multipart/form-data; boundary={b}"
+
+
+def test_role_without_voice_is_rejected(base_url):
+    """角色没绑音色时必须明确拒绝，不能静默回落到默认发音人。
+
+    回归：用户选「雪峰」点合成，实际听到的是通用音色（cfg_used=1、
+    instruction_used 为空），表现就是"角色不能生成语音"，而系统毫无提示。
+    三个合成端点都要拦，且错误信息必须点名角色。
+    """
+    try:
+        with urllib.request.urlopen(base_url + "/api/model", timeout=5):
+            pass
+    except Exception:
+        pytest.skip("面板不在线")
+
+    code, role = _req(base_url + "/api/roles", "POST", json.dumps({
+        "name": "无音色角色", "description": "回归用例",
+    }).encode(), "application/json")
+    assert code in (200, 201), role
+    rid = role["id"]
+    assert not (role.get("voice_id") or "").strip()
+
+    try:
+        # 三个端点都要拦（守卫在转发之前返回，不会真的连上游）
+        for path in ("/api/synthesize", "/api/synthesize/stream",
+                     "/api/synthesize/batch"):
+            body, ctype = _multipart_fields({
+                "text": "角色守卫测试",
+                "texts": "[\"角色守卫测试\"]",
+                "role_id": rid,
+            })
+            code, err = _req(base_url + path, "POST", body, ctype, timeout=60)
+            assert code == 400, (path, code, err)
+            detail = str(err.get("detail", ""))
+            assert "还没绑定音色" in detail and "无音色角色" in detail, (path, detail)
+
+        # 指向已删除的角色同样要拦
+        body, ctype = _multipart_fields({"text": "角色守卫测试", "role_id": "r_nonexistent"})
+        code, err = _req(base_url + "/api/synthesize", "POST", body, ctype, timeout=60)
+        assert code == 400, (code, err)
+        assert "角色已不存在" in str(err.get("detail", "")), err
+
+        # 显式 voice_id 优先：角色没绑音色也必须放行（自带音色，不依赖已有数据）
+        code, v = _req(base_url + "/api/voices", "POST", json.dumps({
+            "name": "守卫测试音色", "type": "design", "instruction": "沉稳男声",
+        }).encode(), "application/json")
+        assert code in (200, 201), v
+        try:
+            body, ctype = _multipart_fields({
+                "text": "显式音色优先", "role_id": rid, "voice_id": v["id"],
+                "instruction": "沉稳旁白", "cfg_scale": "4", "seed": "42",
+            })
+            code, res = _req(base_url + "/api/synthesize", "POST", body, ctype, timeout=300)
+            assert code == 200, (code, res)
+            assert res.get("wav_url"), res
+        finally:
+            _req(base_url + "/api/voices/" + v["id"], "DELETE")
+    finally:
+        _req(base_url + "/api/roles/" + rid, "DELETE")

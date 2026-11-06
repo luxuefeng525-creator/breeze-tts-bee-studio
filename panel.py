@@ -2013,13 +2013,23 @@ class Handler(BaseHTTPRequestHandler):
                     if v["id"] == voice_id:
                         voice = v
                         break
+                if voice is None:
+                    return self._err(f"指定的音色不存在（{voice_id}），请重新选择")
             if role_id and not voice:
-                for r in _load("roles.json"):
-                    if r["id"] == role_id and r.get("voice_id"):
-                        for v in _load("voices.json"):
-                            if v["id"] == r["voice_id"]:
-                                voice = v
-                                break
+                role_rec = next((r for r in _load("roles.json")
+                                 if r["id"] == role_id), None)
+                if role_rec is None:
+                    return self._err("指定的角色已不存在，请重新选择")
+                # 角色没绑音色时不能静默回落到默认发音人：用户以为在听「雪峰」，
+                # 实际听到的是通用音色，表现就是"角色不能生成语音"。
+                if not (role_rec.get("voice_id") or "").strip():
+                    return self._err(
+                        f"角色「{role_rec.get('name', '')}」还没绑定音色："
+                        "点该角色的编辑按钮选一个音色，或取消角色改用默认发音人")
+                for v in _load("voices.json"):
+                    if v["id"] == role_rec["voice_id"]:
+                        voice = v
+                        break
             # W2-3c: 文本规范化 + 发音词典（norm=2）——只应调用一次
             _scope = api_fields.get("voice_id", "") or ""
             _new_text, _text_changes = _apply_text_pipeline(
@@ -2095,10 +2105,23 @@ class Handler(BaseHTTPRequestHandler):
             voices = {v["id"]: v for v in _load("voices.json")}
             roles = {r["id"]: r for r in _load("roles.json")}
             role = roles.get(fields.get("role_id", ""))
+            # 指定了角色却查不到：可能刚被删掉，同样不能静默回落
+            if fields.get("role_id") and role is None:
+                return self._err("指定的角色已不存在，请重新选择")
+            # 显式指定了 voice_id 就以它为准；只选了角色而角色没绑音色则明确拒绝，
+            # 否则会安静地用默认发音人，用户无从判断角色到底生效没有。
+            if role is not None and not fields.get("voice_id") \
+                    and not (role.get("voice_id") or "").strip():
+                return self._err(
+                    f"角色「{role.get('name', '')}」还没绑定音色："
+                    "点该角色的编辑按钮选一个音色，或取消角色改用默认发音人")
             voice = None
             vid = fields.get("voice_id") or (role or {}).get("voice_id")
             if vid:
                 voice = voices.get(vid)
+            if fields.get("voice_id") and voice is None:
+                return self._err(
+                    f"指定的音色不存在（{fields.get('voice_id')}），请重新选择")
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()
@@ -2211,10 +2234,23 @@ class Handler(BaseHTTPRequestHandler):
             voices = {v["id"]: v for v in _load("voices.json")}
             roles = {r["id"]: r for r in _load("roles.json")}
             role = roles.get(fields.get("role_id", ""))
+            # 指定了角色却查不到：可能刚被删掉，同样不能静默回落
+            if fields.get("role_id") and role is None:
+                return self._err("指定的角色已不存在，请重新选择")
+            # 显式指定了 voice_id 就以它为准；只选了角色而角色没绑音色则明确拒绝，
+            # 否则会安静地用默认发音人，用户无从判断角色到底生效没有。
+            if role is not None and not fields.get("voice_id") \
+                    and not (role.get("voice_id") or "").strip():
+                return self._err(
+                    f"角色「{role.get('name', '')}」还没绑定音色："
+                    "点该角色的编辑按钮选一个音色，或取消角色改用默认发音人")
             voice = None
             vid = fields.get("voice_id") or (role or {}).get("voice_id")
             if vid:
                 voice = voices.get(vid)
+            if fields.get("voice_id") and voice is None:
+                return self._err(
+                    f"指定的音色不存在（{fields.get('voice_id')}），请重新选择")
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()

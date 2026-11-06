@@ -114,6 +114,10 @@
     } catch (e) { /* 忽略 */ }
     if (name === "library") renderLibrary();
     if (name === "clone") refreshCloneState();
+    if (name === "workbench") {
+      // 从隐藏状态切回来，textarea 在 display:none 时量不出高度，必须重算
+      requestAnimationFrame(() => updatePaper());
+    }
   }
 
   function setWorkbenchState(s) {
@@ -167,9 +171,17 @@
       ? `${segs.length} 段 · 本地生成 · 失败可只重试单段`
       : "本地生成 · 失败可只重试单段";
     const _v = state.voices.find((x) => x.id === state.voiceId);
-    const _bad = _v && _v.type === "clone" && refTextState(_v) === "missing";
+    const _role = state.roles.find((x) => x.id === state.roleId);
+    const _roleBad = !!_role && !(_role.voice_id || "").trim();
+    const _bad = _roleBad || (_v && _v.type === "clone" && refTextState(_v) === "missing");
     $("generateBtn").disabled = !chars || state.busy || !!_bad;
     $("paperSaved").textContent = chars ? "草稿已保存在本机" : "草稿已保存在本机";
+
+    // 稿纸自适应高度：textarea 自身不滚动（overflow:hidden 会裁掉超出部分，
+    // 而 .paper-body 只有被内容撑高才出现滚动条——长文本因此完全看不到后面）。
+    const _ta = $("synthText");
+    _ta.style.height = "auto";
+    _ta.style.height = Math.max(_ta.scrollHeight, 120) + "px";
 
     // 段号栏
     const gutter = $("segGutter");
@@ -297,7 +309,12 @@
   }
 
   function selectRole(id) {
-    if (state.roleId === id) { state.roleId = null; renderRoles(); return; }
+    if (state.roleId === id) {
+      state.roleId = null;
+      renderRoles();
+      syncVoiceReadiness();
+      return;
+    }
     state.roleId = id;
     const r = state.roles.find((x) => x.id === id);
     if (r) {
@@ -315,6 +332,7 @@
     }
     renderVoices();
     renderRoles();
+    syncVoiceReadiness();
     toast(r ? `已切换到角色「${r.name}」` : "已取消角色");
   }
 
@@ -380,6 +398,18 @@
     const v = state.voices.find((x) => x.id === state.voiceId);
     const bad = v && v.type === "clone" && refTextState(v) === "missing";
     const warn = $("voiceWarn");
+    const role = state.roles.find((x) => x.id === state.roleId);
+
+    // 角色没绑音色：先讲清楚，否则用户听到的是默认发音人却以为角色生效了
+    if (role && !(role.voice_id || "").trim()) {
+      warn.hidden = false;
+      warn.innerHTML =
+        `<svg class="icon icon-sm" aria-hidden="true"><use href="#i-alert"/></svg>` +
+        `<span>角色「${esc(role.name)}」还没绑定音色，现在只会用默认发音人</span>` +
+        `<button type="button" class="btn btn-sm" data-fixrole="${esc(role.id)}">去绑定音色</button>`;
+      $("generateBtn").disabled = true;
+      return;
+    }
     if (!v || !bad) {
       warn.hidden = true;
       $("generateBtn").disabled = state.busy || !$("synthText").value.trim();
@@ -540,6 +570,19 @@
     const text = $("synthText").value.trim();
     if (!text) { toast("先写一点要合成的文字", true); return; }
 
+    // 按钮的 disabled 挡不住 Ctrl+Enter 和「重试」按钮，这里必须再判一次，
+    // 否则会绕过后端守卫、静默用错音色。
+    const _rv = state.voices.find((x) => x.id === state.voiceId);
+    const _rr = state.roles.find((x) => x.id === state.roleId);
+    if (_rr && !(_rr.voice_id || "").trim()) {
+      toast(`角色「${_rr.name}」还没绑定音色，先绑定再生成`, true);
+      return;
+    }
+    if (_rv && _rv.type === "clone" && refTextState(_rv) === "missing") {
+      toast(`音色「${_rv.name}」的参考文稿还没补齐，补齐后再生成`, true);
+      return;
+    }
+
     const segments = splitText(text, state.segLen);
     if (!segments.length) { toast("文本太短，无法分段", true); return; }
 
@@ -582,6 +625,8 @@
         fd.append("seed", String(state.seed));
         fd.append("norm", "2");
         if (state.voiceId) fd.append("voice_id", state.voiceId);
+        // 角色也要发：仅靠 voice_id 无法让后端区分"角色未绑音色"与"没选角色"
+        if (state.roleId) fd.append("role_id", state.roleId);
         const segName = `seg_${stamp}_${i}.wav`;
         fd.append("save_as", segName);
 
@@ -1016,6 +1061,7 @@
   async function refreshRoles() {
     state.roles = await api("/api/roles").catch(() => []);
     renderRoles();
+    syncVoiceReadiness();   // 保存/删除角色都会走这里，是唯一的收敛点
   }
 
   async function refreshHistory() {
@@ -1076,6 +1122,16 @@
       clearTimeout(bind._t);
       bind._t = setTimeout(previewNorm, 400);
     });
+    // 稿纸高度依赖可用宽度：窗口变化后必须重算。
+    // 只在工作台屏算——隐藏屏的 scrollHeight 恒为 0，会把高度钉在下限，
+    // 切回工作台时看起来就是"长文本又被裁掉了"。防抖避免拖拽窗口时抖动。
+    let _rszTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(_rszTimer);
+      _rszTimer = setTimeout(() => {
+        if (state.screen === "workbench") updatePaper();
+      }, 120);
+    });
     $("loadSampleBtn").addEventListener("click", () => {
       $("synthText").value = "雨落在旧书店的玻璃上，像有人在很轻地翻书。老板娘把最后一盏灯留到九点，她说，总有人赶在打烊前，来找一本已经绝版的书。";
       updatePaper(); previewNorm(); $("synthText").focus();
@@ -1087,8 +1143,10 @@
 
     // 音色
     $("voiceWarn").addEventListener("click", (e) => {
-      const b = e.target.closest("[data-fixref]");
-      if (b) openEdit(b.dataset.fixref);
+      const ref = e.target.closest("[data-fixref]");
+      if (ref) { openEdit(ref.dataset.fixref); return; }
+      const role = e.target.closest("[data-fixrole]");
+      if (role) openRoleDialog(role.dataset.fixrole);
     });
     $("voiceList").addEventListener("click", async (e) => {
       const edit = e.target.closest("[data-edit]");
