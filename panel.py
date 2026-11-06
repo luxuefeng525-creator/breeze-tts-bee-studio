@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import struct
 import threading
 import time
@@ -38,6 +39,22 @@ AUDIOS = DATA / "audio"
 for d in (DATA, REFS, AUDIOS):
     d.mkdir(parents=True, exist_ok=True)
 
+class _ValidationError(Exception):
+    """读改写过程中发现数据不合法：不写入，由外层翻成 400。"""
+
+
+def _safe_int(value, default: int) -> int:
+    """把表单里的字符串转 int，非法值回落到默认。
+
+    上游已经出完音频之后才在构造响应时抛 ValueError，会直接断连：
+    GPU 白跑一次，用户什么也看不到。
+    """
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 SAMPLE_RATE = 24000
 _LOCK = threading.RLock()  # 可重入：读改写块可嵌套 _save
 _INFER_LOCK = threading.Lock()  # 上游单并发：面板内部串行排队，避免 409 already running
@@ -58,25 +75,39 @@ def _friendly_error(msg: str) -> str:
 
 
 # ---------- W2-3 质量管线 ----------
-_DICT_PATH = DATA / "dictionary.json"
+def _dict_path() -> Path:
+    """按调用时求值：测试把 DATA 指向临时目录后，词典也要跟着走。
+
+    原先在 import 期绑定，测试只会重定向 DATA/REFS/AUDIOS，词典仍写生产
+    data/dictionary.json——跑一次测试就往用户词典里塞条目。
+    """
+    return DATA / "dictionary.json"
 
 
 def _load_dict():
     """读取发音词典（缺失或损坏都返回空词典，不阻塞服务）。"""
     try:
         from tts_pipeline.pron_dict import PronunciationDict
-        return PronunciationDict.load(_DICT_PATH)
+        return PronunciationDict.load(_dict_path())
     except Exception:
         class _Empty:
             entries: list = []
 
             def apply(self, text, scope="global"):
                 return text, []
+
+            # 调用方还用了这两个：tts_pipeline 不可用时不能抛 AttributeError
+            # （那会把连接直接断掉，用户看不到任何提示）。
+            def to_list(self):
+                return []
+
+            def remove(self, word, scope="global"):
+                return False
         return _Empty()
 
 
 def _save_dict(d) -> None:
-    d.save(_DICT_PATH)
+    d.save(_dict_path())
 
 
 def _apply_text_pipeline(text: str, norm_flag: str, scope: str = "global"):
@@ -163,24 +194,39 @@ class _file_lock:
         self.timeout = timeout
         self._fd = None
 
+    STALE_AFTER = 300.0  # 锁龄超过这个值才视为残留（一次写 JSON 远不到 5 分钟）
+
+    def _is_stale(self) -> bool:
+        """锁只可能来自死进程时返回 True。
+
+        用锁龄判断而不是探测 PID：Windows 上 os.kill(pid, 0) 会直接
+        TerminateProcess 杀掉对方，拿来做存活检查是事故。
+        """
+        try:
+            return (time.time() - self.path.stat().st_mtime) > self.STALE_AFTER
+        except OSError:
+            return False
+
     def __enter__(self):
-        import os
-        import time as _t
-        deadline = _t.time() + self.timeout
+        deadline = time.time() + self.timeout
         while True:
             try:
                 self._fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(self._fd, str(os.getpid()).encode())
                 return self
             except FileExistsError:
-                if _t.time() > deadline:
-                    # 锁文件是残留（进程已死）时，强制接管
-                    try:
-                        self.path.unlink()
-                        continue
-                    except OSError:
-                        pass
-                _t.sleep(0.05)
+                if time.time() > deadline:
+                    # 只在锁确实过期时才清理。原先无条件 unlink 会夺走活锁：
+                    # 持锁进程只是慢（长合成/慢盘）就被抢，互斥失效；而原持有者
+                    # __exit__ 还会删掉新持有者的锁文件，等于完全没有互斥。
+                    if self._is_stale():
+                        try:
+                            self.path.unlink()
+                            continue
+                        except OSError:
+                            pass
+                    raise TimeoutError(f"等待 {self.path.name} 超时，可能有其他进程正在写入")
+                time.sleep(0.05)
 
     def __exit__(self, exc_type, exc, tb):
         import os
@@ -198,18 +244,16 @@ class _file_lock:
 
 
 def _update_json(name: str, mutator) -> list:
-    """读-改-写原子操作（R2 修复）：进程内锁 + 跨进程文件锁，整个 RMW 不被打断。"""
+    """读-改-写原子操作（R2 修复）：进程内锁 + 跨进程文件锁，整个 RMW 不被打断。
+
+    所有写入都必须走这里。裸 `_load` → 改 → `_save` 在 ThreadingHTTPServer 下
+    会让两个并发请求各自读一份再整体覆盖回去，丢掉对方的改动。
+    """
     with _LOCK:
         with _file_lock(name):
             items = _load(name)
             result = mutator(items)
-            target = DATA / name
-            tmp = target.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            import os
-            os.replace(str(tmp), str(target))
+            _save(name, items)  # _LOCK 是 RLock，这里重入安全；写盘只在 _save 一处
             return result if result is not None else items
 
 
@@ -1666,6 +1710,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             # W2-7: 必须先落盘再发结束标记——否则客户端收到流结束的瞬间
             # 文件还没写完，紧接着调 /api/concat 会读不到（竞态）。
+            save_error = None
             if collected is not None and collected:
                 try:
                     safe = _safe_name(save_as)
@@ -1673,14 +1718,27 @@ class Handler(BaseHTTPRequestHandler):
                         safe += ".wav"
                     (AUDIOS / safe).write_bytes(
                         pcm_to_wav(bytes(collected), normalize=False))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    save_error = exc
+                    sys.stderr.write(f"[panel] 分段落盘失败 {save_as!r}: {exc!r}\n")
+            if save_error is not None:
+                # 不能发成功终止块：客户端会立刻调 /api/concat 然后拿不到文件，
+                # 整段音频静默丢失。发一个非法 chunk 让浏览器判定本次传输失败，
+                # 前端按"该段失败"处理并允许重试。
+                self.wfile.write(b"!!save-failed\r\n")
+                self.wfile.flush()
+                return
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 静默会让浏览器只看到 network error，日志毫无线索
+            sys.stderr.write(f"[panel] 流式合成中断: {exc!r}\n")
         finally:
-            conn.close()
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def _infer_with_retry(self, api_path: str, body: bytes, content_type: str, timeout: int = 600):
         """上游单并发：锁内排队 + 409 撞车自动重试（跨进程/外部客户端撞车也能消化）。"""
@@ -1855,9 +1913,8 @@ class Handler(BaseHTTPRequestHandler):
                 "cfg_scale": float(d.get("cfg_scale", 4)),
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            items = _load("voices.json")
-            items.append(voice)
-            _save("voices.json", items)
+            # 原子追加：并发建音色时不能各自读一份再整体覆盖回去
+            _update_json("voices.json", lambda it: it.append(voice))
             self._json(voice, 201)
             return
 
@@ -1874,13 +1931,13 @@ class Handler(BaseHTTPRequestHandler):
             safe = _safe_name(f"{vid}_{int(time.time())}{ext}")
             (REFS / safe).write_bytes(data)
             dur = wav_duration(data)
-            with _LOCK:
-                items = _load("voices.json")
+            def _set_ref(items, _vid=vid, _safe=safe, _dur=dur):
                 for v in items:
-                    if v["id"] == vid:
-                        v["ref_audio"] = f"refs/{safe}"
-                        v["ref_duration"] = dur
-                _save("voices.json", items)
+                    if v["id"] == _vid:
+                        v["ref_audio"] = f"refs/{_safe}"
+                        v["ref_duration"] = _dur
+
+            _update_json("voices.json", _set_ref)
             # W2-3c: 参考音频质检（可选，失败不阻断上传）
             quality = None
             try:
@@ -1903,19 +1960,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/voices/") and path.endswith("/trim"):
             vid = path.split("/")[3]
-            with _LOCK:
-                items = _load("voices.json")
-                target = next((v for v in items if v["id"] == vid), None)
-                if not target or not target.get("ref_audio"):
-                    return self._err("该音色没有参考音频可裁剪", 404)
-                rp = DATA / target["ref_audio"]
-                if not rp.is_file():
-                    return self._err("参考音频文件缺失，请重新上传", 404)
-                trimmed = trim_wav_bytes(rp.read_bytes(), 15.0)
-                rp.write_bytes(trimmed)
-                dur = wav_duration(trimmed)
-                target["ref_duration"] = dur
-                _save("voices.json", items)
+            # 定位只读一次；音频文件与 JSON 是两份独立数据，先处理文件，
+            # 再对 JSON 做原子更新，避免把耗时 IO 关进锁里。
+            items_now = _load("voices.json")
+            target = next((v for v in items_now if v["id"] == vid), None)
+            if not target or not target.get("ref_audio"):
+                return self._err("该音色没有参考音频可裁剪", 404)
+            rp = DATA / target["ref_audio"]
+            if not rp.is_file():
+                return self._err("参考音频文件缺失，请重新上传", 404)
+            trimmed = trim_wav_bytes(rp.read_bytes(), 15.0)
+            rp.write_bytes(trimmed)
+            dur = wav_duration(trimmed)
+
+            def _set_dur(items, _vid=vid, _dur=dur):
+                for v in items:
+                    if v["id"] == _vid:
+                        v["ref_duration"] = _dur
+
+            _update_json("voices.json", _set_dur)
             self._json({"ok": True, "ref_duration": dur})
             return
 
@@ -1934,9 +1997,7 @@ class Handler(BaseHTTPRequestHandler):
                 "defaults": d.get("defaults") or {"cfg_scale": 4, "seed": 42},
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            items = _load("roles.json")
-            items.append(role)
-            _save("roles.json", items)
+            _update_json("roles.json", lambda it: it.append(role))
             self._json(role, 201)
             return
 
@@ -2120,7 +2181,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": hid,
                 "wav_url": f"/api/audio/{fname}",
                 "duration": len(raw) / (SAMPLE_RATE * 2),
-                "cfg_used": int(float(cfg_used)),
+                "cfg_used": _safe_int(cfg_used, 1),
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
             })
             return
@@ -2204,8 +2265,7 @@ class Handler(BaseHTTPRequestHandler):
             hid = _new_id("h")
             fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{hid}_batch.wav"
             (AUDIOS / fname).write_bytes(wav)
-            hist = _load("history.json")
-            hist.append({
+            _update_json("history.json", lambda it: it.append({
                 "id": hid,
                 "role_id": fields.get("role_id"),
                 "voice_id": vid,
@@ -2214,15 +2274,14 @@ class Handler(BaseHTTPRequestHandler):
                 "wav": f"audio/{fname}",
                 "duration": len(raw) / (SAMPLE_RATE * 2),
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            _save("history.json", hist)
+            }))
             self._json({
                 "id": hid,
                 "wav_url": f"/api/audio/{fname}",
                 "duration": len(raw) / (SAMPLE_RATE * 2),
                 "segments": [len(raw)],
                 "count": len(texts),
-                "cfg_used": int(float(cfg_used)),
+                "cfg_used": _safe_int(cfg_used, 1),
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
             })
             return
@@ -2262,8 +2321,7 @@ class Handler(BaseHTTPRequestHandler):
             fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{hid}_merged.wav"
             (AUDIOS / fname).write_bytes(wav)
             dur = len(pcm) / (SAMPLE_RATE * 2)
-            hist = _load("history.json")
-            hist.append({
+            _update_json("history.json", lambda it: it.append({
                 "id": hid,
                 "role_id": d.get("role_id"),
                 "voice_id": d.get("voice_id"),
@@ -2272,8 +2330,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wav": f"audio/{fname}",
                 "duration": dur,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            _save("history.json", hist)
+            }))
             self._json({"id": hid, "wav_url": f"/api/audio/{fname}", "duration": dur, "segments": len(fnames)})
             return
 
@@ -2290,31 +2347,44 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/voices/"):
             vid = path.rsplit("/", 1)[-1]
-            items = _load("voices.json")
-            for v in items:
-                if v["id"] == vid:
-                    for k in ("name", "type", "instruction", "ref_text"):
-                        if k in d:
-                            v[k] = d[k]
-                    if "cfg_scale" in d:
-                        v["cfg_scale"] = float(d["cfg_scale"])
-                    if v.get("type") in ("clone", "direction") and not (v.get("ref_text") or "").strip():
-                        return self._err("还不能保存：克隆/导向音色必须先填写「参考音频的准确文字稿」，与音频内容一字不差")
-                    _save("voices.json", items)
-                    return self._json(v)
-            return self._err("voice not found", 404)
+            def _apply(items, _vid=vid):
+                for v in items:
+                    if v["id"] == _vid:
+                        for k in ("name", "type", "instruction", "ref_text"):
+                            if k in d:
+                                v[k] = d[k]
+                        if "cfg_scale" in d:
+                            v["cfg_scale"] = float(d["cfg_scale"])
+                        if v.get("type") in ("clone", "direction") and not (v.get("ref_text") or "").strip():
+                            # 抛异常 = 本次不落盘（half-written 记录不会留在文件里）
+                            raise _ValidationError(
+                                "还不能保存：克隆/导向音色必须先填写「参考音频的准确文字稿」，与音频内容一字不差")
+                        return {"found": v}
+                return {"found": None}
+
+            try:
+                res = _update_json("voices.json", _apply)
+            except _ValidationError as exc:
+                return self._err(str(exc))
+            if not res.get("found"):
+                return self._err("voice not found", 404)
+            return self._json(res["found"])
 
         if path.startswith("/api/roles/"):
             rid = path.rsplit("/", 1)[-1]
-            items = _load("roles.json")
-            for r in items:
-                if r["id"] == rid:
-                    for k in ("name", "description", "voice_id", "defaults"):
-                        if k in d:
-                            r[k] = d[k]
-                    _save("roles.json", items)
-                    return self._json(r)
-            return self._err("role not found", 404)
+            def _apply(items, _rid=rid):
+                for r in items:
+                    if r["id"] == _rid:
+                        for k in ("name", "description", "voice_id", "defaults"):
+                            if k in d:
+                                r[k] = d[k]
+                        return {"found": r}
+                return {"found": None}
+
+            res = _update_json("roles.json", _apply)
+            if not res.get("found"):
+                return self._err("role not found", 404)
+            return self._json(res["found"])
 
         self._err("not found", 404)
 
@@ -2339,19 +2409,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/voices/"):
             vid = path.rsplit("/", 1)[-1]
-            items = _load("voices.json")
-            keep = [v for v in items if v["id"] != vid]
-            if len(keep) == len(items):
+            def _drop(items, _vid=vid):
+                hit = any(v["id"] == _vid for v in items)
+                if hit:
+                    items[:] = [v for v in items if v["id"] != _vid]
+                return {"hit": hit}
+
+            res = _update_json("voices.json", _drop)
+            if not res["hit"]:
                 return self._err("voice not found", 404)
-            _save("voices.json", keep)
             return self._json({"ok": True})
         if path.startswith("/api/roles/"):
             rid = path.rsplit("/", 1)[-1]
-            items = _load("roles.json")
-            keep = [r for r in items if r["id"] != rid]
-            if len(keep) == len(items):
+            def _drop(items, _rid=rid):
+                hit = any(r["id"] == _rid for r in items)
+                if hit:
+                    items[:] = [r for r in items if r["id"] != _rid]
+                return {"hit": hit}
+
+            res = _update_json("roles.json", _drop)
+            if not res["hit"]:
                 return self._err("role not found", 404)
-            _save("roles.json", keep)
             return self._json({"ok": True})
         if path.startswith("/api/history/"):
             hid = path.rsplit("/", 1)[-1]
@@ -2365,7 +2443,10 @@ class Handler(BaseHTTPRequestHandler):
                     wp.unlink()
                 except OSError:
                     pass
-            _save("history.json", [h for h in items if h["id"] != hid])
+            def _drop_hist(items, _hid=hid):
+                items[:] = [h for h in items if h["id"] != _hid]
+
+            _update_json("history.json", _drop_hist)
             return self._json({"ok": True})
         self._err("not found", 404)
 
