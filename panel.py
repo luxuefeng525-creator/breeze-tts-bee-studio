@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import struct
 import threading
@@ -22,9 +23,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import http.client as _httpclient
 
-# ---- 端口台账（锁定，禁止修改）----
-PANEL_PORT = 7861
-API_BASE = "http://127.0.0.1:7860"  # breeze-tts Streaming API，端口已冻结
+# ---- 端口台账（锁定，禁止修改默认值）----
+# 默认值就是台账口径；允许用环境变量覆写**仅为**回滚演练/并行金丝雀，
+# 否则新旧版本必须抢同一个端口，回滚就只能先停后起（期间服务中断）。
+PANEL_PORT = int(os.environ.get("BREEZE_PANEL_PORT") or 7861)
+API_BASE = os.environ.get("BREEZE_API_BASE") or "http://127.0.0.1:7860"  # 端口已冻结
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
