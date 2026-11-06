@@ -106,6 +106,7 @@ class DepthDecoderGraph:
         num_codebooks=None,
         codec_codebook_size=None,
         fast: bool = False,
+        compile_layers: bool | None = None,
         debug: bool = False,
         batch_size=2,
         bucket_sizes: list[int] | None = None,
@@ -160,10 +161,15 @@ class DepthDecoderGraph:
         # (module forward still fires hooks, and F.linear works with fp32 input)
         self.codebooks_head.weight.data = self.codebooks_head.weight.data.float()
         self.fast = bool(fast)
+        # Compiling the layers is what needs torch.compile (and a working
+        # Triton/torch backend); manual graph capture does not. Keeping the two
+        # apart lets a machine whose compile path is broken still capture the
+        # eager depth graphs and keep the replay speedup.
+        self.compile_layers = bool(fast) if compile_layers is None else bool(compile_layers)
 
         # The fast path uses one maintained compile configuration before
         # manual CUDA Graph capture. Compile modes are intentionally not public.
-        if self.fast:
+        if self.compile_layers:
             compile_mode = "default"
             _limit = self.num_layers * 4 + 16
             torch._dynamo.config.cache_size_limit = max(

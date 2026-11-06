@@ -235,6 +235,35 @@ Both the CLI and API use eager streaming by default and skip graph warmup. Pass 
 Individual stage flags are intended for profiling and debugging.
 
 
+### Measured on a single 8 GB GPU
+
+Numbers below come from one 8 GB card (8151 MiB) on this repo at 24 kHz output. Treat them as an expectation, not a guarantee.
+
+**Depth decoder compilation.** On a small card, `torch.compile` of the depth decoder costs minutes of cold start and can trip the cache-size guard, which silently drops that stage back to eager. Set `BREEZE_DEPTH_GRAPH_NO_COMPILE=1` to capture the depth CUDA graphs by hand and skip `torch.compile` entirely; on the 8 GB card this roughly halved single-request RTF.
+
+**Single request.** `/v1/audio/speech`:
+
+| Mode | RTF |
+| --- | --- |
+| Baseline eager | ~10.2 |
+| `--fast-backbone-decode --fast-depth-decoder` (compiled depth) | ~6.0 |
+| Same flags with `BREEZE_DEPTH_GRAPH_NO_COMPILE=1` | ~5.2 |
+| Same, plus `ref_audio` voice clone | 5.8 - 7.5 |
+
+**Throughput.** `/v1/audio/speech` is single-flight by design: a second concurrent request returns HTTP 409. Real batching goes through `/v1/audio/speech/batch`, which runs eager generation over a true batch. On the same card batching beats the single-request fast path, because batch-1 decode re-reads every weight for each frame:
+
+| Batch size | RTF | Note |
+| --- | --- | --- |
+| 1 | 9.2 | eager, for comparison |
+| 6 | 2.6 | |
+| 24 | 1.6 | |
+| 64 | 1.1 | sweet spot, ~7.6 GB VRAM |
+| 80 | 1.6 | VRAM pressure, slower than 64 |
+
+For offline synthesis on 8 GB, batch 48-64 is the fastest setting; the endpoint accepts up to 128 texts but larger batches degrade. Batch runs leave memory in the allocator cache (VRAM does not return to idle) without leaking, and single-request fast mode keeps its usual RTF afterwards.
+
+**Voice clone API.** `ref_audio` and `ref_text` must be sent together; either alone returns HTTP 400.
+
 ## License and Responsible Use
 
 The source code is licensed under the [Apache License, Version 2.0](https://github.com/breezeblue-ai/breeze-tts/blob/main/LICENSE). The audio tokenizer is based on [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by the Alibaba Qwen Team and is licensed under the Apache License, Version 2.0. Model weights, checkpoints, adapters, derivative models, and self-hosted outputs are governed separately by the [BreezeBlue Research and Non-Commercial License](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE). The Apache License does not grant rights to use the model commercially.

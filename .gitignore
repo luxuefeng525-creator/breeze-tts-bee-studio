@@ -17,3 +17,8 @@ htmlcov/
 .env.*
 !.env.example
 
+# local runtime artifacts
+*.log
+check_*.bin
+*.bak-depthgraph
+.wheels/

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import json
 import time
 import uuid
@@ -277,6 +279,12 @@ class FastBreezeStreamingRuntime:
                 num_codebooks=self.model.config.num_codebooks,
                 codec_codebook_size=self._codec_codebook_size,
                 fast=self._fast_depth_decoder,
+                # BREEZE_DEPTH_GRAPH_NO_COMPILE=1 时只手工捕获图、不 torch.compile：
+                # 绕开 torch 2.9 + Windows 静态启动器的 triton 初始化 bug。
+                compile_layers=(
+                    self._fast_depth_decoder
+                    and not os.environ.get("BREEZE_DEPTH_GRAPH_NO_COMPILE")
+                ),
                 batch_size=depth_bucket_sizes[0],
                 bucket_sizes=depth_bucket_sizes,
                 **depth_params,
