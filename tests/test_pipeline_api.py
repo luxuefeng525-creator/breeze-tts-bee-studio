@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import json
 import struct
 import threading
@@ -54,7 +55,10 @@ def _req(url, method="GET", body=None, ctype=None, timeout=30):
     except urllib.error.HTTPError as e:
         detail = json.loads(e.read() or b"{}")
         if e.code == 409:
-            pytest.skip("上游 7860 忙（有人正在合成），跳过本用例")
+            if os.environ.get("TTS_ALLOW_BUSY_SKIP") == "1":
+                pytest.skip("上游忙，已按 TTS_ALLOW_BUSY_SKIP=1 放行")
+            raise AssertionError(
+                "面板未消化 409（排队应保证请求不被拒）：" + str(detail.get("detail")))
         return e.code, detail
 
 

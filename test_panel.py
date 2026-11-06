@@ -1,6 +1,7 @@
 """BreezeTTS Studio 面板测试（环 4）——真实服务、零 mock、数据隔离。"""
 from __future__ import annotations
 
+import os
 import json
 import struct
 import threading
@@ -74,7 +75,12 @@ def _req(url, method="GET", body=None, ctype=None, timeout=30):
     except urllib.error.HTTPError as e:
         detail = json.loads(e.read() or b"{}")
         if e.code == 409 and "另一条合成" in str(detail.get("detail", "")):
-            pytest.skip("上游 7860 忙（有客户端正在合成），跳过本用例")
+            # 默认按失败处理：面板本该排队消化 409，漏到客户端说明排队失效。
+            # 仅在明确知道有人在用工作室时，用 TTS_ALLOW_BUSY_SKIP=1 显式放行。
+            if os.environ.get("TTS_ALLOW_BUSY_SKIP") == "1":
+                pytest.skip("上游忙，已按 TTS_ALLOW_BUSY_SKIP=1 放行")
+            raise AssertionError(
+                "面板未消化 409（排队应保证请求不被拒）：" + str(detail.get("detail")))
         return e.code, detail
 
 
@@ -397,7 +403,9 @@ def test_long_text_full_coverage(base_url):
     code, _ = _req(base_url + "/api/model")
     if code != 200:
         pytest.skip("API 7860 offline")
-    text = "我是小蜜蜂，我在兴义开了一家民宿，名字叫馨语归栖，欢迎大家光临！圆明园道宫，老人不愿意去，怕出不来。谁来救救我一起啊，半天都转不出来那种。"
+    # 中性等长长文本：只用于验证「字数 ↔ 时长」比例，不携带任何真实用户信息
+    text = ("这是一段用于校验长文本完整性的中性测试文本，内容与任何真实用户无关。"
+            "它需要有足够的长度，才能覆盖分段合成与时长比例的检查逻辑，避免出现截断。")
     fd = uuid.uuid4().hex
     body = (
         f"--{fd}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\n{text}\r\n"

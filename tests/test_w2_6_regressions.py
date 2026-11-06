@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import os
 import json
 import math
 import struct
@@ -78,7 +79,9 @@ def _stream_bytes(base_url, text: str, **extra) -> int:
             return len(r.read())
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            pytest.skip("上游 7860 忙")
+            if os.environ.get("TTS_ALLOW_BUSY_SKIP") == "1":
+                pytest.skip("上游忙，已按 TTS_ALLOW_BUSY_SKIP=1 放行")
+            raise AssertionError("面板未消化 409（排队应保证请求不被拒）")
         raise
 
 
@@ -95,7 +98,9 @@ def _blocking_duration(base_url, text: str, **extra) -> float:
             return float(json.loads(r.read()).get("duration", 0))
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            pytest.skip("上游 7860 忙")
+            if os.environ.get("TTS_ALLOW_BUSY_SKIP") == "1":
+                pytest.skip("上游忙，已按 TTS_ALLOW_BUSY_SKIP=1 放行")
+            raise AssertionError("面板未消化 409（排队应保证请求不被拒）")
         raise
 
 
