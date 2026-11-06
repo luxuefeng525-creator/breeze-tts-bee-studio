@@ -24,6 +24,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import http.client as _httpclient
 
+# 直接 `python panel.py` 运行时模块名是 __main__，而 script_routes 里 `import panel`
+# 会再加载一份——锁、DATA、_JOBS 全被复制成两份，并发保护形同虚设。
+# 把它登记成 panel，让两种导入路径拿到同一个模块对象。
+sys.modules.setdefault("panel", sys.modules[__name__])
+
 # ---- 端口台账（锁定，禁止修改默认值）----
 # 默认值就是台账口径；允许用环境变量覆写**仅为**回滚演练/并行金丝雀，
 # 否则新旧版本必须抢同一个端口，回滚就只能先停后起（期间服务中断）。
@@ -41,6 +46,65 @@ for d in (DATA, REFS, AUDIOS):
 
 class _ValidationError(Exception):
     """读改写过程中发现数据不合法：不写入，由外层翻成 400。"""
+
+
+def _resolve_audio(rel: str) -> Path | None:
+    """把 /api/audio/ 后的相对路径解析成 AUDIOS 下的真实文件，越界返回 None。
+
+    只按 "/" 切分是不够的：Windows 上反斜杠同样分隔目录，盘符更是直接
+    跳出整个目录树（实测 joinpath("C:\\Windows\\win.ini") 可读）。
+    因此这里既拒绝可疑字符，也对最终路径做 is_relative_to 校验。
+    """
+    if not rel or "\\" in rel or ":" in rel or "\x00" in rel:
+        return None
+    parts = [seg for seg in rel.split("/") if seg]
+    if not parts or len(parts) > 3 or any(seg in (".", "..") for seg in parts):
+        return None
+    if any(seg != _safe_name(seg) for seg in parts):
+        return None
+    try:
+        base = AUDIOS.resolve()
+        target = base.joinpath(*parts).resolve()
+    except (OSError, ValueError):
+        return None
+    if target != base and not target.is_relative_to(base):
+        return None
+    return target
+
+
+def _post_upstream(api_path: str, body: bytes, content_type: str, timeout: int = 600):
+    """POST 到推理 API，返回 (status, body, ctype)。错误已翻译成人话。"""
+    req = Request(API_BASE + api_path, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read(), resp.headers.get("Content-Type",
+                                                              "application/octet-stream")
+    except HTTPError as e:
+        detail = e.read()
+        try:
+            detail = json.loads(detail).get("detail", detail[:200])
+        except Exception:
+            detail = (detail.decode("utf-8", "replace")[:200]
+                      if isinstance(detail, bytes) else str(detail)[:200])
+        return e.code, json.dumps({"detail": _friendly_error(detail)},
+                                  ensure_ascii=False).encode(), "application/json"
+    except URLError as e:
+        return 502, json.dumps({"detail": f"API 7860 不可达: {e.reason}"}).encode(),             "application/json"
+
+
+def _post_with_retry(api_path: str, body: bytes, content_type: str,
+                     timeout: int = 600) -> tuple[int, bytes]:
+    """排队 + 409 自动重试。剧本逐行合成也要走这里，否则会跟单条请求撞车。"""
+    code, raw = 502, b"{}"
+    with _INFER_LOCK:
+        for attempt in range(60):
+            code, raw, _ct = _post_upstream(api_path, body, content_type, timeout)
+            if code != 409:
+                return code, raw
+            if attempt < 59:
+                time.sleep(3.0)
+    return code, raw
 
 
 def _safe_int(value, default: int) -> int:
@@ -193,8 +257,10 @@ class _file_lock:
         self.path = DATA / (name + ".lock")
         self.timeout = timeout
         self._fd = None
+        self._degraded = False
 
-    STALE_AFTER = 300.0  # 锁龄超过这个值才视为残留（一次写 JSON 远不到 5 分钟）
+    STALE_AFTER = 60.0   # 写 JSON 只需毫秒级；60 秒还没释放说明持有者已经没了
+    RELEASED = b"released"
 
     def _is_stale(self) -> bool:
         """锁只可能来自死进程时返回 True。
@@ -207,6 +273,27 @@ class _file_lock:
         except OSError:
             return False
 
+    def _try_clear(self) -> str:
+        """尽力清掉锁文件，返回 "unlinked" / "marked" / "failed"。
+
+        某些环境（批量删除保护、只读目录、杀软占用）会让 unlink 抛非 OSError，
+        之前这里只捕获 OSError，异常一路冒到请求处理里把连接打断，还会把锁
+        永久留在盘上，之后所有写入都会等超时。
+
+        返回值必须区分「真的删掉了」和「只写了已释放标记」：后者文件仍在，
+        下一轮还会撞 FileExistsError，若当成成功就会在这里空转不 sleep。
+        """
+        try:
+            self.path.unlink()
+            return "unlinked"
+        except Exception:
+            pass
+        try:
+            self.path.write_bytes(self.RELEASED)
+            return "marked"
+        except Exception:
+            return "failed"
+
     def __enter__(self):
         deadline = time.time() + self.timeout
         while True:
@@ -215,17 +302,29 @@ class _file_lock:
                 os.write(self._fd, str(os.getpid()).encode())
                 return self
             except FileExistsError:
-                if time.time() > deadline:
-                    # 只在锁确实过期时才清理。原先无条件 unlink 会夺走活锁：
-                    # 持锁进程只是慢（长合成/慢盘）就被抢，互斥失效；而原持有者
-                    # __exit__ 还会删掉新持有者的锁文件，等于完全没有互斥。
-                    if self._is_stale():
-                        try:
-                            self.path.unlink()
+                # 已释放的标记文件等于没有持有者，可以接管
+                try:
+                    if self.path.read_bytes().strip() == self.RELEASED:
+                        result = self._try_clear()
+                        if result == "unlinked":
                             continue
-                        except OSError:
-                            pass
-                    raise TimeoutError(f"等待 {self.path.name} 超时，可能有其他进程正在写入")
+                        if result == "marked":
+                            # 删不掉但能写：退化为非独占获取，宁可互斥弱一点，
+                            # 也不要让请求在这里永久空转。
+                            sys.stderr.write(
+                                f"[panel] 锁无法删除，退化获取: {self.path.name}\u000a")
+                            self._degraded = True
+                            self._fd = os.open(str(self.path),
+                                               os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+                            os.write(self._fd, str(os.getpid()).encode())
+                            return self
+                except Exception:
+                    pass
+                if time.time() > deadline:
+                    if self._is_stale() and self._try_clear() == "unlinked":
+                        continue
+                    raise TimeoutError(
+                        f"等待 {self.path.name} 超时，可能有其他进程正在写入")
                 time.sleep(0.05)
 
     def __exit__(self, exc_type, exc, tb):
@@ -236,10 +335,13 @@ class _file_lock:
             except OSError:
                 pass
             self._fd = None
-        try:
-            self.path.unlink()
-        except OSError:
-            pass
+        # 释放失败不能让请求崩掉：这里兜底成写「已释放」标记，
+        # 下个持锁者看到标记会直接接管。
+        if self._try_clear() == "failed":
+            try:
+                sys.stderr.write("[panel] 释放锁失败: " + self.path.name + "\n")
+            except Exception:
+                pass
         return False
 
 
@@ -1629,22 +1731,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _proxy(self, api_path: str, body: bytes, content_type: str, timeout: int = 600) -> tuple[int, bytes, str]:
-        req = Request(API_BASE + api_path, data=body, method="POST")
-        req.add_header("Content-Type", content_type)
-        try:
-            with urlopen(req, timeout=timeout) as resp:
-                return resp.status, resp.read(), resp.headers.get("Content-Type", "application/octet-stream")
-        except HTTPError as e:
-            detail = e.read()
-            try:
-                detail = json.loads(detail).get("detail", detail[:200])
-            except Exception:
-                detail = detail.decode("utf-8", "replace")[:200] if isinstance(detail, bytes) else str(detail)[:200]
-            return e.code, json.dumps({"detail": _friendly_error(detail)}, ensure_ascii=False).encode(), "application/json"
-        except URLError as e:
-            return 502, json.dumps({"detail": f"API 7860 不可达: {e.reason}"}).encode(), "application/json"
-
     def _proxy_stream(self, api_path: str, body: bytes, content_type: str, timeout: int = 600,
                       save_as: str = ""):
         """流式透传：按块转发上游 PCM，不整段缓冲（W2-2 S1 修复）。
@@ -1742,15 +1828,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _infer_with_retry(self, api_path: str, body: bytes, content_type: str, timeout: int = 600):
         """上游单并发：锁内排队 + 409 撞车自动重试（跨进程/外部客户端撞车也能消化）。"""
-        code, raw, _ct = 502, b"{}", "application/json"
-        with _INFER_LOCK:
-            for attempt in range(60):
-                code, raw, _ct = self._proxy(api_path, body, content_type, timeout)
-                if code != 409:
-                    return code, raw
-                if attempt < 59:
-                    time.sleep(3.0)
-        return code, raw
+        return _post_with_retry(api_path, body, content_type, timeout)
 
     def log_message(self, fmt: str, *args) -> None:  # 安静日志
         pass
@@ -1758,6 +1836,11 @@ class Handler(BaseHTTPRequestHandler):
     # ---- GET ----
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        # 剧本台路由（独立模块；惰性导入避免与 panel 互相 import）
+        from script_routes import handle as _script_handle
+        if _script_handle(self, "GET", path, b"", ""):
+            return
+
         if path in ("/", "/index.html"):
             _web_index = ROOT / "web" / "index.html"
             if _web_index.is_file():
@@ -1811,7 +1894,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._err(f"API 7860 不可达: {e}", 502)
             return
         if path.startswith("/api/audio/"):
-            self._serve_file(AUDIOS / _safe_name(path.rsplit("/", 1)[-1]), "audio/wav")
+            target = _resolve_audio(path[len("/api/audio/"):])   # 模块级函数，不是方法
+            if target is None:
+                self._err("音频路径不合法", 400)
+                return
+            self._serve_file(target, "audio/wav")
             return
         if path.startswith("/api/refs/"):
             self._serve_file(REFS / _safe_name(path.rsplit("/", 1)[-1]), "audio/wav")
@@ -1823,6 +1910,11 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         ctype = self.headers.get("Content-Type", "")
         body = self._read_body()
+        # 剧本台路由（独立模块；惰性导入避免与 panel 互相 import）
+        from script_routes import handle as _script_handle
+        if _script_handle(self, "POST", path, body, ctype):
+            return
+
 
         # ---- W2-3c: 朗读预览 ----
         if path == "/api/norm/preview":
@@ -1994,6 +2086,12 @@ class Handler(BaseHTTPRequestHandler):
                 "name": d["name"],
                 "description": d.get("description", ""),
                 "voice_id": d.get("voice_id"),
+                # 剧本台依赖这两个字段：原型决定音色描述，默认情绪决定该角色的基调
+                "archetype": d.get("archetype") or "custom",
+                # 空串 = 未设置：剧本台据此走「自动推断」。
+                # 若在这里填「中性」，会让所有无标签行都恒为中性，
+                # 标点与关键词推断永远不触发。
+                "default_emotion": d.get("default_emotion") or "",
                 "defaults": d.get("defaults") or {"cfg_scale": 4, "seed": 42},
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -2376,6 +2474,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self) -> None:
         path = urlparse(self.path).path
         body = self._read_body()
+        # 剧本台路由（独立模块；惰性导入避免与 panel 互相 import）
+        from script_routes import handle as _script_handle
+        if _script_handle(self, "PUT", path, body, ""):
+            return
+
         try:
             d = json.loads(body or b"{}")
         except Exception:
@@ -2411,7 +2514,8 @@ class Handler(BaseHTTPRequestHandler):
             def _apply(items, _rid=rid):
                 for r in items:
                     if r["id"] == _rid:
-                        for k in ("name", "description", "voice_id", "defaults"):
+                        for k in ("name", "description", "voice_id", "defaults",
+                                  "archetype", "default_emotion"):
                             if k in d:
                                 r[k] = d[k]
                         return {"found": r}
@@ -2427,6 +2531,11 @@ class Handler(BaseHTTPRequestHandler):
     # ---- DELETE ----
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        # 剧本台路由（独立模块；惰性导入避免与 panel 互相 import）
+        from script_routes import handle as _script_handle
+        if _script_handle(self, "DELETE", path, b"", ""):
+            return
+
         # W2-3c: 删除词典条目
         if path.startswith("/api/dict/"):
             from urllib.parse import unquote
