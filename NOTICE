@@ -1,0 +1,63 @@
+BreezeTTS Studio — notices and license scope
+============================================
+
+This repository is derived from breeze-tts
+(https://github.com/breezeblue-ai/breeze-tts), licensed under the Apache
+License, Version 2.0 (see LICENSE). It contains modifications to that work.
+
+MODIFICATIONS
+-------------
+Pursuant to section 4(b) of the Apache License, Version 2.0, the following
+files from the upstream project have been changed:
+
+  models/cudagraph/depth_decoder_graph.py
+      Added an explicit `compile_layers` switch so that CUDA graph capture and
+      torch.compile can be selected independently.
+
+  models/fast_streaming.py
+      Reads BREEZE_DEPTH_GRAPH_NO_COMPILE to select capture-only mode.
+
+  README.md
+      Added a section with measurements taken on a single 8 GB GPU.
+
+  .gitignore
+      Added local runtime artifacts (logs, checkpoints, wheel cache).
+
+The following components are new and were not part of the upstream project:
+
+  panel.py, synth.py, start_api.sh, download_weights.sh, start_fast.bat
+  web/            the browser front end served by panel.py
+  tts_pipeline/   text normalization, pronunciation dictionary, reference
+                  audio preparation, speaker similarity
+  tests/          test suite (upstream tests are unmodified)
+
+LICENSE SCOPE — READ THIS BEFORE DEPLOYING
+------------------------------------------
+Source code in this repository:  Apache License 2.0.
+Audio tokenizer (Qwen3-TTS, Alibaba Qwen Team):  Apache License 2.0.
+
+Model weights, checkpoints, adapters, derivative models, and the audio this
+system produces when you self-host it are governed separately by the
+BreezeBlue Research and Non-Commercial License:
+https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE
+
+The Apache License does not grant rights to use the model commercially, and a
+paid subscription on the hosted platform does not extend to self-hosted
+outputs. Self-hosted use of this repository is limited to research and other
+non-commercial purposes.
+
+THIRD-PARTY COMPONENTS
+----------------------
+Runtime dependencies are permissively licensed and introduce no copyleft
+obligation: torch and torchaudio (BSD-3-Clause), transformers (Apache-2.0),
+numpy (BSD-3-Clause and others), fastapi (MIT), uvicorn (BSD-3-Clause),
+soundfile (BSD-3-Clause), qwen-tts (Apache-2.0), python-multipart
+(Apache-2.0), huggingface-hub (Apache-2.0), pytest (MIT).
+
+RESPONSIBILITY FOR INPUTS AND VOICES
+------------------------------------
+Voice cloning reproduces a specific speaker. You are responsible for holding
+the rights and consents required for any reference audio, voice, text, or
+other input you use, and for complying with applicable law. The clone flow in
+this repository records explicit consent before a reference recording can be
+saved.
