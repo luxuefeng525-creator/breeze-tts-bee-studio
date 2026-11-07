@@ -31,6 +31,7 @@ from tts_pipeline.script import (
 )
 
 MAX_LINES = 100          # 超过这个行数提示分批（8 GB 卡约 20-30 分钟）
+MAX_TAKES = 8            # 单行最多留几版；超出后覆盖最旧一版（不删文件、不无限涨盘）
 DEFAULT_GAP = 0.35
 DEFAULT_CFG = 4.0
 EXPORT_PARTS = ("full", "lines", "timeline", "script")
@@ -168,6 +169,68 @@ def _line_hash(row: dict) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _take_name(idx: int, n: int) -> str:
+    """第 1 版沿用 line_XXX.wav（兼容老数据与老导出包），之后带 _t{n}。"""
+    return f"line_{idx:03d}.wav" if n == 1 else f"line_{idx:03d}_t{n}.wav"
+
+
+def _norm_takes(rec: dict) -> list[dict]:
+    """把一条行记录里的版本列表补成规范形态。
+
+    老数据只有 wav/duration、没有 takes：补成 v1，否则升级后第一次点
+    「换版本」会发现「只有一版」，明明播得出来却选不了。
+    """
+    takes = [t for t in (rec.get("takes") or []) if isinstance(t, dict) and t.get("n")]
+    if not takes and rec.get("wav"):
+        takes = [{"n": 1, "wav": rec["wav"],
+                  "duration": round(float(rec.get("duration") or 0), 3)}]
+    return sorted(takes, key=lambda t: t["n"])
+
+
+def _persist_take(script_id: str, idx: int, row: dict, take_no: int,
+                  duration: float, rel: str, reset: bool = False) -> None:
+    """落一版音频：reset=True 表示新内容的第 1 版（丢掉旧内容的版本）。
+
+    文本/情绪/语速变了之后旧版本属于「上一版台词」，留着只会让用户对着
+    旧音频找不回新台词，所以整剧合成第一次落盘时清空版本列表。
+    """
+    def _mut(items):
+        for s in items:
+            if s["id"] != script_id:
+                continue
+            lines = s.setdefault("lines", [])
+            rec = next((l for l in lines if l["idx"] == idx), None)
+            if rec is None:
+                rec = {"idx": idx}
+                lines.append(rec)
+            takes = [] if reset else _norm_takes(rec)
+            takes = [t for t in takes if t["n"] != take_no]
+            takes.append({"n": take_no, "wav": rel, "duration": round(duration, 3)})
+            takes.sort(key=lambda t: t["n"])
+            rec.update({
+                "status": "done", "wav": rel, "duration": round(duration, 3),
+                "emotion": row.get("emotion"), "role_name": row.get("role_name"),
+                "text": row.get("text"), "hash": row.get("hash", ""),
+                "take": take_no, "takes": takes,
+            })
+            s["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    P._update_json("scripts.json", _mut)
+
+
+def _take_info(rec: dict, fresh: bool) -> dict:
+    """给前端的版本视图：只暴露 n 与时长，路径由后端自己算。"""
+    if not fresh:
+        return {"takes": [], "take": 0}
+    takes = _norm_takes(rec)
+    current = rec.get("take")
+    if not current:
+        # 老记录没写 take：按 wav 反查是哪一版
+        current = next((t["n"] for t in takes if t.get("wav") == rec.get("wav")), 1)
+    return {"takes": [{"n": t["n"], "duration": t.get("duration") or 0} for t in takes],
+            "take": int(current)}
+
+
 def _enriched(script: dict, parsed) -> list[dict]:
     """把解析结果补上 role_id/voice_id 与完成状态。
 
@@ -190,6 +253,7 @@ def _enriched(script: dict, parsed) -> list[dict]:
         row["status"] = "done" if fresh else "pending"
         row["wav"] = rec.get("wav", "") if fresh else ""
         row["duration"] = rec.get("duration", 0.0) if fresh else 0.0
+        row.update(_take_info(rec, fresh))
         out.append(row)
     return out
 
@@ -319,11 +383,9 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
                 job["rows"][idx].update(state="done", wav=rel,
                                         duration=round(dur, 3), error="")
                 job["done"] += 1
-                _persist_line(script_id, idx, {
-                    "status": "done", "wav": rel, "duration": round(dur, 3),
-                    "emotion": row.get("emotion"), "role_name": row["role_name"],
-                    "text": row["text"], "hash": row.get("hash", ""),
-                })
+                # 整剧合成落的是「新内容的第 1 版」：顺手清掉旧内容的版本，
+                # 不然换完台词还能切回上一版的音频，文不对音
+                _persist_take(script_id, idx, row, 1, dur, rel, reset=True)
 
         job["state"] = "done"
     except Exception as exc:
@@ -384,7 +446,9 @@ def _concat(script_id: str, gap: float) -> None:
     for row in rows:
         if row["status"] != "done" or not row["wav"]:
             continue
-        path = out_dir / f"line_{row['idx']:03d}.wav"
+        # 走记录里的实际路径：第 2 版以后的文件名带 _t{n}，按行号拼名字
+        # 会拼到第 1 版，用户切了版本却听不出区别
+        path = P.DATA / row["wav"]
         if not path.is_file():
             continue
         if last_done >= 0 and gap > 0:
@@ -474,9 +538,9 @@ def _export_zip(script: dict, parts: list[str], rows: list[dict]) -> bytes:
                 zf.write(full, "full.wav")
         if "lines" in parts:
             # 只写状态为 done 的行：磁盘上残留的旧 line_XXX.wav 属于上一版
-            # 台词，混进导出包就是文不对音。
+            # 台词，混进导出包就是文不对音。多版本时导的是「当前选中的那一版」。
             for row in rows:
-                p = out_dir / f"line_{row['idx']:03d}.wav"
+                p = P.DATA / row["wav"] if row.get("wav") else out_dir / f"line_{row['idx']:03d}.wav"
                 if not p.is_file():
                     continue
                 # 序号在前保证唯一：两个角色清洗后可能同名，重名条目
@@ -713,7 +777,18 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             return True
         role = _roles_by_name().get(row["role_name"])
         out_dir = _lines_dir(sid)
-        name = f"line_{idx:03d}.wav"
+        # 重录 = 追加一版，不是覆盖：同一句常要试两三遍才满意，覆盖掉
+        # 上一版等于逼用户在「两个都还行」之间反复重抽。
+        stored = next((l for l in script.get("lines") or [] if l.get("idx") == idx), {})
+        same_content = stored.get("hash") == row.get("hash")
+        takes = _norm_takes(stored) if same_content else []
+        if not takes:
+            take_no = 1
+        elif len(takes) >= MAX_TAKES:
+            take_no = takes[0]["n"]          # 到上限就覆盖最旧那版，不无限涨盘
+        else:
+            take_no = max(t["n"] for t in takes) + 1
+        name = _take_name(idx, take_no)
         dur, err = _synth_line(row["text"], role, row.get("instruction", ""),
                                float(script.get("cfg_scale") if script.get("cfg_scale") is not None else DEFAULT_CFG),
                                int(script.get("seed") if script.get("seed") is not None else 42),
@@ -724,13 +799,47 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         rel = f"audio/scripts/{sid}/{name}"
         # 必须一起写 hash：续做与行状态都靠它判定，缺了会让刚重做好的行
         # 在下次读取时又变回「未合成」，音频在盘上却听不到。
-        _persist_line(sid, idx, {"status": "done", "wav": rel,
-                                 "duration": round(dur, 3),
-                                 "emotion": row.get("emotion"),
-                                 "role_name": row["role_name"], "text": row["text"],
-                                 "hash": row.get("hash", "")})
+        _persist_take(sid, idx, row, take_no, dur, rel, reset=not same_content)
         _concat(sid, float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP))
-        h._json({"ok": True, "idx": idx, "duration": round(dur, 3), "wav": rel})
+        h._json({"ok": True, "idx": idx, "take": take_no,
+                 "duration": round(dur, 3), "wav": rel})
+        return True
+
+    # 切换某一行的版本：多 take 里选一个当成品，整轨跟着重拼
+    if method == "POST" and "/lines/" in path and path.endswith("/take"):
+        parts = path.split("/")
+        sid = parts[3]
+        try:
+            idx = int(parts[5])
+            d = json.loads(body or b"{}")
+            want = int(d.get("n"))
+        except (IndexError, ValueError, TypeError):
+            h._err("行号或版本号不合法")
+            return True
+        script = _find(sid)
+        if not script:
+            h._err("剧本不存在", 404)
+            return True
+        rec = next((l for l in script.get("lines") or [] if l.get("idx") == idx), None)
+        takes = _norm_takes(rec or {})
+        hit = next((t for t in takes if t["n"] == want), None)
+        if not hit:
+            h._err("这个版本不存在，可能已经被覆盖了", 404)
+            return True
+
+        def _mut(items):
+            for s in items:
+                if s["id"] != sid:
+                    continue
+                for l in s.get("lines") or []:
+                    if l.get("idx") == idx:
+                        l.update({"take": want, "wav": hit["wav"],
+                                  "duration": hit.get("duration") or 0})
+
+        P._update_json("scripts.json", _mut)
+        _concat(sid, float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP))
+        h._json({"ok": True, "idx": idx, "take": want,
+                 "wav": hit["wav"], "duration": hit.get("duration") or 0})
         return True
 
     if method == "POST" and path.endswith("/concat"):

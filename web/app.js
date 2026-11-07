@@ -1651,6 +1651,13 @@
       const hue = roleHue(l.role_name);
       const stat = l.status === "done" ? "done" : l.status === "failed" ? "failed" : "pending";
       const mark = stat === "done" ? "✓" : stat === "failed" ? "✕" : "";
+      // 多版本：这一行重录过几次就列几版，选中的那版进整轨与导出
+      const takes = l.takes || [];
+      const takeSel = takes.length > 1
+        ? `<select class="line-take" data-takeline="${l.idx}" title="这一行有 ${takes.length} 个版本，选一个当成品">
+             ${takes.map((t) => `<option value="${t.n}"${t.n === l.take ? " selected" : ""}>v${t.n}</option>`).join("")}
+           </select>`
+        : "";
       return `
         <div class="script-line ${stat}" data-line-idx="${l.idx}"
              title="${esc(l.instruction ? "下发的指令：" + l.instruction : "没有额外指令（用默认语气）")}">
@@ -1660,12 +1667,13 @@
             ${esc(l.emotion)}<em>${esc(EMOTION_SOURCE[l.emotion_source] || "")}</em>
           </span>
           <span class="line-text">${esc(l.text)}</span>
+          ${takeSel}
           <span class="line-state ${stat}">${mark}</span>
           <span class="line-acts">
             <button class="icon-btn" type="button" data-playline="${l.idx}" title="试听这一行" ${l.wav ? "" : "disabled"}>
               <svg class="icon icon-sm"><use href="#i-play"/></svg>
             </button>
-            <button class="icon-btn" type="button" data-redoline="${l.idx}" title="只重做这一行">
+            <button class="icon-btn" type="button" data-redoline="${l.idx}" title="${takes.length ? `再录一版（当前 v${l.take}）` : "只重做这一行"}">
               <svg class="icon icon-sm"><use href="#i-refresh"/></svg>
             </button>
           </span>
@@ -1887,12 +1895,25 @@
     if (!S.current) return;
     toast("正在重做这一行…");
     try {
-      await api(`/api/scripts/${S.current.id}/lines/${idx}/redo`, {
+      const r = await api(`/api/scripts/${S.current.id}/lines/${idx}/redo`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
       });
       await openScript(S.current.id);
-      toast("这一行已更新");
+      toast(r && r.take > 1 ? `已生成 v${r.take}（旧版本仍可切回）` : "这一行已更新");
     } catch (e) { toast("重做失败：" + e.message, true); }
+  }
+
+  // 切版本：只换「用哪一版」，不重新合成，整轨与导出跟着当前这版走
+  async function switchTake(idx, n) {
+    if (!S.current) return;
+    try {
+      await api(`/api/scripts/${S.current.id}/lines/${idx}/take`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ n }),
+      });
+      await openScript(S.current.id);
+      toast(`已切到 v${n}`);
+    } catch (e) { toast("切换版本失败：" + e.message, true); }
   }
 
   // 导出：按勾选拼 parts。没有音频的项直接禁用而不是导出空包——
@@ -2087,6 +2108,12 @@
       }
       const redo = e.target.closest("[data-redoline]");
       if (redo) redoLine(parseInt(redo.dataset.redoline, 10));
+    });
+    // 版本下拉在行内：用 change 而不是 click，键盘选择也要生效
+    $("scriptLines").addEventListener("change", (e) => {
+      const sel = e.target.closest("[data-takeline]");
+      if (!sel) return;
+      switchTake(parseInt(sel.dataset.takeline, 10), parseInt(sel.value, 10));
     });
   }
 

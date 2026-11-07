@@ -282,7 +282,7 @@
     display:grid;gap:3px 7px;padding:7px 9px;
     grid-template-columns:22px auto auto minmax(0,1fr) 14px auto;
     grid-template-areas:
-      "no role emo . state acts"
+      "no role emo take state acts"
       "text text text text text text";
     align-items:center;
     background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-sm);
@@ -293,6 +293,17 @@
   .line-emotion{grid-area:emo}
   .line-state{grid-area:state}
   .line-acts{grid-area:acts}
+  /* 多版本下拉：只在重录过 2 次以上时出现，靠右贴着状态标记 */
+  .line-take{
+    grid-area:take;justify-self:end;
+    appearance:none;-webkit-appearance:none;
+    padding:1px 4px;min-width:34px;
+    font-family:var(--font-mono);font-size:10.5px;text-align:center;
+    color:var(--text-3);background:transparent;
+    border:1px solid var(--line);border-radius:4px;cursor:pointer;
+  }
+  .line-take:hover{color:var(--text-1);border-color:var(--line-strong, var(--line))}
+  .line-take:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
   .line-text{
     grid-area:text;white-space:normal;word-break:break-word;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;

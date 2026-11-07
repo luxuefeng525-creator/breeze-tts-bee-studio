@@ -241,6 +241,10 @@ def test_synth_job_lifecycle_and_concat(base_url):
         code, after = _req(base_url + "/api/scripts/" + s["id"])
         assert after["lines"][1]["status"] == "done", after["lines"][1]
         assert after["lines"][1]["wav"], after["lines"][1]
+        # 重录是「加一版」而不是覆盖：上一版还在，可以切回去
+        take_row = after["lines"][1]
+        assert take_row["take"] == 2, take_row
+        assert [t["n"] for t in take_row["takes"]] == [1, 2], take_row
     finally:
         _req(base_url + "/api/scripts/" + s["id"], "DELETE")
         _req(base_url + "/api/roles/" + role["id"], "DELETE")
@@ -515,6 +519,46 @@ def test_export_rejects_audio_when_not_synthesized(base_url):
 
         code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=script", timeout=30)
         assert code == 200 and zipfile.ZipFile(io.BytesIO(blob)).namelist() == ["script.txt"]
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 多版本（take）
+def test_take_switch_rebuilds_full_track(base_url):
+    """一条台词可以有多版：切换后整轨按选中那版重拼，选不存在的版本要 404。"""
+    import script_routes as SR
+
+    s = _mk_script(base_url, "旁白：第一句。\n旁白：第二句。")
+    try:
+        _seed_audio_files(s["id"])
+        script = next(x for x in P._load("scripts.json") if x["id"] == s["id"])
+        row = SR._enriched(script, SR.parse_for(script))[0]
+        out_dir = P.AUDIOS / "scripts" / s["id"]
+        name = "line_000_t2.wav"
+        # 第 2 版故意做长一点：切过去后整轨时长必须跟着变，
+        # 否则「切了没生效」这种 bug 会被静默放过
+        (out_dir / name).write_bytes(P.pcm_to_wav(b"\x00" * (P.SAMPLE_RATE * 2)))
+        SR._persist_take(s["id"], 0, row, 2, 1.0, f"audio/scripts/{s['id']}/{name}")
+        SR._concat(s["id"], 0.35)
+
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert [t["n"] for t in d["lines"][0]["takes"]] == [1, 2], d["lines"][0]
+        assert d["lines"][0]["take"] == 2, d["lines"][0]
+        longer = d["duration"]
+
+        code, r = _json_req(base_url + f"/api/scripts/{s['id']}/lines/0/take", "POST", {"n": 1})
+        assert code == 200, r
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert d["lines"][0]["take"] == 1, d["lines"][0]
+        assert d["lines"][0]["wav"].endswith("line_000.wav"), d["lines"][0]["wav"]
+        assert d["duration"] < longer, (d["duration"], longer)
+
+        # 导出打包的是「当前选中的那一版」，不是固定按行号拼的第一个文件
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=lines", timeout=30)
+        assert code == 200 and blob[:2] == b"PK", (code, blob[:40])
+
+        code, err = _json_req(base_url + f"/api/scripts/{s['id']}/lines/0/take", "POST", {"n": 9})
+        assert code == 404, (code, err)
     finally:
         _req(base_url + "/api/scripts/" + s["id"], "DELETE")
 
