@@ -48,8 +48,11 @@
     libRolePage: 0,
   };
   const LIB_VOICE_PAGE = 6;   // 每页音色卡片数（受 1080p 视口高度约束）
-  const LIB_HIST_PAGE = 4;    // 每页历史条数
+  const LIB_HIST_PAGE = 4;    // 每页历史条数（视口不够高时自动减半，见 histPageSize）
   const LIB_ROLE_PAGE = 4;    // 每页角色卡片数
+  // 历史区是 flex:1 的内部滚动容器；900 高的屏放不下 4 行 + 分页条，
+  // 每页少放两行，避免「最后一行和分页按钮被裁在视口外」。
+  const histPageSize = () => (window.innerHeight < 960 ? 2 : LIB_HIST_PAGE);
 
   // ---------------------------------------------------------------- 工具
   const esc = (s) => String(s == null ? "" : s)
@@ -178,7 +181,7 @@
     const _roleBad = !!_role && !(_role.voice_id || "").trim();
     const _bad = _roleBad || (_v && _v.type === "clone" && refTextState(_v) === "missing");
     $("generateBtn").disabled = !chars || state.busy || !!_bad;
-    $("paperSaved").textContent = chars ? "草稿已保存在本机" : "草稿已保存在本机";
+    $("paperSaved").textContent = chars ? "草稿已保存在本机" : "还没有内容";
 
     // 稿纸自适应高度：textarea 自身不滚动（overflow:hidden 会裁掉超出部分，
     // 而 .paper-body 只有被内容撑高才出现滚动条——长文本因此完全看不到后面）。
@@ -284,9 +287,19 @@
     }
 
     const grid = $("roleGrid");
-    $("roleEmpty").hidden = state.roles.length > 0;
-    const rShown = state.roles.slice(state.libRolePage * LIB_ROLE_PAGE,
-                                     (state.libRolePage + 1) * LIB_ROLE_PAGE);
+    // 搜索框管的是整个音色库：角色卡也要跟着过滤，否则输入后只有音色变，
+    // 用户会以为「全库可搜」而实际找不到第 20 个角色。
+    const q = (($("libSearch") && $("libSearch").value) || "").trim().toLowerCase();
+    const roles = q ? state.roles.filter((r) =>
+      ((r.name || "") + (r.description || "") + roleVoiceName(r.voice_id))
+        .toLowerCase().includes(q)) : state.roles;
+    $("roleEmpty").hidden = roles.length > 0;
+    // 数据被删或视口变化后页数会变小；页码必须收敛，否则出现
+    // 「第 66 / 33 页」这种空白页，且分页栏可能整个消失无法回退。
+    const rTotal = Math.max(1, Math.ceil(roles.length / LIB_ROLE_PAGE));
+    state.libRolePage = Math.min(state.libRolePage, rTotal - 1);
+    const rShown = roles.slice(state.libRolePage * LIB_ROLE_PAGE,
+                               (state.libRolePage + 1) * LIB_ROLE_PAGE);
     grid.innerHTML = rShown.map((r) => {
       const arch = S.archetypes.find((a) => a.key === (r.archetype || "custom"));
       const spd = Number(r.speed || 1);
@@ -310,13 +323,18 @@
         <p class="card-desc">${esc(r.description || "（没有简介）")}</p>
       </article>`;
     }).join("");
-    const rPages = Math.ceil(state.roles.length / LIB_ROLE_PAGE);
+    const rPages = rTotal;
     if (rPages > 1) {
+      const far = rPages > 3;
+      const first = far ? `<button type="button" class="btn btn-sm" data-librole="0" ${state.libRolePage === 0 ? "disabled" : ""}>« 首页</button>` : "";
+      const last = far ? `<button type="button" class="btn btn-sm" data-librole="${rPages - 1}" ${state.libRolePage >= rPages - 1 ? "disabled" : ""}>末页 »</button>` : "";
       grid.insertAdjacentHTML("beforeend",
         `<div class="lib-pager">
+           ${first}
            <button type="button" class="btn btn-sm" data-librole="${state.libRolePage - 1}" ${state.libRolePage === 0 ? "disabled" : ""}>上一页</button>
-           <span>第 ${state.libRolePage + 1} / ${rPages} 页 · 共 ${state.roles.length} 个角色</span>
+           <span>第 ${state.libRolePage + 1} / ${rPages} 页 · 共 ${roles.length} 个角色${q ? "（已筛选）" : ""}</span>
            <button type="button" class="btn btn-sm" data-librole="${state.libRolePage + 1}" ${state.libRolePage >= rPages - 1 ? "disabled" : ""}>下一页</button>
+           ${last}
          </div>`);
     }
   }
@@ -1023,6 +1041,8 @@
 
     const grid = $("libraryGrid");
     $("libraryEmpty").hidden = list.length > 0;
+    const vPagesAll = Math.max(1, Math.ceil(list.length / LIB_VOICE_PAGE));
+    state.libVoicePage = Math.min(state.libVoicePage, vPagesAll - 1);
     const vStart = state.libVoicePage * LIB_VOICE_PAGE;
     const vShown = list.slice(vStart, vStart + LIB_VOICE_PAGE);
     grid.innerHTML = vShown.map((v) => `
@@ -1046,26 +1066,40 @@
       </article>`).join("");
 
     // 分页控件
-    const vPages = Math.ceil(list.length / LIB_VOICE_PAGE);
+    const vPages = vPagesAll;
     if (vPages > 1) {
+      const far = vPages > 3;
+      const first = far ? `<button type="button" class="btn btn-sm" data-libvoice="0" ${state.libVoicePage === 0 ? "disabled" : ""}>« 首页</button>` : "";
+      const last = far ? `<button type="button" class="btn btn-sm" data-libvoice="${vPages - 1}" ${state.libVoicePage >= vPages - 1 ? "disabled" : ""}>末页 »</button>` : "";
       grid.insertAdjacentHTML("beforeend",
         `<div class="lib-pager">
+           ${first}
            <button type="button" class="btn btn-sm" data-libvoice="${state.libVoicePage - 1}" ${state.libVoicePage === 0 ? "disabled" : ""}>上一页</button>
            <span>第 ${state.libVoicePage + 1} / ${vPages} 页 · 共 ${list.length} 个音色</span>
            <button type="button" class="btn btn-sm" data-libvoice="${state.libVoicePage + 1}" ${state.libVoicePage >= vPages - 1 ? "disabled" : ""}>下一页</button>
+           ${last}
          </div>`);
     }
 
-    const hist = state.history.slice().reverse();
-    $("libHistoryCount").textContent = `${hist.length} 条`;
-    const hStart = state.libHistPage * LIB_HIST_PAGE;
-    const shown = hist.slice(hStart, hStart + LIB_HIST_PAGE);
-    const hPages = Math.ceil(hist.length / LIB_HIST_PAGE);
+    const histAll = state.history.slice().reverse();
+    // 历史 131 条、每页 4 条 = 34 页。搜索必须真的过滤历史，否则用户
+    // 找一条旧配音要点 30 多次「下一页」，搜索框只是个错觉。
+    const hist = q ? histAll.filter((h) =>
+      ((h.text || "") + voiceName(h.voice_id) + (h.created_at || ""))
+        .toLowerCase().includes(q)) : histAll;
+    $("libHistoryCount").textContent = q
+      ? `${hist.length} / ${histAll.length} 条` : `${hist.length} 条`;
+    const hPageSize = histPageSize();
+    const hPagesAll = Math.max(1, Math.ceil(hist.length / hPageSize));
+    state.libHistPage = Math.min(state.libHistPage, hPagesAll - 1);
+    const hStart = state.libHistPage * hPageSize;
+    const shown = hist.slice(hStart, hStart + hPageSize);
+    const hPages = hPagesAll;
     $("libraryHistory").innerHTML = hist.length
       ? shown.map((h) => `
         <div class="lib-hist-row">
           <span class="hist-main">
-            <span class="hist-title">${esc((h.text || "").replace(/\s+/g, " ").slice(0, 40) || "（无文本）")}</span>
+            <span class="hist-title" title="${esc(h.text || "")}">${esc((h.text || "").replace(/\s+/g, " ").slice(0, 40) || "（无文本）")}</span>
             <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc(h.created_at || "")}</span>
           </span>
           <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" aria-label="播放"><svg class="icon"><use href="#i-play"/></svg></button>
@@ -1073,11 +1107,16 @@
         </div>`).join("")
       : '<div class="empty-hint">还没有合成记录。</div>';
     if (hPages > 1) {
+      const far = hPages > 3;
+      const first = far ? `<button type="button" class="btn btn-sm" data-libhist="0" ${state.libHistPage === 0 ? "disabled" : ""}>« 首页</button>` : "";
+      const last = far ? `<button type="button" class="btn btn-sm" data-libhist="${hPages - 1}" ${state.libHistPage >= hPages - 1 ? "disabled" : ""}>末页 »</button>` : "";
       $("libraryHistory").insertAdjacentHTML("beforeend",
         `<div class="lib-pager">
+           ${first}
            <button type="button" class="btn btn-sm" data-libhist="${state.libHistPage - 1}" ${state.libHistPage === 0 ? "disabled" : ""}>上一页</button>
-           <span>第 ${state.libHistPage + 1} / ${hPages} 页 · 共 ${hist.length} 条</span>
+           <span>第 ${state.libHistPage + 1} / ${hPages} 页 · 共 ${hist.length} 条${q ? "（已筛选）" : ""}</span>
            <button type="button" class="btn btn-sm" data-libhist="${state.libHistPage + 1}" ${state.libHistPage >= hPages - 1 ? "disabled" : ""}>下一页</button>
+           ${last}
          </div>`);
     }
   }
@@ -1300,6 +1339,15 @@
         e.preventDefault();
         if (state.screen === "workbench") generate();
       }
+      // 音色条目外层是 <button>，里面的编辑/删除不能用嵌套 button，
+      // 只能是 role="button" 的 span：键盘聚焦得到、按 Enter/Space 也得能用。
+      const kb = e.target && e.target.closest
+        ? e.target.closest('[role="button"][tabindex="0"]') : null;
+      if (kb && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.repeat
+          && (e.key === "Enter" || e.key === " " || e.key === "Spacebar")) {
+        e.preventDefault();
+        kb.click();
+      }
       if (e.key === "Escape") {
         document.querySelectorAll("dialog[open]").forEach((d) => d.close());
       }
@@ -1436,7 +1484,8 @@
       }
     });
     $("libSearch").addEventListener("input", () => {
-      state.libVoicePage = 0; state.libHistPage = 0; renderLibrary();
+      state.libVoicePage = 0; state.libHistPage = 0; state.libRolePage = 0;
+      renderLibrary(); renderRoles();
     });
     $("libraryGrid").addEventListener("click", (e) => {
       const pg = e.target.closest("[data-libvoice]");
@@ -1450,7 +1499,9 @@
       const pg = e.target.closest("[data-librole]");
       if (pg) {
         const n = parseInt(pg.dataset.librole, 10);
-        if (n >= 0) { state.libRolePage = n; renderLibrary(); }
+        // 原来调的是 renderLibrary()，它根本不画角色卡 → 点「下一页」页码
+        // 会变、卡片却不动。必须重渲染角色区本身。
+        if (n >= 0) { state.libRolePage = n; renderRoles(); }
         return;
       }
     });
