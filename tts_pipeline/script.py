@@ -26,6 +26,11 @@ ARCHETYPES: dict[str, dict[str, str]] = {
         "instruction": "沉稳的纪录片旁白，字正腔圆，语速均匀，语气平和",
         "default_emotion": "中性",
     },
+    "neutral": {
+        "label": "通用人声",
+        "instruction": "自然的中性人声，吐字清晰，语气平和，不刻意偏向某一年龄或性别",
+        "default_emotion": "中性",
+    },
     "elder_m": {
         "label": "老年男",
         "instruction": "一位六十多岁的男性长者，声音低沉沙哑，语速缓慢，气息沉稳",
@@ -62,6 +67,58 @@ ARCHETYPES: dict[str, dict[str, str]] = {
         "default_emotion": "中性",
     },
 }
+
+# 角色名 → 原型 / 语速。剧本作者写「奶奶／孙子」，系统应该直接知道要
+# 老妇人的慢语速和孩子的亮嗓，而不是让作者去音色库手工配五遍角色。
+# 规则按「更具体」排前面：先认「孙子」，再认泛化的「孩子」。
+ARCHETYPE_HINTS: list[tuple[str, tuple[str, ...]]] = [
+    ("narrator", ("旁白", "解说", "画外音", "旁述", "narrator")),
+    ("elder_f", ("奶奶", "外婆", "姥姥", "婆婆", "祖母", "阿婆", "老太", "老奶奶", "大娘")),
+    ("elder_m", ("爷爷", "外公", "祖父", "大爷", "老爷子", "老头", "阿公", "老伯")),
+    ("teen_m", ("孙子", "外孙", "男孩", "弟弟", "儿子", "小伙", "少年")),
+    ("teen_f", ("孙女", "外孙女", "女孩", "妹妹", "女儿", "小姑娘", "丫头")),
+    ("adult_m", ("爸爸", "叔叔", "哥哥", "先生", "老板", "店长", "大哥")),
+    ("adult_f", ("妈妈", "阿姨", "姐姐", "女士", "姑娘", "老板娘")),
+    ("teen_m", ("小孩", "孩子", "小朋友", "宝宝", "娃娃", "孩童")),
+]
+
+ARCHETYPE_SPEED: dict[str, float] = {
+    "narrator": 0.98,
+    "elder_m": 0.92,
+    "elder_f": 0.92,
+    "teen_m": 1.08,
+    "teen_f": 1.08,
+}
+
+# 只收「明确的动作」，不收「小声／低声／笑／停顿」这类通用描述词：
+# 那些是作者写好的自由指令，改写反而会把原意吞掉（也会破坏老剧本）。
+GESTURE_PHRASES: dict[str, str] = {
+    "叹气": "先轻轻叹一口气再开口，语气里带着无奈与疲惫",
+    "叹了口气": "先轻轻叹一口气再开口，语气里带着无奈与疲惫",
+    "清嗓子": "开口前轻咳一声清清嗓子，随后自然说话",
+    "轻咳": "开口前轻轻咳嗽一声，再自然说话",
+    "轻笑": "带着轻轻的笑意说话，语调柔和上扬",
+    "微笑": "面带微笑地说，语气温和轻快",
+    "哽咽": "声音哽咽，气息不稳，带着哭腔",
+    "颤抖": "声音微微发颤，气息不稳",
+    "大喊": "提高音量喊出来，情绪外放",
+}
+
+
+def guess_archetype(role_name: str) -> str:
+    """按角色名猜原型，取**最长**的命中词；猜不出给「通用人声」。
+
+    「外孙女」同时命中「外孙」和「外孙女」，按词表顺序会判成少年男，
+    必须让更长的那个赢。平手时保持词表顺序（更具体的组别排在前面）。
+    """
+    name = (role_name or "").strip().lower()
+    best_key, best_len = "neutral", 0
+    for key, words in ARCHETYPE_HINTS:
+        for word in words:
+            if word in name and len(word) > best_len:
+                best_key, best_len = key, len(word)
+    return best_key
+
 
 # ---------------------------------------------------------------------------
 # 情绪词表
@@ -219,8 +276,16 @@ def resolve_emotion(
 
 
 def emotion_phrase(emotion: str) -> str:
-    """情绪 → 可下发的自然语言片段；认不出的原样返回（作者的自由指令）。"""
-    return EMOTIONS.get(emotion, emotion if emotion and emotion != NEUTRAL else "")
+    """情绪 → 可下发的自然语言片段。
+
+    先查情绪表，再查动作/语气词表（「叹气」这类标签要扩写成完整指令），
+    都不认识时原样返回——作者写「雨夜，压低声音」也该生效。
+    """
+    if not emotion or emotion == NEUTRAL:
+        return ""
+    if emotion in EMOTIONS:
+        return EMOTIONS[emotion]
+    return GESTURE_PHRASES.get(emotion, emotion)
 
 
 def mood_phrase(mood: str) -> str:

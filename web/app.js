@@ -1560,6 +1560,7 @@
   const S = {
     list: [], current: null, lines: [], job: null, timer: null,
     gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [],
+    missingRoles: [],
   };
 
   // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
@@ -1638,16 +1639,36 @@
       : "还没有台词";
 
     if (!lines.length) {
+      // 空剧本也要清掉上一次的「缺角色」缓存，否则后面合成会被过期值拦住
+      S.missingRoles = [];
       box.innerHTML = '<div class="empty-hint">解析后会在这里逐行显示：谁说的、什么情绪、念到第几句。</div>';
       return;
     }
     const errs = (d && d.errors) || [];
-    const errBox = errs.length
-      ? `<div class="script-errors">${errs.slice(0, 4).map((e) =>
+    // 「未知角色」不该只是一行红字：作者写完剧本最想做的是马上合成，
+    // 所以直接给出可以一键修好的入口，并在下面标出还差什么。
+    const missing = [...new Set(errs.filter((e) => e.role_name)
+      .map((e) => String(e.role_name).trim()).filter(Boolean))];
+    const other = errs.filter((e) => !e.role_name);
+    const castBox = missing.length
+      ? `<div class="script-cast">
+           <div class="script-cast-title">发现 ${missing.length} 个还没配好的角色</div>
+           <div class="script-cast-names">${missing.map((n) => `<span>${esc(n)}</span>`).join("")}</div>
+           <button class="btn-primary btn-sm" type="button" id="castBtn">一键补齐角色与音色</button>
+           <p>按名字自动判断老人 / 孩子 / 旁白，各配一个声音；跟已有克隆音色同名的角色会直接用那个声音。补好后在「音色库」里可以随时改。</p>
+         </div>`
+      : "";
+    const errBox = other.length
+      ? `<div class="script-errors">${other.slice(0, 4).map((e) =>
           `<div>第 ${e.line} 行：${esc(e.reason)}</div>`).join("")}</div>`
       : "";
+    S.missingRoles = missing;
+    const synthBtn = $("synthScriptBtn");
+    if (synthBtn) synthBtn.title = missing.length
+      ? `还有 ${missing.length} 个角色没配好，先点上方「一键补齐」`
+      : "按当前角色逐行合成并拼成整轨";
 
-    box.innerHTML = errBox + lines.map((l) => {
+    box.innerHTML = castBox + errBox + lines.map((l) => {
       const hue = roleHue(l.role_name);
       const stat = l.status === "done" ? "done" : l.status === "failed" ? "failed" : "pending";
       const mark = stat === "done" ? "✓" : stat === "failed" ? "✕" : "";
@@ -1681,8 +1702,9 @@
     }).join("");
 
     const bad = errs.length;
-    $("scriptHint").textContent = bad
-      ? `有 ${bad} 处需要修一下（见下方分镜顶部）`
+    $("scriptHint").textContent = missing.length
+      ? `${missing.length} 个角色还没配好，点上方「一键补齐」就能开合成`
+      : bad ? `有 ${bad} 处需要修一下（见下方分镜顶部）`
       : "用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气";
     $("scriptHint").classList.toggle("is-warn", bad > 0);
   }
@@ -1794,6 +1816,22 @@
     // 保存失败还继续，服务端用的就是上一版文本：用户看到的行数与合出来的内容对不上
     const saved = await saveScript(true);
     if (!saved) { toast("文本没保存成功，先解决再合成", true); return; }
+    // 角色可能在音色库里手工建好、或刚被一键补齐：以服务端**此刻**的解析
+    // 为准，不用渲染时缓存的 missingRoles（切屏回来后它会过期，
+    // 会把明明能合成的剧本硬拦下来，连文本都不让保存）。
+    try {
+      const probe = await api(`/api/scripts/${S.current.id}/parse`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw: $("scriptRaw").value, scenes: S.scenes || [] }),
+      });
+      const missing = [...new Set((probe.errors || []).filter((e) => e.role_name)
+        .map((e) => e.role_name))];
+      S.missingRoles = missing;
+      if (missing.length) {
+        toast(`还有 ${missing.length} 个角色没配好：${missing.slice(0, 3).join("、")}，去分镜上方一键补齐`, true);
+        return;
+      }
+    } catch (e) { /* 解析接口挂了就交给后端守卫，不在这里误拦 */ }
     $("synthScriptBtn").disabled = true;
     $("stopScriptBtn").hidden = false;
     $("scriptProgress").hidden = false;
@@ -1901,6 +1939,34 @@
       await openScript(S.current.id);
       toast(r && r.take > 1 ? `已生成 v${r.take}（旧版本仍可切回）` : "这一行已更新");
     } catch (e) { toast("重做失败：" + e.message, true); }
+  }
+
+  // 一键补齐角色：后端按名字配原型/音色，回来后重新打开剧本，
+  // 行列表与「未知角色」提示一起刷新，用户立刻能点合成全剧。
+  async function autoCast() {
+    if (!S.current) return;
+    const btn = $("castBtn");
+    if (btn) { btn.disabled = true; btn.textContent = "正在配角色…"; }
+    try {
+      const r = await api(`/api/scripts/${S.current.id}/cast`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const brief = (r.created || []).slice(0, 3)
+        .map((c) => `${c.name}（${c.label}）`).join("、");
+      await openScript(S.current.id);
+      toast(r.count
+        ? `已配好 ${r.count} 个角色：${brief}${r.count > 3 ? " 等" : ""}${r.remaining ? `，还有 ${r.remaining} 处要修` : "，现在可以合成全剧了"}`
+        : "角色都配好了");
+    } catch (e) {
+      toast("补齐失败：" + e.message, true);
+    } finally {
+      // 成功时 openScript 会重绘、旧按钮已不在 DOM；失败或「cast 成功但
+      // 刷新详情失败」时必须复位，否则按钮永远停在「正在配角色…」
+      if (btn && btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = "一键补齐角色与音色";
+      }
+    }
   }
 
   // 切版本：只换「用哪一版」，不重新合成，整轨与导出跟着当前这版走
@@ -2094,6 +2160,7 @@
     $("scriptTitleInput").addEventListener("blur", () => saveScript(true));
     $("scriptGap").addEventListener("change", () => saveScript(true));
     $("scriptLines").addEventListener("click", (e) => {
+      if (e.target.closest("#castBtn")) { autoCast(); return; }
       const play = e.target.closest("[data-playline]");
       if (play) {
         const idx = parseInt(play.dataset.playline, 10);

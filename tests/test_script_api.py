@@ -624,3 +624,100 @@ def test_duplicate_role_name_is_rejected(base_url):
     finally:
         _req(base_url + "/api/roles/" + first["id"], "DELETE")
         _req(base_url + "/api/roles/" + second["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 一键补齐角色
+def test_cast_autofill_builds_roles_and_voices_from_script(base_url):
+    """写完剧本满屏未知角色时，一次补齐就能直接合成，不用去音色库手工建 N 次。"""
+    clone = _mk_voice(base_url, "小蜜蜂配音", instruction="我自己的声音")
+    raw = "\n".join([
+        "## 场景一",
+        "小蜜蜂旁白：傍晚六点，一位奶奶带着孙子推门进来。",
+        "小蜜蜂[清嗓子]：阿姨，您慢点。",
+        "孙子：奶奶你看！这个窗户好大！",
+        "奶奶[叹气]：山是真的……你慢点跑。",
+    ])
+    s = _mk_script(base_url, raw, title="自动配角验收")
+    created_ids = []
+    created_voice_ids = []
+    try:
+        code, before = _req(base_url + "/api/scripts/" + s["id"])
+        assert len(before["errors"]) == 4, before["errors"]
+        assert all(not l["voice_id"] for l in before["lines"])
+
+        code, res = _json_req(base_url + f"/api/scripts/{s['id']}/cast", "POST", {})
+        assert code == 201, res
+        assert res["count"] == 4, res
+        assert res["remaining"] == 0, res
+        created_ids = [c["role_id"] for c in res["created"]]
+        created_voice_ids = [c["voice_id"] for c in res["created"]
+                             if not c["reused"]]
+        by_name = {c["name"]: c for c in res["created"]}
+
+        # 返回的 id 必须是**真的落库**的：只断言非空会让「角色指向
+        # 不存在的音色」和「并发下谎报创建」悄悄通过
+        _, roles_now = _req(base_url + "/api/roles")
+        _, voices_now = _req(base_url + "/api/voices")
+        role_ids = {r["id"] for r in roles_now}
+        voice_ids = {v["id"] for v in voices_now}
+        assert set(created_ids) <= role_ids
+        assert set(created_voice_ids) <= voice_ids
+
+        # 名字跟已有音色同源的角色复用它；其余按名字猜原型并各自建音色
+        assert by_name["小蜜蜂"]["voice_id"] == clone["id"], by_name["小蜜蜂"]
+        assert by_name["小蜜蜂旁白"]["voice_id"] == clone["id"]
+        assert by_name["奶奶"]["archetype"] == "elder_f"
+        assert by_name["孙子"]["archetype"] == "teen_m"
+        assert by_name["奶奶"]["voice_id"] != by_name["孙子"]["voice_id"]
+
+        code, after = _req(base_url + "/api/scripts/" + s["id"])
+        assert after["errors"] == [], after["errors"]
+        assert all(l["voice_id"] in voice_ids for l in after["lines"]), after["lines"]
+        # 原型与动作标签都真正落到指令里
+        assert "女性长者" in after["lines"][3]["instruction"], after["lines"][3]
+        assert "叹" in after["lines"][3]["instruction"]
+        assert "清" in after["lines"][1]["instruction"]
+
+        # 幂等：再点一次不重复建角色
+        code, again = _json_req(base_url + f"/api/scripts/{s['id']}/cast", "POST", {})
+        assert code == 200 and again["count"] == 0, again
+        _, roles = _req(base_url + "/api/roles")
+        assert len([r for r in roles if r["name"] == "奶奶"]) == 1
+    finally:
+        for rid in created_ids:
+            _req(base_url + "/api/roles/" + rid, "DELETE")
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        for vid in set(created_voice_ids) - {clone["id"]}:
+            _req(base_url + "/api/voices/" + vid, "DELETE")
+        _req(base_url + "/api/voices/" + clone["id"], "DELETE")
+
+
+def test_cast_respects_forced_voice_and_unknown_id(base_url):
+    voice = _mk_voice(base_url, "统一音色")
+    s = _mk_script(base_url, "甲：你好。\n乙：你好。")
+    made = []
+    try:
+        code, err = _json_req(base_url + f"/api/scripts/{s['id']}/cast", "POST",
+                              {"voice_id": "v_not_exist"})
+        assert code == 400, (code, err)
+
+        code, res = _json_req(base_url + f"/api/scripts/{s['id']}/cast", "POST",
+                              {"voice_id": voice["id"]})
+        assert code == 201 and res["count"] == 2, res
+        made = [c["role_id"] for c in res["created"]]
+        assert all(c["voice_id"] == voice["id"] and c["reused"] for c in res["created"])
+        assert res["remaining"] == 0
+
+        # 幂等分支也必须校验 voice_id：没有缺角色时不能静默吞掉非法 id
+        code, err = _json_req(base_url + f"/api/scripts/{s['id']}/cast", "POST",
+                              {"voice_id": "v_not_exist"})
+        assert code == 400, (code, err)
+    finally:
+        # 断言中途失败时 made 还是空的，按名字再兜一次，别把角色留在库里
+        if not made:
+            _, roles = _req(base_url + "/api/roles")
+            made = [r["id"] for r in roles if r["name"] in ("甲", "乙")]
+        for rid in made:
+            _req(base_url + "/api/roles/" + rid, "DELETE")
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")

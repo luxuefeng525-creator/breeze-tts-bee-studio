@@ -111,7 +111,12 @@
   .help-note code{font-family:var(--font-mono);color:var(--accent)}
 
   /* ---- 音色库 ---- */
-  .library-section{margin-top:26px}
+  /* 卡片变多时别把分页条顶出视口：最后一段占满剩余高度，历史在内部滚动，
+     分页条吸底常驻。只收紧间距是「这次刚好够」，内容再多又会溢出。 */
+  .library-section{margin-top:18px;flex:0 0 auto}
+  #screen-library > .library-section:last-child{
+    flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+  }
   .lib-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px}
   .lib-head h2{font-size:16px;font-weight:600}
   .lib-head span{font-size:12.5px;color:var(--text-3)}
@@ -129,7 +134,10 @@
   .card-type{font-size:11.5px;color:var(--accent)}
   .card-desc{font-size:12.5px;color:var(--text-3);line-height:1.65;min-height:34px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .voice-card footer{display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-disabled);border-top:1px solid var(--line);padding-top:9px}
-  .lib-history{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+  .lib-history{
+    display:flex;flex-direction:column;gap:6px;margin-top:8px;
+    flex:1 1 auto;min-height:0;overflow-y:auto;max-height:none;
+  }
   .lib-hist-row{display:flex;align-items:center;gap:11px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm)}
   .lib-hist-row .hist-main{flex:1;min-width:0}
 
@@ -159,8 +167,11 @@
   /* ---- 音色库分页控件 ---- */
   .lib-pager{
     grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:12px;
-    padding:12px 0 2px;margin-top:4px;border-top:1px solid var(--line);
+    padding:8px 0 2px;margin-top:4px;border-top:1px solid var(--line);
     font-size:12px;color:var(--text-3);
+    /* 历史在内部滚动时，分页按钮必须一直看得见 */
+    position:sticky;bottom:0;background:var(--surface);z-index:1;
+    flex:0 0 auto;
   }
   .lib-pager .btn[disabled]{opacity:.4;pointer-events:none}
   .lib-history .lib-pager{border-top:1px solid var(--line);margin-top:6px}
@@ -276,6 +287,21 @@
     background:rgba(232,138,120,.10);border:1px solid rgba(232,138,120,.28);
     color:var(--danger);font-size:12px;line-height:1.7;
   }
+  /* 未配角色的补齐卡：不是报错，而是「下一步该做什么」 */
+  .script-cast{
+    flex:0 0 auto;margin-bottom:8px;padding:11px 12px;
+    border:1px solid var(--line);border-left:3px solid var(--warning);
+    border-radius:var(--r-sm);background:var(--surface-2);
+  }
+  .script-cast-title{font-size:12.5px;font-weight:600;color:var(--text-1);margin-bottom:7px}
+  .script-cast-names{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:9px}
+  .script-cast-names span{
+    font-size:11px;padding:2px 7px;border-radius:99px;
+    background:var(--accent-soft);color:var(--accent);
+  }
+  .script-cast p{margin:7px 0 0;font-size:11px;line-height:1.6;color:var(--text-3)}
+  .btn-sm{padding:6px 12px;font-size:12px}
+  .btn-sm:disabled{opacity:.6;cursor:wait}
   /* 两行布局：第一行是标签与状态，第二行整幅放台词。
      单行 6 列会把台词挤成「那天一…」，读不出内容。 */
   .script-line{

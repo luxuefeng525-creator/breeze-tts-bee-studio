@@ -24,9 +24,11 @@ from urllib.parse import parse_qs, quote, urlparse
 import panel as P
 from tts_pipeline.script import (
     ARCHETYPES,
+    ARCHETYPE_SPEED,
     EMOTIONS,
     MOODS,
     estimate_seconds,
+    guess_archetype,
     parse_script,
 )
 
@@ -39,6 +41,10 @@ DEFAULT_PARTS = ",".join(EXPORT_PARTS)
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
+# cast 要连写 voices.json / roles.json 两个文件：单次 RMW 各自原子，
+# 但两次之间需要一把进程内总锁，否则两个并发请求会基于同一份旧快照
+# 各建一遍角色，并在响应里谎报「建成功了」。
+_CAST_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +137,48 @@ def parse_for(script: dict):
     instr = {name: _role_instruction(r, voices) for name, r in roles.items()}
     moods = {s["name"]: s.get("mood", "") for s in _norm_scenes(script.get("scenes"))}
     return parse_script(script.get("raw", ""), defaults, instr, moods)
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def plan_cast(errors: list[dict], role_names: set[str],
+              voices: dict[str, dict]) -> list[dict]:
+    """从解析错误里列出「还缺谁」，并给出每个角色该用什么声音。
+
+    名字跟已有音色有 ≥2 字公共前缀时复用那个音色（作者写「小蜜蜂」，
+    库里叫「小蜜蜂配音」，显然是想用同一个声音）；其余按名字猜原型
+    新建一个设计型音色，避免五个角色全绑一个音色、听成同一个人。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for err in errors or []:
+        name = str(err.get("role_name") or "").strip()
+        if not name or name in role_names or name in seen:
+            continue
+        seen.add(name)
+        arch = guess_archetype(name)
+        hit = None
+        best = 0
+        for v in voices.values():
+            n = _common_prefix_len(name, str(v.get("name") or "").strip())
+            if n >= 2 and n > best:
+                hit, best = v, n
+        out.append({
+            "name": name,
+            "archetype": arch,
+            "label": (ARCHETYPES.get(arch) or {}).get("label", "自定义"),
+            "instruction": (ARCHETYPES.get(arch) or {}).get("instruction", ""),
+            "speed": ARCHETYPE_SPEED.get(arch, 1.0),
+            "voice": hit,
+        })
+    return out
 
 
 def _norm_scenes(raw) -> list[dict]:
@@ -853,6 +901,140 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         h._json({"ok": True, "duration": fresh.get("duration", 0.0),
                  "full_wav": fresh.get("full_wav", ""),
                  "timeline": fresh.get("timeline", [])})
+        return True
+
+    # 一键补齐角色：剧本写完满屏「未知角色」时，不该让用户跑去音色库
+    # 手工建 N 次。按角色名自动配原型与设计型音色，一次落库。
+    if method == "POST" and path.count("/") == 4 and path.endswith("/cast"):
+        sid = path.split("/")[3]
+        script = _find(sid)
+        if not script:
+            h._err("剧本不存在", 404)
+            return True
+        try:
+            d = json.loads(body or b"{}")
+        except Exception:
+            d = {}
+        forced = str(d.get("voice_id") or "").strip()
+        with _CAST_LOCK:
+            # 锁内重读：两个并发请求不能共用同一份旧快照
+            script = _find(sid) or script
+            parsed = parse_for(script)
+            if len(parsed.lines) > MAX_LINES:
+                h._err(f"一次最多 {MAX_LINES} 行")
+                return True
+            if forced and forced not in _voices_by_id():
+                h._err("指定的音色不存在")
+                return True
+            plan = plan_cast(parsed.errors, set(_roles_by_name()), _voices_by_id())
+            if not plan:
+                h._json({"created": [], "count": 0,
+                         "remaining": len(parsed.errors)})
+                return True
+
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            new_voices: list[dict] = []
+            new_roles: list[dict] = []
+            created: list[dict] = []
+            # 与 new_roles 一一对应：新建音色的名字（写回后按名换真实 id），
+            # 复用已有音色时为 None
+            role_voice_names: list[str | None] = []
+            for item in plan:
+                voice = item["voice"]
+                if forced:
+                    voice = _voices_by_id().get(forced)
+                reused = bool(voice)
+                voice_name = None
+                if not voice:
+                    voice = {
+                        "id": P._new_id("v"),
+                        "name": f"{item['name']}的声音",
+                        "type": "design",
+                        "archetype": item["archetype"],
+                        "instruction": item["instruction"],
+                        "ref_audio": None,
+                        "ref_text": "",
+                        "cfg_scale": DEFAULT_CFG,
+                        "created_at": now,
+                    }
+                    new_voices.append(voice)
+                    voice_name = voice["name"]
+                role_voice_names.append(voice_name)
+                role = {
+                    "id": P._new_id("r"),
+                    "name": item["name"],
+                    "description": f"从剧本自动补齐（{item['label']}）",
+                    "voice_id": voice["id"],
+                    "archetype": item["archetype"],
+                    "default_emotion": "",
+                    "speed": item["speed"],
+                    "accent": "",
+                    "defaults": {"cfg_scale": DEFAULT_CFG, "seed": 42},
+                    "created_at": now,
+                }
+                new_roles.append(role)
+                created.append({
+                    "name": item["name"], "archetype": item["archetype"],
+                    "label": item["label"], "role_id": role["id"],
+                    "voice_id": voice["id"], "voice_name": voice["name"],
+                    "reused": reused, "speed": item["speed"],
+                })
+
+            # 每个文件单独原子 RMW；mutator 内按名字查重，防止与用户在
+            # 音色库里手工新建的对象撞车。顺序是音色→角色，中间态里
+            # 不会出现「角色指向不存在音色」。
+            def _add_voices(items, _new=new_voices):
+                names = {str(v.get("name") or "").strip() for v in items}
+                for v in _new:
+                    key = str(v["name"]).strip()
+                    if key not in names:
+                        items.append(v)
+                        names.add(key)
+
+            def _add_roles(items, _new=new_roles):
+                names = {str(r.get("name") or "").strip() for r in items}
+                for r in _new:
+                    key = str(r["name"]).strip()
+                    if key not in names:
+                        items.append(r)
+                        names.add(key)
+
+            if new_voices:
+                P._update_json("voices.json", _add_voices)
+                # 同名音色可能是用户先前手工建的（名字带空格也算）；
+                # 按 strip 后的名字换回真实 id，不能留下悬空 voice_id
+                voices_now = P._load("voices.json")
+                actual = {str(v.get("name") or "").strip(): v for v in voices_now}
+                for r, name in zip(new_roles, role_voice_names):
+                    if name and name in actual:
+                        r["voice_id"] = actual[name]["id"]
+                for c, name in zip(created, role_voice_names):
+                    if name and name in actual:
+                        c["voice_id"] = actual[name]["id"]
+
+            valid_ids = {v["id"] for v in P._load("voices.json")}
+            dangling = [r["name"] for r in new_roles if r["voice_id"] not in valid_ids]
+            if dangling:
+                h._err(f"音色没写成功：{', '.join(dangling[:3])}，请重试")
+                return True
+            P._update_json("roles.json", _add_roles)
+
+            # 以落盘结果为准回报，不能把「被查重跳过」的对象算成新建
+            real_roles = {str(r.get("name") or "").strip(): r
+                          for r in P._load("roles.json")}
+            real_voices = {v["id"]: v for v in P._load("voices.json")}
+            verified = []
+            for c in created:
+                r = real_roles.get(c["name"])
+                if not r or r.get("voice_id") not in real_voices:
+                    continue
+                c["role_id"] = r["id"]
+                c["voice_id"] = r["voice_id"]
+                c["voice_name"] = real_voices[r["voice_id"]]["name"]
+                verified.append(c)
+            remaining = len(parse_for(_find(sid) or script).errors)
+            h._json({"created": verified, "count": len(verified),
+                     "remaining": remaining}, 201)
         return True
 
     # ---- 增删改 ----
