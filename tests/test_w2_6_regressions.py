@@ -124,20 +124,47 @@ def test_instruction_not_duplicated_between_paths(base_url):
         f"（比值 {ratio:.2f}）——大概率是指令被重复拼接")
 
 
+def _blocking_json(base_url, text: str, **extra) -> dict:
+    """非流式合成的完整响应（含 text_used / engine_note 等契约字段）。"""
+    fields = {"text": text, "instruction": "沉稳旁白",
+              "cfg_scale": "4", "seed": "42", "no_history": "1"}
+    fields.update(extra)
+    body, ctype = _mp(fields)
+    req = urllib.request.Request(base_url + "/api/synthesize",
+                                 data=body, method="POST")
+    req.add_header("Content-Type", ctype)
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            if os.environ.get("TTS_ALLOW_BUSY_SKIP") == "1":
+                pytest.skip("上游忙，已按 TTS_ALLOW_BUSY_SKIP=1 放行")
+            raise AssertionError("面板未消化 409（排队应保证请求不被拒）")
+        raise
+
+
 def test_norm_applied_on_blocking_path(base_url):
     """非流式路由也必须应用 norm=2（回归：曾漏接线，规范化静默不生效）。
 
-    断言口径：规范化必须产生**可观测的生成差异**。不假设方向——
-    原始符号串模型可能逐个念（更慢），规范化后读得流畅（更快）。
+    断言口径（2026-11-07 重校准）：原先用「两次合成音频时长差 > 15%」
+    间接推断规范化是否接线，这个口径绑定了具体引擎的读法与采样随机性。
+    换到 Qwen3-TTS 后随机采样使时长差落到 13.6%，断言误报。
+    改为直接断言面板回报的 ``text_used``——即真正下发给上游的文本：
+    norm=0 必须原样，norm=2 必须被规范化管线改写。这是引擎无关的
+    确定性契约断言，同时仍要求两次都产出有效音频，保留端到端覆盖。
     """
     if not _api_online(base_url):
         pytest.skip("API 7860 offline")
     text = "订单金额¥1,299.50元"
 
-    plain = _blocking_duration(base_url, text, norm="0")
-    normalized = _blocking_duration(base_url, text, norm="2")
-    assert plain > 0.2 and normalized > 0.2
-    diff = abs(normalized - plain) / max(plain, normalized)
-    assert diff > 0.15, (
-        f"norm=2 似乎未生效：norm=0 得到 {plain:.2f}s，norm=2 得到 {normalized:.2f}s"
-        f"（差异仅 {diff:.0%}）；规范化会改写读法，音频时长应有可观测变化")
+    plain = _blocking_json(base_url, text, norm="0")
+    normalized = _blocking_json(base_url, text, norm="2")
+    assert plain.get("duration", 0) > 0.2, plain
+    assert normalized.get("duration", 0) > 0.2, normalized
+    assert plain.get("text_used") == text, (
+        f"norm=0 不应改写文本，实际下发 {plain.get('text_used')!r}")
+    assert normalized.get("text_used") != text, (
+        "norm=2 似乎未生效：下发给上游的文本与原文本完全相同")
+    # 规范化把阿拉伯数字金额改写成中文读法，且与预览端结果一致
+    assert "一千二百九十九" in normalized["text_used"], normalized["text_used"]
