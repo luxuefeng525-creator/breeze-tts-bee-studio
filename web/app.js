@@ -1611,7 +1611,8 @@
   const S = {
     list: [], current: null, lines: [], job: null, timer: null,
     gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [],
-    missingRoles: [],
+    missingRoles: [], lineFilter: "all", lineRole: "", jumpIdx: 0,
+    lastRender: null,
   };
 
   // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
@@ -1666,6 +1667,8 @@
     S.current = d;
     S.lines = d.lines || [];
     S.scenes = d.scenes || [];
+    // 换剧本时清掉上一部的筛选条件，别让新剧本看起来「少了几行」
+    S.lineFilter = "all"; S.lineRole = ""; S.jumpIdx = 0;
     S.gap = d.gap == null ? 0.35 : d.gap;
     $("scriptRaw").value = d.raw || "";
     $("scriptGap").value = S.gap;
@@ -1684,9 +1687,12 @@
   function renderLines(d) {
     const box = $("scriptLines");
     const lines = (d && d.lines) || S.lines || [];
+    // 筛选/跳转会重绘，记住最近一次解析结果，别为了改个下拉再发一次请求。
+    // 只有真拿到数据才覆盖缓存：否则一次进度刷新就会把场次/报错从缓存里抹掉。
+    if (d) S.lastRender = d;
     $("lineCount").textContent = `${lines.length} 行`;
     $("scriptMeta").textContent = lines.length
-      ? `${lines.length} 行 · 约 ${Math.round(d.estimate || 0)} 秒${S.current && S.current.duration ? " · 已合成 " + S.current.duration.toFixed(1) + " 秒" : ""}`
+      ? `${lines.length} 行 · 约 ${Math.round((d && d.estimate) || 0)} 秒${S.current && S.current.duration ? " · 已合成 " + S.current.duration.toFixed(1) + " 秒" : ""}`
       : "还没有台词";
 
     if (!lines.length) {
@@ -1696,17 +1702,16 @@
       return;
     }
     const errs = (d && d.errors) || [];
-    // 「未知角色」不该只是一行红字：作者写完剧本最想做的是马上合成，
-    // 所以直接给出可以一键修好的入口，并在下面标出还差什么。
+    // 保存时后端已自动配角，这块通常不会出现；留作手动兜底入口
     const missing = [...new Set(errs.filter((e) => e.role_name)
       .map((e) => String(e.role_name).trim()).filter(Boolean))];
     const other = errs.filter((e) => !e.role_name);
     const castBox = missing.length
       ? `<div class="script-cast">
-           <div class="script-cast-title">发现 ${missing.length} 个还没配好的角色</div>
+           <div class="script-cast-title">还有 ${missing.length} 个角色没配好</div>
            <div class="script-cast-names">${missing.map((n) => `<span>${esc(n)}</span>`).join("")}</div>
-           <button class="btn-primary btn-sm" type="button" id="castBtn">一键补齐角色与音色</button>
-           <p>按名字自动判断老人 / 孩子 / 旁白，各配一个声音；跟已有克隆音色同名的角色会直接用那个声音。补好后在「音色库」里可以随时改。</p>
+           <button class="btn-primary btn-sm" type="button" id="castBtn">立即补齐角色与音色</button>
+           <p>保存剧本时会自动配好；如果这里是空的，点一下即可补上。按名字判断老人 / 孩子 / 旁白，各配一个声音。</p>
          </div>`
       : "";
     const errBox = other.length
@@ -1716,13 +1721,45 @@
     S.missingRoles = missing;
     const synthBtn = $("synthScriptBtn");
     if (synthBtn) synthBtn.title = missing.length
-      ? `还有 ${missing.length} 个角色没配好，先点上方「一键补齐」`
+      ? `还有 ${missing.length} 个角色没配好，先点上方「立即补齐」`
       : "按当前角色逐行合成并拼成整轨";
 
-    box.innerHTML = castBox + errBox + lines.map((l) => {
+    // 100 行剧本平铺会找不到人：按状态/角色筛选 + 场次分组 + 跳到第 N 句
+    const roleNames = [...new Set(lines.map((l) => l.role_name))];
+    const statusOf = (l) => l.status === "done" ? "done"
+      : l.status === "failed" ? "failed" : "pending";
+    const shown = lines.filter((l) => {
+      if (S.lineFilter !== "all" && statusOf(l) !== S.lineFilter) return false;
+      if (S.lineRole && l.role_name !== S.lineRole) return false;
+      return true;
+    });
+    const opt = (v, label, cur) => `<option value="${esc(v)}"${cur === v ? " selected" : ""}>${esc(label)}</option>`;
+    const filterBar = `<div class="line-filters">
+        <select class="input input-select" id="lineFilterSel" aria-label="按状态筛选">
+          ${opt("all", "全部状态", S.lineFilter)}${opt("pending", "待合成", S.lineFilter)}
+          ${opt("failed", "失败", S.lineFilter)}${opt("done", "已完成", S.lineFilter)}
+        </select>
+        <select class="input input-select" id="lineRoleSel" aria-label="按角色筛选">
+          ${opt("", "全部角色", S.lineRole || "")}
+          ${roleNames.map((n) => opt(n, n, S.lineRole || "")).join("")}
+        </select>
+        <label class="line-jump">第 <input class="input" id="lineJump" type="number" min="1" max="${lines.length}" value="${S.jumpIdx || ""}" placeholder="—"> 句</label>
+        <span class="line-filter-count">${shown.length} / ${lines.length} 行</span>
+      </div>`;
+
+    let lastScene = null;
+    const body = shown.map((l) => {
       const hue = roleHue(l.role_name);
-      const stat = l.status === "done" ? "done" : l.status === "failed" ? "failed" : "pending";
+      const stat = statusOf(l);
       const mark = stat === "done" ? "✓" : stat === "failed" ? "✕" : "";
+      const sceneHead = l.scene !== lastScene
+        ? `<div class="line-scene">${esc(l.scene || "未分场")}</div>` : "";
+      lastScene = l.scene;
+      // Qwen 的克隆路线忽略 instruction：把「看起来智能化、实际没生效」
+      // 直接标在台词旁，而不是让用户对着情绪标签以为生效了
+      const routeMark = l.instruction_effective === false
+        ? `<em class="line-route" title="这个角色用的是克隆音色，引擎会忽略情绪 / 氛围 / 口音指令；角色语速仍生效。想让情绪生效，请把角色改成设计型音色">克隆音色 · 情绪指令不生效</em>`
+        : "";
       // 多版本：这一行重录过几次就列几版，选中的那版进整轨与导出
       const takes = l.takes || [];
       const takeSel = takes.length > 1
@@ -1730,7 +1767,7 @@
              ${takes.map((t) => `<option value="${t.n}"${t.n === l.take ? " selected" : ""}>v${t.n}</option>`).join("")}
            </select>`
         : "";
-      return `
+      return `${sceneHead}
         <div class="script-line ${stat}" data-line-idx="${l.idx}"
              title="${esc(l.instruction ? "下发的指令：" + l.instruction : "没有额外指令（用默认语气）")}">
           <span class="line-no">${String(l.idx + 1).padStart(2, "0")}</span>
@@ -1738,7 +1775,7 @@
           <span class="line-emotion" title="情绪来源：${esc(EMOTION_SOURCE[l.emotion_source] || "")}">
             ${esc(l.emotion)}<em>${esc(EMOTION_SOURCE[l.emotion_source] || "")}</em>
           </span>
-          <span class="line-text">${esc(l.text)}</span>
+          <span class="line-text">${esc(l.text)}${routeMark}</span>
           ${takeSel}
           <span class="line-state ${stat}">${mark}</span>
           <span class="line-acts">
@@ -1752,12 +1789,29 @@
         </div>`;
     }).join("");
 
+    box.innerHTML = castBox + errBox + filterBar + body;
+    if (S.jumpIdx) {
+      const target = box.querySelector(`[data-line-idx="${S.jumpIdx - 1}"]`);
+      if (target) {
+        target.classList.add("is-target");
+        target.scrollIntoView({ block: "center" });
+      }
+    }
+
     const bad = errs.length;
     $("scriptHint").textContent = missing.length
-      ? `${missing.length} 个角色还没配好，点上方「一键补齐」就能开合成`
+      ? `${missing.length} 个角色还没配好，点上方「立即补齐」就能开合成`
       : bad ? `有 ${bad} 处需要修一下（见下方分镜顶部）`
       : "用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气";
     $("scriptHint").classList.toggle("is-warn", bad > 0);
+  }
+
+  // 自动推断的氛围不能因为界面把 scenes 整组回传就被固化成「作者选的」：
+  // 发送时把 auto 项的 mood 清空，后端会按场次名重新推断（结果一致）。
+  function scenesPayload() {
+    return (S.scenes || []).map((s) => ({
+      name: s.name, mood: s.auto ? "" : (s.mood || ""),
+    }));
   }
 
   // 场次氛围：以解析出的场次为准，一行一个下拉。改了立刻保存并重新解析，
@@ -1777,7 +1831,7 @@
         opts.push(`<option value="${esc(s.mood)}">${esc(s.mood)}（自定义）</option>`);
       }
       return `<label class="scene-mood" title="对这一场的所有行生效，行内情绪优先">
-        <span class="scene-mood-name">${esc(s.name)}</span>
+        <span class="scene-mood-name">${esc(s.name)}${s.auto && s.mood ? '<em class="mood-auto">自动</em>' : ""}</span>
         <select class="input input-select" data-scene="${i}" aria-label="场次「${esc(s.name)}」的氛围">${opts.join("")}</select>
       </label>`;
     }).join("");
@@ -1788,6 +1842,7 @@
       sel.addEventListener("change", async () => {
         if (!S.scenes[i]) return;
         S.scenes[i].mood = sel.value;
+        S.scenes[i].auto = false;   // 作者动过手，之后由作者说了算
         if (await saveScript(true)) previewScriptNow();
       });
     });
@@ -1800,7 +1855,7 @@
     try {
       const d = await api(`/api/scripts/${S.current.id}/parse`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw, scenes: S.scenes || S.current.scenes || [] }),
+        body: JSON.stringify({ raw, scenes: scenesPayload() }),
       });
       S.lines = d.lines || [];
       if (d.scenes) S.scenes = d.scenes;
@@ -1830,7 +1885,7 @@
             raw: $("scriptRaw").value,
             title: $("scriptTitleInput").value.trim() || "未命名剧本",
             gap: parseFloat($("scriptGap").value) || 0.35,
-            scenes: S.scenes || [],
+            scenes: scenesPayload(),
           }),
         });
         // 用户可能已经切到别的剧本：只更新同一个剧本的界面状态
@@ -1873,7 +1928,7 @@
     try {
       const probe = await api(`/api/scripts/${S.current.id}/parse`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw: $("scriptRaw").value, scenes: S.scenes || [] }),
+        body: JSON.stringify({ raw: $("scriptRaw").value, scenes: scenesPayload() }),
       });
       const missing = [...new Set((probe.errors || []).filter((e) => e.role_name)
         .map((e) => e.role_name))];
@@ -2036,7 +2091,8 @@
   // 导出：按勾选拼 parts。没有音频的项直接禁用而不是导出空包——
   // 用户拿到只有 script.txt 的 ZIP 会以为合成丢了。
   const EXPORT_IDS = {
-    full: "expFull", lines: "expLines", timeline: "expTimeline", script: "expScript",
+    full: "expFull", lines: "expLines", timeline: "expTimeline",
+    script: "expScript", subtitles: "expSubtitles",
   };
 
   async function openExportDialog() {
@@ -2046,10 +2102,10 @@
     const hasFull = !!(S.current.full_wav);
     const hasLines = (S.lines || []).some((l) => l.wav);
     const pending = (S.lines || []).filter((l) => l.status !== "done").length;
-    const setOpt = (key, ok) => {
+    const setOpt = (key, ok, def = true) => {
       const el = $(EXPORT_IDS[key]);
       el.disabled = !ok;
-      el.checked = ok;
+      el.checked = ok && def;
       const row = el.closest(".opt-row");
       if (row) row.classList.toggle("is-off", !ok);
     };
@@ -2060,6 +2116,8 @@
     // 时间轴由拼接时算出：没有整轨就没有可用的时间轴
     setOpt("timeline", freshFull);
     setOpt("script", true);
+    // 字幕是新增项，默认不勾：老用户导出包内容不悄悄变
+    setOpt("subtitles", freshFull, false);
 
     const rows = (S.lines || []).length;
     $("exportSub").textContent = pending
@@ -2230,8 +2288,23 @@
     // 版本下拉在行内：用 change 而不是 click，键盘选择也要生效
     $("scriptLines").addEventListener("change", (e) => {
       const sel = e.target.closest("[data-takeline]");
-      if (!sel) return;
-      switchTake(parseInt(sel.dataset.takeline, 10), parseInt(sel.value, 10));
+      if (sel) {
+        switchTake(parseInt(sel.dataset.takeline, 10), parseInt(sel.value, 10));
+        return;
+      }
+      const f = e.target.closest("#lineFilterSel");
+      if (f) { S.lineFilter = f.value; renderLines(S.lastRender); return; }
+      const r = e.target.closest("#lineRoleSel");
+      if (r) { S.lineRole = r.value; renderLines(S.lastRender); return; }
+      const j = e.target.closest("#lineJump");
+      if (j) {
+        const n = parseInt(j.value, 10);
+        S.jumpIdx = Number.isFinite(n) && n >= 1 && n <= (S.lines || []).length ? n : 0;
+        renderLines(S.lastRender);
+        if (S.jumpIdx && !$("scriptLines").querySelector(`[data-line-idx="${S.jumpIdx - 1}"]`)) {
+          toast("这一行被筛选条件藏起来了，切回「全部状态 / 全部角色」再看", true);
+        }
+      }
     });
   }
 
