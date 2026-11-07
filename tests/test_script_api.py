@@ -96,9 +96,11 @@ def _mk_voice(base_url, name="剧本测试音色", instruction="沉稳的纪录�
 
 
 def _mk_script(base_url, raw, title="测试剧本", **extra):
-    code, s = _json_req(base_url + "/api/scripts", "POST", {
-        "title": title, "raw": raw, **extra,
-    })
+    # 默认关掉自动配角：这些用例要验证「未知角色/解析错误」等旧语义。
+    # 想测零操作闭环的用例显式传 auto_cast=True。
+    payload = {"title": title, "raw": raw, "auto_cast": False}
+    payload.update(extra)
+    code, s = _json_req(base_url + "/api/scripts", "POST", payload)
     assert code in (200, 201), s
     return s
 
@@ -382,7 +384,12 @@ def test_scene_mood_roundtrip_and_instruction(base_url):
     try:
         code, d = _req(base_url + "/api/scripts/" + s["id"])
         assert [x["name"] for x in d["scenes"]] == ["深夜书店", "医院走廊"]
-        assert d["scenes"][0]["mood"] == "", d["scenes"]
+        # 「书店」是强信号：没手动选时系统自动带「安静」，并标记来源
+        assert d["scenes"][0]["mood"] == "安静", d["scenes"]
+        assert d["scenes"][0]["auto"] is True, d["scenes"]
+        assert "整体氛围安静" in d["lines"][0]["instruction"], d["lines"][0]
+        # 中性场次名不推断，避免系统给每场戏都自作主张套情绪
+        assert d["scenes"][1]["mood"] == "", d["scenes"]
 
         code, d2 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
             "scenes": [{"name": "深夜书店", "mood": "紧张"}],
@@ -720,4 +727,199 @@ def test_cast_respects_forced_voice_and_unknown_id(base_url):
         for rid in made:
             _req(base_url + "/api/roles/" + rid, "DELETE")
         _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 保存即自动配角
+def test_saving_script_autofills_cast_with_zero_clicks(base_url):
+    """粘贴剧本 → 保存 → 零红字、每行都有音色，不需要点任何按钮。"""
+    s = _mk_script(base_url, "## 街角\n路人丙：你好。\n老奶奶[叹气]：慢点走。",
+                   auto_cast=True)
+    made = []
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert code == 200
+        assert d["errors"] == [], d["errors"]
+        assert all(l["voice_id"] for l in d["lines"]), d["lines"]
+        _, roles = _req(base_url + "/api/roles")
+        made = [r["id"] for r in roles if r["name"] in ("路人丙", "老奶奶")]
+        assert len(made) == 2, roles
+        _, voices = _req(base_url + "/api/voices")
+        assert any(v["archetype"] == "elder_f" for v in voices), voices
+    finally:
+        for rid in made:
+            _req(base_url + "/api/roles/" + rid, "DELETE")
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _, voices = _req(base_url + "/api/voices")
+        for v in voices:
+            if v["name"] in ("路人丙的声音", "老奶奶的声音"):
+                _req(base_url + "/api/voices/" + v["id"], "DELETE")
+
+
+def test_auto_cast_can_be_turned_off_per_script(base_url):
+    s = _mk_script(base_url, "甲：你好。", auto_cast=False)
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert len(d["errors"]) == 1, d["errors"]
+        _, roles = _req(base_url + "/api/roles")
+        assert not any(r["name"] == "甲" for r in roles)
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+def test_put_with_new_character_autofills_too(base_url):
+    """改稿时新加一个角色，保存就自动配好，不用再点补齐。"""
+    voice = _mk_voice(base_url, "改稿音色", instruction="沉稳旁白")
+    role = _mk_role(base_url, "原角色", voice["id"])
+    s = _mk_script(base_url, "原角色：第一句。", auto_cast=True)
+    extra_role = None
+    try:
+        code, d = _json_req(base_url + "/api/scripts/" + s["id"], "PUT", {
+            "raw": "原角色：第一句。\n新来的：第二句。",
+        })
+        assert code == 200, d
+        assert d["errors"] == [], d["errors"]
+        _, roles = _req(base_url + "/api/roles")
+        extra_role = next((r["id"] for r in roles if r["name"] == "新来的"), None)
+        assert extra_role
+    finally:
+        if extra_role:
+            _req(base_url + "/api/roles/" + extra_role, "DELETE")
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/roles/" + role["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")
+        _, voices = _req(base_url + "/api/voices")
+        for v in voices:
+            if v["name"] == "新来的的声音":
+                _req(base_url + "/api/voices/" + v["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 自动氛围不落盘
+def test_auto_mood_is_not_persisted_as_a_manual_choice(base_url):
+    s = _mk_script(base_url, "## 雨夜\n旁白：你来了。")
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert d["scenes"][0]["mood"] == "压抑", d["scenes"]
+        assert d["scenes"][0]["auto"] is True
+        # 把界面拿到的 scenes 整组回传，自动值不能被固化
+        code, d2 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT",
+                             {"scenes": d["scenes"]})
+        assert code == 200, d2
+        code, d3 = _req(base_url + "/api/scripts/" + s["id"])
+        assert d3["scenes"][0]["auto"] is True, d3["scenes"]
+        # 作者真的选了一个值后，来源变成手动
+        code, d4 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT",
+                             {"scenes": [{"name": "雨夜", "mood": "温暖"}]})
+        assert code == 200
+        code, d5 = _req(base_url + "/api/scripts/" + s["id"])
+        assert d5["scenes"][0]["mood"] == "温暖"
+        assert d5["scenes"][0]["auto"] is False, d5["scenes"]
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- 字幕导出
+def test_subtitles_export_srt_and_vtt_from_timeline(base_url):
+    s = _mk_script(base_url, "旁白：第一句。\n旁白：第二句。")
+    try:
+        _seed_audio_files(s["id"])
+        code, blob = _req(base_url + f"/api/scripts/{s['id']}/export?parts=subtitles",
+                          timeout=30)
+        assert code == 200 and blob[:2] == b"PK", (code, blob[:40])
+        z = zipfile.ZipFile(io.BytesIO(blob))
+        assert sorted(z.namelist()) == ["subtitles.srt", "subtitles.vtt"], z.namelist()
+        srt = z.read("subtitles.srt").decode("utf-8")
+        vtt = z.read("subtitles.vtt").decode("utf-8")
+        assert srt.startswith("1\n00:00:00,000 --> "), srt[:60]
+        assert "-->" in srt and "第一句" in srt and "第二句" in srt
+        assert vtt.startswith("WEBVTT"), vtt[:30]
+        assert "00:00:00.000 --> " in vtt
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+def test_subtitles_refuse_stale_timeline(base_url):
+    s = _mk_script(base_url, "旁白：第一句。")
+    try:
+        code, err = _req(base_url + f"/api/scripts/{s['id']}/export?parts=subtitles",
+                         timeout=30)
+        assert code == 400, (code, err)
+        assert "合成" in str(err.get("detail")), err
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+# ---------------------------------------------------------------- cfg/seed/route
+def test_cfg_change_marks_new_rows_pending_but_legacy_rows_stay_done(base_url):
+    """新落盘的行改 CFG 要重做；老记录缺字段时不能被升级打成一片未合成。"""
+    import script_routes as SR
+    s = _mk_script(base_url, "旁白：只有一句。")
+    try:
+        # _seed_audio_files 写的是老格式（无 cfg_scale/seed 字段）
+        _seed_audio_files(s["id"])
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert d["lines"][0]["status"] == "done", d["lines"][0]
+        code, d2 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT",
+                             {"cfg_scale": 7})
+        assert code == 200
+        # 老记录不知道当时的 CFG，只能按「未知」放行：保住用户已合成的整轨
+        assert d2["lines"][0]["status"] == "done", d2["lines"][0]
+
+        # 换成新格式记录（带 cfg_scale/seed），再改 CFG 就必须变 pending
+        fresh = SR._find(s["id"])
+        row = SR._enriched(fresh, SR.parse_for(fresh))[0]
+        SR._persist_take(s["id"], 0, row, 1, 0.5,
+                         f"audio/scripts/{s['id']}/line_000.wav", reset=True)
+        code, d3 = _req(base_url + "/api/scripts/" + s["id"])
+        assert d3["lines"][0]["status"] == "done", d3["lines"][0]
+        code, d4 = _json_req(base_url + "/api/scripts/" + s["id"], "PUT",
+                             {"cfg_scale": 4})
+        assert code == 200
+        assert d4["lines"][0]["status"] == "pending", d4["lines"][0]
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+
+
+def test_seed_is_derived_per_role_and_route_is_exposed(base_url):
+    """同原型角色 seed 不能全一样；路线信息必须暴露给界面。"""
+    voice = _mk_voice(base_url, "同原型音色", instruction="沉稳旁白")
+    r1 = _mk_role(base_url, "角色A", voice["id"], archetype="adult_m")
+    r2 = _mk_role(base_url, "角色B", voice["id"], archetype="adult_m")
+    s = _mk_script(base_url, "角色A：你好。\n角色B：也好。")
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        assert d["lines"][0]["seed"] != d["lines"][1]["seed"], d["lines"]
+        assert d["lines"][0]["route"] == "design"
+        assert d["lines"][0]["instruction_effective"] is True
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/roles/" + r1["id"], "DELETE")
+        _req(base_url + "/api/roles/" + r2["id"], "DELETE")
+        _req(base_url + "/api/voices/" + voice["id"], "DELETE")
+
+
+def test_clone_route_is_flagged_as_instruction_ineffective(base_url):
+    """Qwen clone 路线忽略 instruction：界面必须看得到，不能静默。"""
+    import panel as P
+    voice = _mk_voice(base_url, "克隆音色", instruction="")
+
+    def _mut(items):
+        for v in items:
+            if v["id"] == voice["id"]:
+                v["type"] = "clone"
+                v["ref_audio"] = "refs/demo.wav"
+                v["ref_text"] = "示例文稿"
+
+    P._update_json("voices.json", _mut)
+    role = _mk_role(base_url, "克隆角色", voice["id"])
+    s = _mk_script(base_url, "## 雨夜\n克隆角色[愤怒]：你再说一遍？")
+    try:
+        code, d = _req(base_url + "/api/scripts/" + s["id"])
+        line = d["lines"][0]
+        assert line["route"] == "clone", line
+        assert line["instruction_effective"] is False, line
+        assert "整体氛围压抑" in line["instruction"], line
+    finally:
+        _req(base_url + "/api/scripts/" + s["id"], "DELETE")
+        _req(base_url + "/api/roles/" + role["id"], "DELETE")
         _req(base_url + "/api/voices/" + voice["id"], "DELETE")

@@ -29,6 +29,7 @@ from tts_pipeline.script import (
     MOODS,
     estimate_seconds,
     guess_archetype,
+    guess_mood,
     parse_script,
 )
 
@@ -36,8 +37,9 @@ MAX_LINES = 100          # 超过这个行数提示分批（8 GB 卡约 20-30 �
 MAX_TAKES = 8            # 单行最多留几版；超出后覆盖最旧一版（不删文件、不无限涨盘）
 DEFAULT_GAP = 0.35
 DEFAULT_CFG = 4.0
-EXPORT_PARTS = ("full", "lines", "timeline", "script")
-DEFAULT_PARTS = ",".join(EXPORT_PARTS)
+EXPORT_PARTS = ("full", "lines", "timeline", "script", "subtitles")
+# 默认仍是老四件套：新增的字幕要作者勾了才进包，免得旧导出包内容悄悄变
+DEFAULT_PARTS = ",".join(("full", "lines", "timeline", "script"))
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
@@ -135,8 +137,13 @@ def parse_for(script: dict):
     voices = _voices_by_id()
     defaults = {name: _role_default_emotion(r) for name, r in roles.items()}
     instr = {name: _role_instruction(r, voices) for name, r in roles.items()}
-    moods = {s["name"]: s.get("mood", "") for s in _norm_scenes(script.get("scenes"))}
-    return parse_script(script.get("raw", ""), defaults, instr, moods)
+    raw = script.get("raw", "")
+    # 先取场次名（解析是纯 CPU，两次不过毫秒级），把自动氛围算进
+    # 第二遍的指令里；自动值不写回 scenes，作者可随时清空。
+    probe = parse_script(raw)
+    moods = {s["name"]: s.get("mood", "")
+             for s in _scenes_view(probe.scenes, script.get("scenes"))}
+    return parse_script(raw, defaults, instr, moods)
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -148,13 +155,41 @@ def _common_prefix_len(a: str, b: str) -> int:
     return n
 
 
+def _voice_route(voice: dict | None) -> str:
+    """这一行走克隆还是设计路线。
+
+    Qwen 引擎的 clone 路线完全不接收自然语言 instruction，而 design
+    路线不能带参考音频；两条路线权重互斥、按需换入。把 route 显式算
+    出来，才能既「可见地提示用户」又「按路线分组减少换模型次数」。
+    """
+    if not voice:
+        return "design"
+    if str(voice.get("type") or "").strip() == "clone":
+        return "clone"
+    return "clone" if str(voice.get("ref_audio") or "").strip() else "design"
+
+
+def _seed_for(script: dict, role: dict | None) -> int:
+    """同一剧本里给每个角色派生一个稳定 seed。
+
+    全剧固定 seed=42 时，同原型的多个角色会抽到几乎一样的声音；
+    按 role_id 派生偏移后仍可复现（同一角色重录结果一致）。
+    """
+    base = int(script.get("seed") if script.get("seed") is not None else 42)
+    rid = str((role or {}).get("id") or "")
+    if not rid:
+        return base
+    return base + int(hashlib.sha1(rid.encode("utf-8")).hexdigest()[:8], 16) % 9973
+
+
 def plan_cast(errors: list[dict], role_names: set[str],
               voices: dict[str, dict]) -> list[dict]:
     """从解析错误里列出「还缺谁」，并给出每个角色该用什么声音。
 
-    名字跟已有音色有 ≥2 字公共前缀时复用那个音色（作者写「小蜜蜂」，
-    库里叫「小蜜蜂配音」，显然是想用同一个声音）；其余按名字猜原型
-    新建一个设计型音色，避免五个角色全绑一个音色、听成同一个人。
+    名字跟已有音色有公共前缀时复用那个音色（作者写「小蜜蜂」，库里叫
+    「小蜜蜂配音」，显然是想用同一个声音）；判据是 ≥3 字且长度差 ≤3，
+    比早期的 ≥2 字更严，避免角色一多「小 X」「大 X」互相误命中。
+    其余按名字猜原型新建一个设计型音色，避免五个角色听成一个人。
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -167,8 +202,9 @@ def plan_cast(errors: list[dict], role_names: set[str],
         hit = None
         best = 0
         for v in voices.values():
-            n = _common_prefix_len(name, str(v.get("name") or "").strip())
-            if n >= 2 and n > best:
+            vname = str(v.get("name") or "").strip()
+            n = _common_prefix_len(name, vname)
+            if n >= 3 and abs(len(name) - len(vname)) <= 3 and n > best:
                 hit, best = v, n
         out.append({
             "name": name,
@@ -177,6 +213,7 @@ def plan_cast(errors: list[dict], role_names: set[str],
             "instruction": (ARCHETYPES.get(arch) or {}).get("instruction", ""),
             "speed": ARCHETYPE_SPEED.get(arch, 1.0),
             "voice": hit,
+            "route": _voice_route(hit),
         })
     return out
 
@@ -194,7 +231,9 @@ def _norm_scenes(raw) -> list[dict]:
             name, mood = item.strip(), ""
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
-            mood = str(item.get("mood") or "").strip()
+            # auto=true 是系统推断的底色，不是作者选的；界面把 scenes
+            # 整组回传时不能让它悄悄变成手动配置（否则清空就清不掉了）
+            mood = "" if item.get("auto") else str(item.get("mood") or "").strip()
         else:
             continue
         if not name or name in seen:
@@ -205,9 +244,18 @@ def _norm_scenes(raw) -> list[dict]:
 
 
 def _scenes_view(names: list[str], configured) -> list[dict]:
-    """以解析出的场次为准，氛围从已存配置里取（作者可能刚加了新场次）。"""
+    """以解析出的场次为准：作者选过的用作者的值，没选的按场次名自动推断。
+
+    自动值**不落盘**：作者清空下拉就真的没有氛围，不会被下一次保存又填回来；
+    界面用 auto 标记告诉用户「这层底色是系统加的，可以覆盖」。
+    """
     known = {s["name"]: s.get("mood", "") for s in _norm_scenes(configured)}
-    return [{"name": n, "mood": known.get(n, "")} for n in names]
+    out = []
+    for n in names:
+        chosen = known.get(n, "")
+        auto = not chosen
+        out.append({"name": n, "mood": chosen or guess_mood(n), "auto": auto})
+    return out
 
 
 def _line_hash(row: dict) -> str:
@@ -259,6 +307,7 @@ def _persist_take(script_id: str, idx: int, row: dict, take_no: int,
                 "status": "done", "wav": rel, "duration": round(duration, 3),
                 "emotion": row.get("emotion"), "role_name": row.get("role_name"),
                 "text": row.get("text"), "hash": row.get("hash", ""),
+                "cfg_scale": row.get("cfg_scale"), "seed": row.get("seed"),
                 "take": take_no, "takes": takes,
             })
             s["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -279,14 +328,26 @@ def _take_info(rec: dict, fresh: bool) -> dict:
             "take": int(current)}
 
 
+def _same_scalar(a, b) -> bool:
+    """脏数据（字符串/None）也能比，不让它把已合成的行打成 pending。"""
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return str(a) == str(b)
+
+
 def _enriched(script: dict, parsed) -> list[dict]:
     """把解析结果补上 role_id/voice_id 与完成状态。
 
-    完成状态必须同时满足「状态为 done」和「内容哈希一致」：只按行号判断时，
-    改了台词但行数不变，会把上一版音频当成新台词的成品，用户拿到文不对音
-    的文件却看不到任何异常。
+    完成状态必须同时满足「状态为 done」「内容哈希一致」「cfg/seed 一致」。
+    前两项防止改了台词却复用上一版音频；第三项防止改了 CFG 或角色 seed
+    还拿旧音频当新成品。老记录里没有 cfg_scale/seed 字段时用当前值兜底，
+    所以升级不会把用户已经合成好的整剧变成一片「未合成」。
     """
     roles = _roles_by_name()
+    voices = _voices_by_id()
+    cfg = float(script.get("cfg_scale") if script.get("cfg_scale") is not None
+                else DEFAULT_CFG)
     stored = {l["idx"]: l for l in script.get("lines") or [] if "idx" in l}
     out = []
     for line in parsed.lines:
@@ -296,8 +357,17 @@ def _enriched(script: dict, parsed) -> list[dict]:
         row["voice_id"] = (role or {}).get("voice_id") or None
         row["speed"] = _role_speed(role)
         row["hash"] = _line_hash(row)
+        row["cfg_scale"] = cfg
+        row["seed"] = _seed_for(script, role)
+        row["route"] = _voice_route(voices.get(row["voice_id"] or ""))
+        # clone 路线上游忽略 instruction：把这件事显式告诉界面，
+        # 而不是让用户以为情绪/氛围已经生效
+        row["instruction_effective"] = row["route"] != "clone"
         rec = stored.get(line.idx) or {}
-        fresh = rec.get("status") == "done" and rec.get("hash") == row["hash"]
+        fresh = (rec.get("status") == "done"
+                 and rec.get("hash") == row["hash"]
+                 and _same_scalar(rec.get("cfg_scale", cfg), cfg)
+                 and _same_scalar(rec.get("seed", row["seed"]), row["seed"]))
         row["status"] = "done" if fresh else "pending"
         row["wav"] = rec.get("wav", "") if fresh else ""
         row["duration"] = rec.get("duration", 0.0) if fresh else 0.0
@@ -396,7 +466,12 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
         roles = _roles_by_name()
         cfg = float(script.get("cfg_scale") if script.get("cfg_scale") is not None
                     else DEFAULT_CFG)
-        seed = int(script.get("seed") if script.get("seed") is not None else 42)
+        base_seed = int(script.get("seed") if script.get("seed") is not None else 42)
+        # 8GB 卡上 design / clone 权重互斥，混排逐行会反复卸载+加载模型。
+        # 按路线分组（同路线内保持原行序），换模型次数压到 ≤2 次；
+        # _concat 与时间轴都按 idx 拼，播放顺序不受影响。
+        rows = sorted(rows, key=lambda r: (0 if r.get("route") != "clone" else 1,
+                                          r["idx"]))
 
         for row in rows:
             if job["stop"]:
@@ -415,9 +490,15 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
 
             name = f"line_{idx:03d}.wav"
             t_line = time.time()
+            # clone 路线上游会直接忽略 instruction / cfg_scale，
+            # 与其下发一堆无效参数，不如明确置空并让界面标出来。
+            clone_row = row.get("route") == "clone"
+            instruction = "" if clone_row else row.get("instruction", "")
             try:
-                dur, err = _synth_line(row["text"], role, row.get("instruction", ""),
-                                       cfg, seed, out_dir / name,
+                dur, err = _synth_line(row["text"], role, instruction,
+                                       1.0 if clone_row else cfg,
+                                       int(row.get("seed") or base_seed),
+                                       out_dir / name,
                                        float(row.get("speed") or 1.0))
             except Exception as exc:          # 单行异常不该终止整部剧
                 dur, err = 0.0, f"{type(exc).__name__}: {exc}"[:200]
@@ -553,6 +634,31 @@ def _export_parts(raw_path: str) -> tuple[list[str], list[str]]:
     return valid, invalid
 
 
+def _clock(seconds: float, sep: str = ",") -> str:
+    """秒 → 字幕时间码（SRT 用逗号、WebVTT 用点）。"""
+    ms = max(0, int(round(float(seconds) * 1000)))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d}{sep}{ms:03d}"
+
+
+def _subtitle_text(script: dict, fmt: str) -> str:
+    """用时间轴生成 SRT / VTT：多角色剧本里带上角色名才好分辨谁在说话。"""
+    timeline = script.get("timeline") or []
+    sep = "," if fmt == "srt" else "."
+    lines = ["WEBVTT", ""] if fmt == "vtt" else []
+    for i, t in enumerate(timeline, 1):
+        text = str(t.get("text") or "").replace("\r", " ").replace("\n", " ")
+        role = str(t.get("role") or "").strip()
+        label = f"{role}：{text}" if role else text
+        lines.append(str(i))
+        lines.append(f"{_clock(t['start'], sep)} --> {_clock(t['end'], sep)}")
+        lines.append(label)
+        lines.append("")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def _export_plan(script: dict, parts: list[str]) -> tuple[list[dict], str]:
     """检查每个 part 是否真的可导出，返回 (已完成的行, 错误说明)。
 
@@ -570,9 +676,12 @@ def _export_plan(script: dict, parts: list[str]) -> tuple[list[dict], str]:
         return done, "还没有整轨音频，先点「合成全剧」再导出"
     if "lines" in parts and not done:
         return done, "还没有合成好的分行音频，先点「合成全剧」再导出"
-    if ("full" in parts or "timeline" in parts) and pending:
+    # 字幕与时间轴同源于 timeline：有行没重做时它们的秒数是上一版的
+    if any(k in parts for k in ("full", "timeline", "subtitles")) and pending:
         return done, (f"还有 {pending} 行没合成，或台词改过还没重做；"
-                      "整轨与时间轴都是上一版的，先合成再导出")
+                      "整轨、时间轴和字幕都是上一版的，先合成再导出")
+    if "subtitles" in parts and not (script.get("timeline") or []):
+        return done, "还没有时间轴，先点「合成全剧」再导出字幕"
     return done, ""
 
 
@@ -604,12 +713,144 @@ def _export_zip(script: dict, parts: list[str], rows: list[dict]) -> bytes:
             zf.writestr("timeline.csv", "\ufeff" + csv_buf.getvalue())
         if "script" in parts:
             zf.writestr("script.txt", script.get("raw", ""))
+        if "subtitles" in parts:
+            zf.writestr("subtitles.srt", _subtitle_text(script, "srt"))
+            zf.writestr("subtitles.vtt", _subtitle_text(script, "vtt"))
     return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
 # 路由
 # ---------------------------------------------------------------------------
+def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
+    """把剧本里还没配的角色一次补齐，返回 (HTTP 状态, 响应体)。
+
+    保存剧本时也会走这里：作者粘贴完台词就该能直接点合成，不该再手工
+    去音色库建 N 次角色。抽成函数而不是留在路由里，是因为 POST/PUT
+    需要在同一个锁内复用它，避免两个入口各写一份逻辑。
+    """
+    script = _find(sid)
+    if not script:
+        return 404, {"detail": "剧本不存在"}
+    with _CAST_LOCK:
+        # 锁内重读：两个并发请求不能共用同一份旧快照
+        script = _find(sid) or script
+        parsed = parse_for(script)
+        if len(parsed.lines) > MAX_LINES:
+            return 400, {"detail": f"一次最多 {MAX_LINES} 行"}
+        if forced and forced not in _voices_by_id():
+            return 400, {"detail": "指定的音色不存在"}
+        plan = plan_cast(parsed.errors, set(_roles_by_name()), _voices_by_id())
+        if not plan:
+            return 200, {"created": [], "count": 0,
+                         "remaining": len(parsed.errors)}
+
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        new_voices: list[dict] = []
+        new_roles: list[dict] = []
+        created: list[dict] = []
+        # 与 new_roles 一一对应：新建音色的名字（写回后按名换真实 id），
+        # 复用已有音色时为 None
+        role_voice_names: list[str | None] = []
+        for item in plan:
+            voice = item["voice"]
+            if forced:
+                voice = _voices_by_id().get(forced)
+            reused = bool(voice)
+            voice_name = None
+            if not voice:
+                voice = {
+                    "id": P._new_id("v"),
+                    "name": f"{item['name']}的声音",
+                    "type": "design",
+                    "archetype": item["archetype"],
+                    "instruction": item["instruction"],
+                    "ref_audio": None,
+                    "ref_text": "",
+                    "cfg_scale": DEFAULT_CFG,
+                    "created_at": now,
+                }
+                new_voices.append(voice)
+                voice_name = voice["name"]
+            role_voice_names.append(voice_name)
+            route = _voice_route(voice)
+            role = {
+                "id": P._new_id("r"),
+                "name": item["name"],
+                "description": f"从剧本自动补齐（{item['label']}）",
+                "voice_id": voice["id"],
+                "archetype": item["archetype"],
+                "default_emotion": "",
+                "speed": item["speed"],
+                "accent": "",
+                "defaults": {"cfg_scale": DEFAULT_CFG, "seed": 42},
+                "created_at": now,
+            }
+            new_roles.append(role)
+            created.append({
+                "name": item["name"], "archetype": item["archetype"],
+                "label": item["label"], "role_id": role["id"],
+                "voice_id": voice["id"], "voice_name": voice["name"],
+                "reused": reused, "route": route, "speed": item["speed"],
+            })
+
+        # 每个文件单独原子 RMW；mutator 内按名字查重，防止与用户在
+        # 音色库里手工新建的对象撞车。顺序是音色→角色，中间态里
+        # 不会出现「角色指向不存在音色」。
+        def _add_voices(items, _new=new_voices):
+            names = {str(v.get("name") or "").strip() for v in items}
+            for v in _new:
+                key = str(v["name"]).strip()
+                if key not in names:
+                    items.append(v)
+                    names.add(key)
+
+        def _add_roles(items, _new=new_roles):
+            names = {str(r.get("name") or "").strip() for r in items}
+            for r in _new:
+                key = str(r["name"]).strip()
+                if key not in names:
+                    items.append(r)
+                    names.add(key)
+
+        if new_voices:
+            P._update_json("voices.json", _add_voices)
+            # 同名音色可能是用户先前手工建的（名字带空格也算）；
+            # 按 strip 后的名字换回真实 id，不能留下悬空 voice_id
+            voices_now = P._load("voices.json")
+            actual = {str(v.get("name") or "").strip(): v for v in voices_now}
+            for r, name in zip(new_roles, role_voice_names):
+                if name and name in actual:
+                    r["voice_id"] = actual[name]["id"]
+            for c, name in zip(created, role_voice_names):
+                if name and name in actual:
+                    c["voice_id"] = actual[name]["id"]
+
+        valid_ids = {v["id"] for v in P._load("voices.json")}
+        dangling = [r["name"] for r in new_roles if r["voice_id"] not in valid_ids]
+        if dangling:
+            return 400, {"detail": f"音色没写成功：{', '.join(dangling[:3])}，请重试"}
+        P._update_json("roles.json", _add_roles)
+
+        # 以落盘结果为准回报，不能把「被查重跳过」的对象算成新建
+        real_roles = {str(r.get("name") or "").strip(): r
+                      for r in P._load("roles.json")}
+        real_voices = {v["id"]: v for v in P._load("voices.json")}
+        verified = []
+        for c in created:
+            r = real_roles.get(c["name"])
+            if not r or r.get("voice_id") not in real_voices:
+                continue
+            c["role_id"] = r["id"]
+            c["voice_id"] = r["voice_id"]
+            c["voice_name"] = real_voices[r["voice_id"]]["name"]
+            c["route"] = _voice_route(real_voices[r["voice_id"]])
+            verified.append(c)
+        remaining = len(parse_for(_find(sid) or script).errors)
+        return 201, {"created": verified, "count": len(verified),
+                     "remaining": remaining}
+
+
 def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
     """处理剧本相关请求；不是本模块的路由时返回 False。"""
     if not path.startswith("/api/scripts") and path != "/api/archetypes":
@@ -623,7 +864,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "moods": [{"key": k, "instruction": v} for k, v in MOODS.items() if k],
             "max_lines": MAX_LINES,
             "default_gap": DEFAULT_GAP,
-            "default_parts": list(EXPORT_PARTS),
+            "default_parts": DEFAULT_PARTS.split(","),
         })
         return True
 
@@ -837,9 +1078,11 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         else:
             take_no = max(t["n"] for t in takes) + 1
         name = _take_name(idx, take_no)
-        dur, err = _synth_line(row["text"], role, row.get("instruction", ""),
-                               float(script.get("cfg_scale") if script.get("cfg_scale") is not None else DEFAULT_CFG),
-                               int(script.get("seed") if script.get("seed") is not None else 42),
+        clone_row = row.get("route") == "clone"
+        dur, err = _synth_line(row["text"], role,
+                               "" if clone_row else row.get("instruction", ""),
+                               1.0 if clone_row else float(row.get("cfg_scale") or DEFAULT_CFG),
+                               int(row.get("seed") or 42),
                                out_dir / name, row.get("speed") or 1.0)
         if err:
             h._err(err)
@@ -903,138 +1146,15 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
                  "timeline": fresh.get("timeline", [])})
         return True
 
-    # 一键补齐角色：剧本写完满屏「未知角色」时，不该让用户跑去音色库
-    # 手工建 N 次。按角色名自动配原型与设计型音色，一次落库。
+    # 一键补齐角色：也可以由保存路径自动调用（见 _apply_cast）。
     if method == "POST" and path.count("/") == 4 and path.endswith("/cast"):
         sid = path.split("/")[3]
-        script = _find(sid)
-        if not script:
-            h._err("剧本不存在", 404)
-            return True
         try:
             d = json.loads(body or b"{}")
         except Exception:
             d = {}
-        forced = str(d.get("voice_id") or "").strip()
-        with _CAST_LOCK:
-            # 锁内重读：两个并发请求不能共用同一份旧快照
-            script = _find(sid) or script
-            parsed = parse_for(script)
-            if len(parsed.lines) > MAX_LINES:
-                h._err(f"一次最多 {MAX_LINES} 行")
-                return True
-            if forced and forced not in _voices_by_id():
-                h._err("指定的音色不存在")
-                return True
-            plan = plan_cast(parsed.errors, set(_roles_by_name()), _voices_by_id())
-            if not plan:
-                h._json({"created": [], "count": 0,
-                         "remaining": len(parsed.errors)})
-                return True
-
-            now = time.strftime("%Y-%m-%d %H:%M:%S")
-            new_voices: list[dict] = []
-            new_roles: list[dict] = []
-            created: list[dict] = []
-            # 与 new_roles 一一对应：新建音色的名字（写回后按名换真实 id），
-            # 复用已有音色时为 None
-            role_voice_names: list[str | None] = []
-            for item in plan:
-                voice = item["voice"]
-                if forced:
-                    voice = _voices_by_id().get(forced)
-                reused = bool(voice)
-                voice_name = None
-                if not voice:
-                    voice = {
-                        "id": P._new_id("v"),
-                        "name": f"{item['name']}的声音",
-                        "type": "design",
-                        "archetype": item["archetype"],
-                        "instruction": item["instruction"],
-                        "ref_audio": None,
-                        "ref_text": "",
-                        "cfg_scale": DEFAULT_CFG,
-                        "created_at": now,
-                    }
-                    new_voices.append(voice)
-                    voice_name = voice["name"]
-                role_voice_names.append(voice_name)
-                role = {
-                    "id": P._new_id("r"),
-                    "name": item["name"],
-                    "description": f"从剧本自动补齐（{item['label']}）",
-                    "voice_id": voice["id"],
-                    "archetype": item["archetype"],
-                    "default_emotion": "",
-                    "speed": item["speed"],
-                    "accent": "",
-                    "defaults": {"cfg_scale": DEFAULT_CFG, "seed": 42},
-                    "created_at": now,
-                }
-                new_roles.append(role)
-                created.append({
-                    "name": item["name"], "archetype": item["archetype"],
-                    "label": item["label"], "role_id": role["id"],
-                    "voice_id": voice["id"], "voice_name": voice["name"],
-                    "reused": reused, "speed": item["speed"],
-                })
-
-            # 每个文件单独原子 RMW；mutator 内按名字查重，防止与用户在
-            # 音色库里手工新建的对象撞车。顺序是音色→角色，中间态里
-            # 不会出现「角色指向不存在音色」。
-            def _add_voices(items, _new=new_voices):
-                names = {str(v.get("name") or "").strip() for v in items}
-                for v in _new:
-                    key = str(v["name"]).strip()
-                    if key not in names:
-                        items.append(v)
-                        names.add(key)
-
-            def _add_roles(items, _new=new_roles):
-                names = {str(r.get("name") or "").strip() for r in items}
-                for r in _new:
-                    key = str(r["name"]).strip()
-                    if key not in names:
-                        items.append(r)
-                        names.add(key)
-
-            if new_voices:
-                P._update_json("voices.json", _add_voices)
-                # 同名音色可能是用户先前手工建的（名字带空格也算）；
-                # 按 strip 后的名字换回真实 id，不能留下悬空 voice_id
-                voices_now = P._load("voices.json")
-                actual = {str(v.get("name") or "").strip(): v for v in voices_now}
-                for r, name in zip(new_roles, role_voice_names):
-                    if name and name in actual:
-                        r["voice_id"] = actual[name]["id"]
-                for c, name in zip(created, role_voice_names):
-                    if name and name in actual:
-                        c["voice_id"] = actual[name]["id"]
-
-            valid_ids = {v["id"] for v in P._load("voices.json")}
-            dangling = [r["name"] for r in new_roles if r["voice_id"] not in valid_ids]
-            if dangling:
-                h._err(f"音色没写成功：{', '.join(dangling[:3])}，请重试")
-                return True
-            P._update_json("roles.json", _add_roles)
-
-            # 以落盘结果为准回报，不能把「被查重跳过」的对象算成新建
-            real_roles = {str(r.get("name") or "").strip(): r
-                          for r in P._load("roles.json")}
-            real_voices = {v["id"]: v for v in P._load("voices.json")}
-            verified = []
-            for c in created:
-                r = real_roles.get(c["name"])
-                if not r or r.get("voice_id") not in real_voices:
-                    continue
-                c["role_id"] = r["id"]
-                c["voice_id"] = r["voice_id"]
-                c["voice_name"] = real_voices[r["voice_id"]]["name"]
-                verified.append(c)
-            remaining = len(parse_for(_find(sid) or script).errors)
-            h._json({"created": verified, "count": len(verified),
-                     "remaining": remaining}, 201)
+        code, payload = _apply_cast(sid, str(d.get("voice_id") or "").strip())
+        h._json(payload, code)
         return True
 
     # ---- 增删改 ----
@@ -1057,11 +1177,20 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "gap": float(d.get("gap") or DEFAULT_GAP),
             "cfg_scale": float(d.get("cfg_scale") or DEFAULT_CFG),
             "seed": int(d.get("seed") or 42),
+            # 保存就自动配角色；作者在剧本上关掉这项才会退回手工模式
+            "auto_cast": bool(d.get("auto_cast", True)),
             "lines": [],
             "created_at": now,
             "updated_at": now,
         }
         P._update_json("scripts.json", lambda it: it.append(script))
+        if script["auto_cast"]:
+            # 自动配角失败不该让「新建剧本」失败：原文已经落盘，
+            # 用户还能点界面上的补齐按钮兜底
+            try:
+                _apply_cast(script["id"])
+            except Exception:
+                pass
         h._json(script, 201)
         return True
 
@@ -1096,8 +1225,11 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         for k, cast in (("gap", float), ("cfg_scale", float), ("seed", int)):
             if k in d:
                 script[k] = cast(d[k])
+        if "auto_cast" in d:
+            script["auto_cast"] = bool(d["auto_cast"])
         patch = {k: script[k] for k in
-                 ("title", "raw", "scenes", "gap", "cfg_scale", "seed") if k in script}
+                 ("title", "raw", "scenes", "gap", "cfg_scale", "seed",
+                  "auto_cast") if k in script}
         patch["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         def _mut(items):
@@ -1106,6 +1238,13 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
                     s.update(patch)
 
         P._update_json("scripts.json", _mut)
+        # 台词变了就顺手把新出现的角色配好：作者不需要再点任何按钮，
+        # 返回的 lines/errors 直接就是配完后的状态。
+        if "raw" in d and script.get("auto_cast", True):
+            try:
+                _apply_cast(sid)
+            except Exception:
+                pass
         fresh = _find(sid) or script
         parsed = parse_for(fresh)
         h._json({**fresh, "lines": _enriched(fresh, parsed), "errors": parsed.errors})

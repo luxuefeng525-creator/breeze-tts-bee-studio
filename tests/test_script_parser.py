@@ -267,3 +267,23 @@ def test_gesture_tag_flows_into_line_instruction():
     raw = "雪峰[叹气]：山是真的。"
     p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR)
     assert "叹" in p.lines[0].instruction
+
+
+# ---------------------------------------------------------------- 场次氛围自动推断
+@pytest.mark.parametrize("name,expected", [
+    ("深夜书店", "安静"), ("雨夜", "压抑"), ("病房走廊", "压抑"),
+    ("大婚", "欢快"), ("追捕", "紧张"), ("审判", "肃杀"),
+    ("围炉夜话", "温暖"), ("场景一 · 傍晚到店", ""),
+    ("用户真实剧本的普通场次名", ""),
+])
+def test_guess_mood_only_fires_on_strong_signals(name, expected):
+    from tts_pipeline.script import guess_mood
+    assert guess_mood(name) == expected, name
+
+
+def test_every_guessed_mood_is_in_the_mood_table():
+    from tts_pipeline.script import MOOD_HINTS, guess_mood
+    for key, words in MOOD_HINTS:
+        assert key in MOODS and key != "", key
+        for w in words:
+            assert guess_mood(w) != "", w
