@@ -130,7 +130,11 @@
 
   /* 克隆页文稿框：.sheet 默认 flex:1 会撑满整块，三行字配 300px 空白。
      改成固定高度、可手工拉高，把下半屏还给「质量检查 + 试听对比」 */
-  #refText{flex:0 0 auto;height:200px;min-height:132px;max-height:340px;resize:vertical}
+  /* 允许被压：定高 200 + flex:0 0 auto 在 900 高的窗口里会把面板顶破 2px，
+     页脚压在边框上。给个上下限，让它在中间自适应 */
+  #refText{flex:1 1 auto;height:auto;min-height:132px;max-height:280px;resize:vertical}
+  /* 面板被拉高时，把多出来的高度留在「文稿」和页脚之间，页脚始终贴着卡片底边 */
+  .transcript-foot{margin-top:auto}
   .ab-note{margin:6px 0 0;font-size:11.5px;line-height:1.6;color:var(--text-3)}
 
   /* 自动转写进度：这一行小字要能看出「还在识别」而不是卡住了 */
@@ -174,7 +178,7 @@
     display:flex;flex-direction:column;gap:6px;margin-top:8px;
     flex:1 1 auto;min-height:0;overflow-y:auto;max-height:none;
   }
-  .lib-hist-row{display:flex;align-items:center;gap:11px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm)}
+  .lib-hist-row{display:flex;align-items:center;gap:11px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);cursor:pointer}
   .lib-hist-row .hist-main{flex:1;min-width:0}
 
   /* ---- Toast 显隐 ---- */
@@ -182,17 +186,21 @@
 
   /* ---- 响应式：1440 / 1280 / 1024 三档 ---- */
   @media (max-width:1440px){
+    /* 列宽跟元素宽一起改，否则第三列 392px 里只放 300px 的栏，右边空 92px */
+    .workbench{grid-template-columns:288px minmax(0,1fr) 300px}
     .right-rail{width:300px}
     .voice-grid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
   }
   @media (max-width:1280px){
-    /* 保留 .workbench 的 100% 高度（改成 height:auto 会让左栏 flex 子项
-       塌陷、互相重叠），只让整个网格可滚；右栏折到第三行常驻。 */
-    .workbench{grid-template-columns:260px minmax(0,1fr);overflow-y:auto}
-    .right-rail{
-      grid-column:1 / -1;width:auto;max-height:46vh;overflow-y:auto;
-      padding-top:14px;border-top:1px solid var(--line);
-    }
+    /* 1280 是笔记本最常见的宽度：三栏压窄比折行更好——折行会把右栏
+       推到第二行，播放器占满 46vh、历史被压成 0 高，等于把历史弄没了 */
+    .workbench{grid-template-columns:240px minmax(0,1fr) 300px}
+    .right-rail{width:300px}
+    /* 240 宽的左栏放不下 4 个筛选胶囊（需要 277px），不换行就会压到稿纸上 */
+    .filters{flex-wrap:wrap}
+    /* 三个操作图标在 240px 栏里挤掉大半个名字，收紧一点 */
+    .voice-actions{gap:3px}
+    .voice-actions .icon-btn{width:26px;height:26px}
     .lib-head .search{width:200px}
   }
   /* 窄屏 + 900 高：卡片换行会把「合成历史」整块顶出视口。
@@ -204,9 +212,22 @@
     #screen-library .voice-card{height:auto;min-height:148px}
   }
 
+  /* 800 高的笔记本：克隆页三段（上传 / 文稿 / 档案）塞不进一屏。
+     以前是直接裁掉——文稿框和「保存到音色库」都在视口外面，功能等于没了 */
+  @media (max-height:820px){
+    .page{overflow-y:auto}
+    .clone-grid{flex:0 0 auto}
+    .clone-main{grid-template-rows:340px minmax(300px,auto)}
+    .profile{min-height:520px}
+  }
+
   @media (max-width:1024px){
-    .workbench{grid-template-columns:minmax(0,1fr)}
+    /* 单列后左栏隐藏：整屏纵向滚，右栏不再压缩高度 */
+    .workbench{grid-template-columns:minmax(0,1fr);overflow-y:auto;align-items:start}
     .rail{display:none}
+    .studio{min-height:520px}
+    .right-rail{grid-column:1 / -1;width:auto;max-height:none;overflow:visible}
+    .history{min-height:320px}
     .dlg-form{grid-template-columns:1fr}
   }
 

@@ -23,7 +23,6 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
-    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 6.5"/></symbol>
     <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v6M12 16.5v.2"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
@@ -98,7 +97,7 @@
           <span class="clone-kicker"><svg class="icon icon-xs"><use href="#i-mic"/></svg>10–15 秒</span>
           <strong>克隆你的声音</strong>
           <span>一段干净人声，保留语气和停顿。</span>
-          <span class="clone-mini-wave" data-wave="22" data-seed="7" data-progress="0.55"></span>
+          <span class="clone-mini-wave" data-wave="22" data-seed="7"></span>
         </button>
       </aside>
 
@@ -268,12 +267,12 @@
 
       <aside class="right-rail">
         <section class="player" id="player" aria-label="播放器">
-          <div class="player-head"><span class="live"><span class="dot"></span>最新生成</span><button class="icon-btn" type="button" aria-label="播放器更多操作" style="width:24px;height:24px"><svg class="icon icon-sm"><use href="#i-more"/></svg></button></div>
+          <div class="player-head"><span class="live"><span class="dot"></span>最新生成</span></div>
           <div class="player-live" id="playerLive" hidden>
             <h2 class="player-title" id="playerTitle">—</h2>
             <p class="player-sub" id="playerSub">—</p>
             <div class="wave-wrap">
-              <div class="wave" id="playerWave" data-wave="58" data-seed="3" data-progress="0" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+              <div class="wave" id="playerWave" data-wave="58" data-seed="3" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
             </div>
             <div class="time-row"><span id="playerNow">00:00.0</span><span id="playerTotal">00:00.0</span></div>
             <div class="transport">
@@ -342,7 +341,7 @@
             </div>
             <div class="ref-player" id="refPlayer" hidden>
               <button class="play-sm" type="button" aria-label="播放参考音频" id="refPlayBtn"><svg class="icon"><use href="#i-play"/></svg></button>
-              <div class="ref-wave" data-wave="54" data-seed="5" data-progress="0" aria-hidden="true"></div>
+              <div class="ref-wave" data-wave="54" data-seed="5" aria-hidden="true"></div>
               <span class="ref-time" id="refTime">00:00.0</span>
               <button class="btn btn-sm" type="button" id="refReplaceBtn">更换文件</button>
             </div>
@@ -378,7 +377,7 @@
           <label class="consent"><input type="checkbox" id="consentBox"> <span>我确认已获得声音本人的书面授权，并了解这份参考音频只保存在本机。</span></label>
           <div class="ab">
             <div class="ab-head"><strong>参考音频 · 原声</strong><span id="abDuration">—</span></div>
-            <div class="ab-wave" data-wave="46" data-progress="0" aria-hidden="true"></div>
+            <div class="ab-wave" data-wave="46" aria-hidden="true"></div>
             <p class="ab-note">这里只能听原声本身；克隆效果保存后到「合成台」选它试听。</p>
             <button class="ab-play" type="button" id="abPlayBtn" disabled><svg class="icon icon-sm"><use href="#i-play"/></svg>播放原声</button>
           </div>

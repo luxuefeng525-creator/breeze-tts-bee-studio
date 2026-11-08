@@ -146,12 +146,24 @@
     $("actionDefault").hidden = s !== "default";
     $("actionLoading").hidden = s !== "loading";
     $("actionError").hidden = s !== "error";
-    $("playerEmpty").hidden = !empty;
-    $("playerLive").hidden = empty;
+    // 播放器里有没有东西，取决于「有没有生成结果」，不是稿纸空不空：
+    // 删掉正在播的那条之后，这里的卡片要能自己退回「生成后在这里试听」
+    const hasResult = !!state.lastResult;
+    $("playerEmpty").hidden = hasResult && !empty;
+    $("playerLive").hidden = !hasResult || empty;
     $("playerLoading").hidden = s !== "loading";
-    $("playerFoot").hidden = empty || s === "loading";
-    $("historyEmpty").hidden = state.history.length > 0;
-    $("historyScroll").hidden = state.history.length === 0;
+    $("playerFoot").hidden = !hasResult || empty || s === "loading";
+    syncHistoryChrome();
+  }
+
+  // 「稿纸空」和「没有历史」是两件事：以前用 data-state="empty" 直接藏掉
+  // 历史列表，稿纸一空（每次刷新页面都是）就只剩一个「历史」标题，8 条记录
+  // 全不见了。这里单独用一个属性表达「有没有历史」。
+  function syncHistoryChrome() {
+    const has = state.history.length > 0;
+    body.dataset.hist = has ? "any" : "none";
+    $("historyEmpty").hidden = has;
+    $("historyScroll").hidden = !has;
   }
 
   // ---------------------------------------------------------------- 分段
@@ -263,10 +275,11 @@
     }
     box.innerHTML = list.map((v) => `
       <button class="voice-item${state.voiceId === v.id ? " active" : ""}" type="button"
-              data-voice="${esc(v.id)}" aria-pressed="${state.voiceId === v.id}">
+              data-voice="${esc(v.id)}" data-type="${esc(v.type || "")}" aria-pressed="${state.voiceId === v.id}"
+              title="${esc(v.name)}${v.instruction ? " · " + esc(v.instruction) : ""}">
         <span class="voice-avatar">${esc((v.name || "?").slice(0, 1))}</span>
         <span class="voice-meta">
-          <span class="voice-name">${esc(v.name)}${state.voiceId === v.id ? ' <span class="current-pill">当前</span>' : ""}</span>
+          <span class="voice-name"><span class="voice-name-text">${esc(v.name)}</span>${state.voiceId === v.id ? '<span class="current-pill">当前</span>' : ""}</span>
           <span class="voice-sub">${esc(voiceSubtitle(v))}</span>
         </span>
         <span class="voice-play" role="button" tabindex="0" data-preview="${esc(v.id)}" aria-label="试听音色 ${esc(v.name)}" title="试听一句"><svg class="icon"><use href="#i-play"/></svg></span>
@@ -527,6 +540,7 @@
       box.innerHTML = "";
       $("historyEmpty").hidden = false;
       $("historyScroll").hidden = true;
+      $("historyAllBtn").hidden = true;
       return;
     }
     $("historyEmpty").hidden = true;
@@ -540,13 +554,16 @@
         html += `<div class="hist-group"><span>${esc(g)}</span></div>`;
         lastGroup = g;
       }
-      const title = (h.text || "").replace(/\s+/g, " ").slice(0, 22) || "（无文本）";
+      // 标题不在 JS 里硬截：切片会把词切断还不给省略号，交给 CSS 省略号 +
+      // 悬停看全文（行上的 title 属性）
+      const full = (h.text || "").replace(/\s+/g, " ").trim();
+      const title = full || "（无文本）";
       html += `
-        <div class="hist-row${state.lastResult && state.lastResult.id === h.id ? " current" : ""}">
+        <div class="hist-row${state.lastResult && state.lastResult.id === h.id ? " current" : ""}" title="${esc(full)}">
           <span class="mini-wave" data-wave="8" data-src="${esc(h.wav_url || "")}"></span>
           <span class="hist-main">
             <span class="hist-title">${esc(title)}</span>
-            <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc((h.created_at || "").slice(11, 16))}</span>
+            <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${esc((h.created_at || "").slice(11, 16))}</span>
           </span>
           <span class="hist-dur">${fmtTime(h.duration || 0).slice(0, 5)}</span>
           <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" aria-label="播放：${esc(title)}"><svg class="icon"><use href="#i-play"/></svg></button>
@@ -560,6 +577,26 @@
     $("historyAllBtn").innerHTML = more
       ? `查看全部 ${items.length} 条历史 <svg class="icon icon-xs" aria-hidden="true" style="margin-left:5px"><use href="#i-arrow"/></svg>`
       : "查看全部历史";
+  }
+
+  // 删掉的正是播放器里那条：不清掉的话播放器还挂着已删文件的 src，
+  // 点播放静默失败，点下载会把 404 的响应体存成 .wav
+  function dropPlayerIfDeleted(row) {
+    const btn = row && row.querySelector("[data-hplay]");
+    const url = btn ? btn.dataset.hplay : "";
+    const cur = audio.getAttribute("src") || "";
+    if (!url || !cur || !cur.endsWith(String(url).split("/").pop())) return;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    state.lastResult = null;
+    $("playerTitle").textContent = "—";
+    $("playerSub").textContent = "—";
+    $("playerNow").textContent = fmtTime(0);
+    $("playerTotal").textContent = fmtTime(0);
+    $("playerWave").removeAttribute("data-src");
+    $("playerWave").innerHTML = "";
+    setWorkbenchState($("synthText").value.replace(/\s/g, "") ? "default" : "empty");
   }
 
   // ---------------------------------------------------------------- 合成
@@ -841,7 +878,6 @@
     $("playerNow").textContent = fmtTime(0);
     audio.src = res.wav_url;
     audio.playbackRate = state.playerSpeed;
-    $("playerWave").dataset.progress = "0";
     // 真波形：解码这段生成的音频算峰值；进度条归零
     $("playerWave").dataset.src = res.wav_url;
     paintWave($("playerWave"), res.wav_url);
@@ -1198,8 +1234,8 @@
       ? shown.map((h) => `
         <div class="lib-hist-row">
           <span class="hist-main">
-            <span class="hist-title" title="${esc(h.text || "")}">${esc((h.text || "").replace(/\s+/g, " ").slice(0, 40) || "（无文本）")}</span>
-            <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc(h.created_at || "")}</span>
+            <span class="hist-title" title="${esc(h.text || "")}">${esc((h.text || "").replace(/\s+/g, " ") || "（无文本）")}</span>
+            <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc((h.created_at || "").slice(5, 16))}</span>
           </span>
           <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" aria-label="播放"><svg class="icon"><use href="#i-play"/></svg></button>
           <button class="icon-btn del" type="button" data-hdel="${esc(h.id)}" aria-label="删除"><svg class="icon icon-xs"><use href="#i-trash"/></svg></button>
@@ -1243,6 +1279,7 @@
   async function refreshHistory() {
     state.history = await api("/api/history").catch(() => []);
     renderHistory();
+    syncHistoryChrome();      // 删掉最后一条后要立刻回到「还没有生成记录」
     if (state.screen === "library") renderLibrary();
   }
 
@@ -1332,6 +1369,10 @@
   // 以前只设 audio.src，播着音频但波形还是上一条的（或空）。
   function playInPlayer(url, title) {
     if (!url) return;
+    // 生成中切到历史会把 data-state 改回 default，进度条和「停止」一起消失，
+    // 用户就再也停不下来了；试听也不该和渐进播放同时出声
+    if (state.busy) { toast("正在生成，等这一轮跑完再试听", true); return; }
+    resetPlaybackQueue();
     setWorkbenchState("default");
     audio.src = url;
     $("playerEmpty").hidden = true;
@@ -1405,12 +1446,10 @@
   audio.addEventListener("timeupdate", () => {
     $("playerNow").textContent = fmtTime(audio.currentTime);
     const pct = audio.duration ? audio.currentTime / audio.duration : 0;
-    $("playerWave").dataset.progress = String(pct);
     $("playerWave").setAttribute("aria-valuenow", String(Math.round(pct * 100)));
     markWave($("playerWave"), pct);      // 点亮走过的部分，别只写进 dataset
   });
   audio.addEventListener("ended", () => {
-    $("playerWave").dataset.progress = "0";
     markWave($("playerWave"), 0);
   });
   // 波形本身就是定位条：点哪跳哪，方向键 ±5%（role=slider 早已声明，之前没有实现）
@@ -1624,16 +1663,24 @@
     // 历史
     $("historyScroll").addEventListener("click", async (e) => {
       const play = e.target.closest("[data-hplay]");
-      if (play) {
-        const row = play.closest(".hist-row, .lib-hist-row");
-        const t = row && row.querySelector(".hist-title");
-        playInPlayer(play.dataset.hplay, t ? t.textContent.trim() : "");
+      const del = e.target.closest("[data-hdel]");
+      const row = e.target.closest(".hist-row");
+      if (play || (row && !del)) {
+        // 整行都能播：只让 22px 的小三角可点，绝大多数人第一次都会去点标题
+        const el = play || row.querySelector("[data-hplay]");
+        if (el && el.dataset.hplay) {
+          const t = row && row.querySelector(".hist-title");
+          playInPlayer(el.dataset.hplay, t ? t.textContent.trim() : "");
+        }
         return;
       }
-      const del = e.target.closest("[data-hdel]");
       if (del) {
+        // 删除会连音频文件一起删，且没有撤销：先问一句
+        if (!confirm("删除这条生成记录？音频文件会一起删掉，不能撤销。")) return;
         try {
+          const row = del.closest(".hist-row");
           await api("/api/history/" + del.dataset.hdel, { method: "DELETE" });
+          dropPlayerIfDeleted(row);
           await refreshHistory();
           toast("已删除");
         } catch (err) { toast(err.message, true); }
@@ -1729,16 +1776,22 @@
     });
     $("libraryHistory").addEventListener("click", async (e) => {
       const play = e.target.closest("[data-hplay]");
-      if (play) {
-        const row = play.closest(".hist-row, .lib-hist-row");
-        const t = row && row.querySelector(".hist-title");
-        playInPlayer(play.dataset.hplay, t ? t.textContent.trim() : "");
+      const del = e.target.closest("[data-hdel]");
+      const row = e.target.closest(".lib-hist-row");
+      if (play || (row && !del)) {
+        const el = play || row.querySelector("[data-hplay]");
+        if (el && el.dataset.hplay) {
+          const t = row && row.querySelector(".hist-title");
+          playInPlayer(el.dataset.hplay, t ? t.textContent.trim() : "");
+        }
         return;
       }
-      const del = e.target.closest("[data-hdel]");
       if (del) {
+        if (!confirm("删除这条生成记录？音频文件会一起删掉，不能撤销。")) return;
         try {
+          const row = del.closest(".lib-hist-row");
           await api("/api/history/" + del.dataset.hdel, { method: "DELETE" });
+          dropPlayerIfDeleted(row);
           await refreshHistory();
         } catch (err) { toast(err.message, true); }
       }
@@ -1849,8 +1902,9 @@
       const draft = localStorage.getItem("breeze_draft") || "";
       if (draft) $("synthText").value = draft;
     } catch (e) { /* 忽略 */ }
+    // updatePaper 已按草稿内容决定 empty / default；再无条件进 empty 会让
+    // 本机存着的草稿在刷新后「消失」（稿纸被整块 display:none）
     updatePaper();
-    setWorkbenchState("empty");
     await Promise.all([refreshVoices(), refreshRoles(), refreshHistory(), refreshModel()]);
     await refreshDict();
     bindScript();

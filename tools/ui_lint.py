@@ -38,6 +38,40 @@ IGNORE_IDS = {
 }
 
 
+def _orphan_buttons(html: str, js: str) -> list[dict]:
+    """第二种死控件：连 id 都没有的按钮。
+
+    第一种检查天然漏掉它们——没有 id 就没有可比对的键，而 `…`（播放器更多操作）
+    正是这样活了很久：界面上有，点下去什么都不发生。能被接线的按钮必须有某个
+    钩子：id、data-*，或挂在一个 JS 绑过的表单上（submit 交给表单处理）。
+    """
+    pending: str | None = None      # 当前所在表单的 id（若被 JS 绑过才算数）
+    out: list[dict] = []
+    for tok in re.finditer(r"<(/?)(form|button)\b([^>]*)>", html):
+        close, tag, attrs = tok.group(1), tok.group(2), tok.group(3)
+        if close:
+            if tag == "form":
+                pending = None
+            continue
+        if tag == "form":
+            m = re.search(r'\bid="([^"]+)"', attrs)
+            fid = m.group(1) if m else ""
+            pending = fid if fid in js else None
+            continue
+        has_hook = re.search(r'\bid="', attrs) or re.search(r"\bdata-[a-z-]+=", attrs)
+        if has_hook:
+            continue
+        if 'type="submit"' in attrs and pending:
+            continue
+        label = re.search(r'aria-label="([^"]*)"', attrs)
+        cls = re.search(r'class="([^"]*)"', attrs)
+        out.append({
+            "class": cls.group(1) if cls else "",
+            "label": label.group(1) if label else "",
+        })
+    return out
+
+
 def main() -> int:
     html = HTML.read_text(encoding="utf-8")
     js = JS.read_text(encoding="utf-8")
@@ -59,16 +93,21 @@ def main() -> int:
             continue
         dead.append({"id": i, "tag": tag})
 
+    orphans = _orphan_buttons(html, js)
+
     if "--json" in sys.argv:
-        print(json.dumps({"checked": len(seen), "suspects": dead},
+        print(json.dumps({"checked": len(seen), "suspects": dead, "orphans": orphans},
                          ensure_ascii=False, indent=2))
     else:
-        print(f"可交互 id {len(seen)} 个 · 可疑死控件 {len(dead)} 个")
+        print(f"可交互 id {len(seen)} 个 · 可疑死控件 {len(dead)} 个"
+              f" · 无钩子按钮 {len(orphans)} 个")
         for d in dead:
             print(f"  <{d['tag']} id=\"{d['id']}\">  JS 未引用")
-        if dead:
+        for o in orphans:
+            print(f"  <button class=\"{o['class']}\">「{o['label']}」  无 id、无 data-*，无法接线")
+        if dead or orphans:
             print("\n要么接线，要么从界面上拿掉——别让用户点了没反应。")
-    return 1 if dead else 0
+    return 1 if (dead or orphans) else 0
 
 
 if __name__ == "__main__":
