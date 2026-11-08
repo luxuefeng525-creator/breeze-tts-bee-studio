@@ -114,6 +114,17 @@
   .help-body{font-size:13.5px;color:var(--text-2);line-height:1.85}
   .help-body ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:9px}
   .help-body strong{color:var(--text)}
+  /* 已知限制：和操作步骤分开，别让人误读成「还要做这些」 */
+  .help-body h3{
+    margin:20px 0 2px;font-size:14px;font-weight:600;color:var(--text);
+    padding-top:14px;border-top:1px solid var(--line);
+  }
+  .help-sub{margin:0 0 8px;font-size:12.5px;color:var(--text-3)}
+  .help-limits{
+    margin:0;padding-left:18px;display:flex;flex-direction:column;gap:8px;
+    font-size:12.5px;line-height:1.75;color:var(--text-3);
+  }
+  .help-limits strong{font-size:12.5px;color:var(--text-2)}
   .help-note{margin-top:16px;padding:11px 13px;border-radius:var(--r-sm);background:var(--surface-2);border:1px solid var(--line);font-size:12.5px;color:var(--text-3)}
   .help-note code{font-family:var(--font-mono);color:var(--accent)}
 
