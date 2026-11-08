@@ -122,6 +122,83 @@ def _engine_note(headers: dict) -> str:
     return unquote(headers.get("X-Adapter-Note", "") or "")
 
 
+# ---------------------------------------------------------------------------
+# 参考音频转写（克隆页自动填文稿）
+# ---------------------------------------------------------------------------
+# faster-whisper 跑在面板进程里：只在「上传参考音频」时调用一次，
+# 10–15 秒音频在 CPU 上约几秒，不抢 7860 的显存（8 GB 卡上 TTS 已经够挤）。
+_ASR_MODEL = None
+_ASR_LOCK = threading.Lock()
+ASR_DIR = Path(os.environ.get("TTS2_ASR_DIR") or (ROOT.parent / "asr-models"))
+
+
+def _asr_model():
+    """懒加载 whisper 模型（首次约 3 秒装载，模型文件放 asr-models/）。"""
+    global _ASR_MODEL
+    if _ASR_MODEL is not None:
+        return _ASR_MODEL
+    with _ASR_LOCK:
+        if _ASR_MODEL is not None:
+            return _ASR_MODEL
+        # 顺序很重要：本机 c10.dll 对加载次序敏感，torch 必须先于 ctranslate2，
+        # 否则 import 阶段直接 OSError 1114（Windows DLL 初始化失败）
+        import torch  # noqa: F401
+        from faster_whisper import WhisperModel
+
+        local = ASR_DIR / "faster-whisper-small"
+        target = str(local) if local.is_dir() else os.environ.get("ASR_MODEL", "small")
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        _ASR_MODEL = WhisperModel(
+            target,
+            device=os.environ.get("ASR_DEVICE", "cpu"),
+            compute_type=os.environ.get("ASR_COMPUTE", "int8"),
+            download_root=str(ASR_DIR),
+        )
+        return _ASR_MODEL
+
+
+def _load_16k(path: Path):
+    """读成 16 kHz 单声道 float32。
+
+    faster-whisper 默认走 PyAV 解码，而本机 av 19 的 `open()` 已经不接受
+    `metadata_errors` 参数（1.2.1 还在传），直接 TypeError。项目本来就用
+    soundfile 处理音频，这里绕开 PyAV：读出来自己线性插值到 16 k——
+    ASR 对重采样精度不敏感，不值得为它再引一个 resampy。
+    """
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
+    if sr == 16000:
+        return mono
+    n = max(1, int(round(len(mono) * 16000 / sr)))
+    x = np.linspace(0, len(mono) - 1, n, dtype=np.float64)
+    return np.interp(x, np.arange(len(mono)), mono).astype(np.float32)
+
+
+def _transcribe(path: Path) -> dict:
+    """把一段参考音频转成文字。模型对短音频的标点略稀，交给用户校对。"""
+    model = _asr_model()
+    started = time.time()
+    audio = _load_16k(path)
+    segments, info = model.transcribe(audio, language="zh",
+                                      beam_size=5, vad_filter=True)
+    text = "".join(s.text for s in segments).strip()
+    if not text:
+        # VAD 会把「带片头音乐 / 过短」的整段判成非人声直接返回空；
+        # 这时关掉 VAD 再来一遍，宁可多识别出噪声也不能让文稿一片空白
+        segments, info = model.transcribe(audio, language="zh",
+                                          beam_size=5, vad_filter=False)
+        text = "".join(s.text for s in segments).strip()
+    return {
+        "text": text,
+        "language": info.language,
+        "duration": round(float(info.duration), 2),
+        "seconds": round(time.time() - started, 1),
+    }
+
+
 def _safe_int(value, default: int) -> int:
     """把表单里的字符串转 int，非法值回落到默认。
 
@@ -2152,6 +2229,26 @@ class Handler(BaseHTTPRequestHandler):
             _update_json("voices.json", _set_dur)
             self._json({"ok": True, "ref_duration": dur})
             return
+
+        # 参考音频转写：克隆页上传后自动填文稿，省掉全产品最费手的一步
+        if path == "/api/asr":
+            try:
+                d = json.loads(body or b"{}")
+            except Exception:
+                return self._err("invalid json")
+            vid = str(d.get("voice_id") or "").strip()
+            rec = next((v for v in _load("voices.json") if v.get("id") == vid), None)
+            if not rec:
+                return self._err("音色不存在", 404)
+            rel = str(rec.get("ref_audio") or "")
+            src = (DATA / rel) if rel else None
+            if not src or not src.is_file():
+                return self._err("先上传参考音频，再自动转写文稿")
+            try:
+                out = _transcribe(src)
+            except Exception as exc:
+                return self._err(f"转写失败：{type(exc).__name__}: {exc}"[:200], 500)
+            return self._json(out)
 
         if path == "/api/roles":
             try:

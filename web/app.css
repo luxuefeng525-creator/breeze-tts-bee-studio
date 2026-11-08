@@ -133,6 +133,9 @@
   #refText{flex:0 0 auto;height:200px;min-height:132px;max-height:340px;resize:vertical}
   .ab-note{margin:6px 0 0;font-size:11.5px;line-height:1.6;color:var(--text-3)}
 
+  /* 自动转写进度：这一行小字要能看出「还在识别」而不是卡住了 */
+  #transcriptNote.is-busy{color:var(--accent);animation:pulse 1.1s ease-in-out infinite}
+
   /* 音色试听：可点、加载中必须给反馈（一次合成要几秒，不能只是「没反应」） */
   .voice-play{cursor:pointer}
   .voice-play:hover,.voice-play:focus-visible{color:var(--accent)}

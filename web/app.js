@@ -1012,6 +1012,8 @@
       $("abPlayBtn").disabled = false;
       toast("参考音频已上传");
       await refreshVoices();
+      // 自动把录音里的话转成文稿（转写在后台跑，失败就保持手工输入）
+      autoTranscribe(res.id);
     } catch (err) {
       toast("上传失败：" + err.message, true);
       // 回收刚创建的草稿音色，避免留下孤儿记录
@@ -1052,6 +1054,41 @@
     if (q.score != null) {
       status.className = "status-pill " + (q.ready ? (q.score >= 70 ? "ok" : "warn") : "bad");
       status.innerHTML = `<svg class="icon"><use href="#i-check"/></svg>质检 ${q.score} 分`;
+    }
+  }
+
+  // ---------------------------------------------------------------- 自动转写
+  // 克隆页以前要用户「把录音里说的话逐字写下来」——全产品最费手的一步。
+  // 上传完参考音频后直接转写填进去，用户只需核对。
+  let _asrSeq = 0;
+  const TRANSCRIPT_HINT = "必须与音频逐字一致";
+
+  async function autoTranscribe(vid) {
+    if ($("refText").value.trim()) return;      // 已经手填了，不覆盖
+    const seq = ++_asrSeq;
+    const note = $("transcriptNote");
+    note.dataset.base = note.dataset.base || note.textContent.trim() || TRANSCRIPT_HINT;
+    note.textContent = "正在识别文稿…";
+    note.classList.add("is-busy");
+    try {
+      const r = await api("/api/asr", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voice_id: vid }),
+      });
+      if (seq !== _asrSeq) return;             // 用户又换了文件，这次结果作废
+      if (r && r.text) {
+        $("refText").value = r.text;
+        $("refText").dispatchEvent(new Event("input", { bubbles: true }));
+        note.textContent = `已自动识别 ${Number(r.duration || 0).toFixed(1)} 秒音频（${r.seconds}s）· 请对照录音核对`;
+        toast("文稿已自动识别，核对一遍再保存");
+      } else {
+        note.textContent = "没识别出文字，请手工填写";
+      }
+    } catch (e) {
+      if (seq !== _asrSeq) return;
+      note.textContent = "自动识别不可用，请手工填写";
+    } finally {
+      note.classList.remove("is-busy");
     }
   }
 

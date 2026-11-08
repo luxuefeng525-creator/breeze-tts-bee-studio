@@ -10,3 +10,8 @@ uvicorn>=0.30
 python-multipart>=0.0.18
 pytest>=8.0
 ruff>=0.12
+# 参考音频自动转写（克隆页自动填文稿）。可选：不装时该功能降级为手工输入，
+# 面板其余功能不受影响。模型不放 PyPI，见 asr-models/（faster-whisper-small ~460MB）。
+# 装法：pip install -i https://pypi.org/simple faster-whisper
+#   （清华镜像的 simple 索引解析不到该包，实测会报 from versions: none）
+faster-whisper>=1.2
