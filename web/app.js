@@ -2144,14 +2144,20 @@
   }
 
   let _parseTimer = null;
+  // 解析序号：保存会顺手把角色配好，而在途的 /parse 是在角色建好**之前**
+  // 发的，它回来时 errors 里还带着「角色没配好」。晚到的旧结果一律丢弃，
+  // 否则用户保存完看到的是红字，点合成又能过——自我否定。
+  let _parseSeq = 0;
   async function previewScriptNow() {
     if (!S.current) return;
     const raw = $("scriptRaw").value;
+    const seq = ++_parseSeq;
     try {
       const d = await api(`/api/scripts/${S.current.id}/parse`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ raw, scenes: scenesPayload() }),
       });
+      if (seq !== _parseSeq) return;      // 有更新的解析或保存已经覆盖了界面
       S.lines = d.lines || [];
       if (d.scenes) {
         // 只采纳服务端的氛围推断结果；铺底三字段以本地为准——parse 的响应
@@ -2205,6 +2211,14 @@
           S.current = { ...S.current, ...d };
           if (d.scenes) S.scenes = d.scenes;
           $("scriptTitle").textContent = S.current.title;
+          // 保存的返回体是「角色配完之后」的状态：用它重绘分镜。否则先一步
+          // 发出的 /parse 会把「N 个角色没配好」的红字留在界面上
+          _parseSeq += 1;
+          if (d.lines) {
+            S.lines = d.lines;
+            renderLines(d);
+            renderSceneMoods();
+          }
         }
         if (!quiet) toast("已保存");
         refreshScripts();
