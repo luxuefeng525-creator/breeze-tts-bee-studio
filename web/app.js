@@ -269,7 +269,7 @@
           <span class="voice-name">${esc(v.name)}${state.voiceId === v.id ? ' <span class="current-pill">当前</span>' : ""}</span>
           <span class="voice-sub">${esc(voiceSubtitle(v))}</span>
         </span>
-        <span class="voice-play" aria-hidden="true"><svg class="icon"><use href="#i-play"/></svg></span>
+        <span class="voice-play" role="button" tabindex="0" data-preview="${esc(v.id)}" aria-label="试听音色 ${esc(v.name)}" title="试听一句"><svg class="icon"><use href="#i-play"/></svg></span>
         <span class="voice-actions">
           <span class="icon-btn" role="button" tabindex="0" data-edit="${esc(v.id)}" aria-label="编辑音色 ${esc(v.name)}" title="编辑"><svg class="icon icon-xs"><use href="#i-edit"/></svg></span>
           <span class="icon-btn del" role="button" tabindex="0" data-del="${esc(v.id)}" aria-label="删除音色 ${esc(v.name)}" title="删除"><svg class="icon icon-xs"><use href="#i-trash"/></svg></span>
@@ -543,7 +543,7 @@
       const title = (h.text || "").replace(/\s+/g, " ").slice(0, 22) || "（无文本）";
       html += `
         <div class="hist-row${state.lastResult && state.lastResult.id === h.id ? " current" : ""}">
-          <span class="mini-wave" data-wave="10" data-seed="${(h.text || "").length % 17}" data-progress="0.3"></span>
+          <span class="mini-wave" data-wave="8" data-src="${esc(h.wav_url || "")}"></span>
           <span class="hist-main">
             <span class="hist-title">${esc(title)}</span>
             <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc((h.created_at || "").slice(11, 16))}</span>
@@ -554,6 +554,7 @@
         </div>`;
     });
     box.innerHTML = html;
+    paintAllWaves(box);      // 每条历史画各自的真波形
     const more = items.length > 8;
     $("historyAllBtn").hidden = !more;
     $("historyAllBtn").innerHTML = more
@@ -841,6 +842,10 @@
     audio.src = res.wav_url;
     audio.playbackRate = state.playerSpeed;
     $("playerWave").dataset.progress = "0";
+    // 真波形：解码这段生成的音频算峰值；进度条归零
+    $("playerWave").dataset.src = res.wav_url;
+    paintWave($("playerWave"), res.wav_url);
+    markWave($("playerWave"), 0);
     $("playBtn").setAttribute("aria-pressed", "false");
     $("playBtn").innerHTML = '<svg class="icon"><use href="#i-play"/></svg>';
   }
@@ -997,6 +1002,11 @@
       state.clone.quality = up.quality || null;
       state.clone.audioUrl = `/api/refs/${(up.ref_audio || "").split("/").pop()}`;
       renderRefQuality(up);
+      // 参考音频也画真波形（之前是随机条，看不出录音质量）
+      [".ref-wave", ".ab-wave"].forEach((sel) => {
+        const el = document.querySelector(sel);
+        if (el) { el.dataset.src = state.clone.audioUrl; paintWave(el, state.clone.audioUrl); }
+      });
       $("refTime").textContent = fmtTime(state.clone.duration);
       $("abDuration").textContent = fmtTime(state.clone.duration);
       $("abPlayBtn").disabled = false;
@@ -1104,6 +1114,7 @@
             <h3>${esc(v.name)}</h3>
             <span class="card-type">${({ clone: "克隆", design: "设计", direction: "导向" })[v.type] || v.type}</span>
           </div>
+          <button class="icon-btn" type="button" data-preview="${esc(v.id)}" aria-label="试听 ${esc(v.name)}" title="试听一句"><svg class="icon icon-sm"><use href="#i-play"/></svg></button>
           <button class="icon-btn" type="button" data-edit="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}"><svg class="icon icon-sm"><use href="#i-edit"/></svg></button>
         </header>
         <p class="card-desc">${esc(v.instruction || (v.type === "clone" ? "" : v.ref_text) || "（没有描述）")}</p>
@@ -1210,6 +1221,136 @@
     }
   }
 
+  // ---------------------------------------------------------------- 波形
+  // 以前 [data-wave] 是随机高度画出来的（看着像音频分析，其实不是），
+  // 播放进度也只写进 dataset.progress、没有任何视觉反馈。这里改成真波形：
+  // 解码音频算峰值、按播放时间点亮，并且能点/按方向键定位。
+  const _waveCache = new Map();     // `${url}|${buckets}` -> 归一化峰值
+  let _waveCtx = null;
+
+  async function peaksOf(url, buckets) {
+    const key = `${url}|${buckets}`;
+    if (_waveCache.has(key)) return _waveCache.get(key);
+    const buf = await (await fetch(url)).arrayBuffer();
+    _waveCtx = _waveCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuf = await _waveCtx.decodeAudioData(buf);
+    const ch = audioBuf.getChannelData(0);
+    const step = Math.max(1, Math.floor(ch.length / buckets));
+    const out = new Array(buckets).fill(0);
+    let max = 0;
+    for (let i = 0; i < buckets; i++) {
+      let peak = 0;
+      const start = i * step;
+      // 每 8 个采样取一个就够看形状了；全量扫几百万点会让主线程卡顿
+      for (let j = 0; j < step; j += 8) {
+        const v = Math.abs(ch[start + j] || 0);
+        if (v > peak) peak = v;
+      }
+      out[i] = peak;
+      if (peak > max) max = peak;
+    }
+    const norm = max ? out.map((v) => v / max) : out;
+    _waveCache.set(key, norm);
+    return norm;
+  }
+
+  async function paintWave(el, url) {
+    if (!el || !url) return;
+    const n = parseInt(el.dataset.wave || "48", 10);
+    try {
+      const peaks = await peaksOf(url, n);
+      if (!el.isConnected) return;
+      el.innerHTML = peaks
+        .map((v) => `<span style="height:${Math.max(6, Math.round(v * 100))}%"></span>`)
+        .join("");
+    } catch (e) {
+      /* 解码失败就保留占位条，不影响播放 */
+    }
+  }
+
+  // 按播放进度点亮前 N 条；pct 0–1
+  function markWave(el, pct) {
+    if (!el || !el.children.length) return;
+    const n = el.children.length;
+    const cut = Math.round(Math.max(0, Math.min(1, pct)) * n);
+    for (let i = 0; i < n; i++) el.children[i].classList.toggle("on", i < cut);
+  }
+
+  // 扫描带 data-src 的波形容器并画真波形（其余保留装饰占位）
+  function paintAllWaves(root) {
+    (root || document).querySelectorAll("[data-wave][data-src]").forEach((el) => {
+      paintWave(el, el.dataset.src);
+    });
+  }
+
+  function seekFromEvent(el, clientX) {
+    if (!audio.duration) return;
+    const r = el.getBoundingClientRect();
+    const pct = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    audio.currentTime = pct * audio.duration;
+    markWave(el, pct);
+  }
+
+  // 历史里点播放：把这段音频装进主播放器，连同真波形与标题一起换掉。
+  // 以前只设 audio.src，播着音频但波形还是上一条的（或空）。
+  function playInPlayer(url, title) {
+    if (!url) return;
+    setWorkbenchState("default");
+    audio.src = url;
+    $("playerEmpty").hidden = true;
+    $("playerLive").hidden = false;
+    $("playerFoot").hidden = false;
+    if (title) $("playerTitle").textContent = title;
+    $("playerNow").textContent = fmtTime(0);
+    $("playerWave").dataset.src = url;
+    paintWave($("playerWave"), url);
+    markWave($("playerWave"), 0);
+    audio.play().catch(() => {});
+  }
+
+  // ---------------------------------------------------------------- 试听
+  // 音色卡上的播放键以前是纯装饰（点整个卡片只会选中）。这里用一句固定示例
+  // 真正合成一次：带缓存与加载态，no_history=1 不往历史里塞试听记录。
+  const _previewCache = new Map();          // voice_id -> wav_url
+  const PREVIEW_TEXT = "你好，我是这个声音。听一句，就知道合不合适。";
+
+  async function previewVoice(vid, el) {
+    const v = state.voices.find((x) => x.id === vid);
+    if (!v) return;
+    if (state.previewing === vid && !audio.paused) {
+      audio.pause();
+      state.previewing = null;
+      return;
+    }
+    const cached = _previewCache.get(vid);
+    if (cached) {
+      state.previewing = vid;
+      playInPlayer(cached, `试听 · ${v.name}`);
+      return;
+    }
+    if (el) el.classList.add("is-loading");
+    try {
+      const fd = new FormData();
+      fd.append("voice_id", vid);
+      fd.append("text", PREVIEW_TEXT);
+      fd.append("speed", "1");
+      fd.append("cfg_scale", "4");
+      fd.append("seed", "42");
+      fd.append("no_history", "1");       // 试听不该污染合成历史
+      const res = await api("/api/synthesize", { method: "POST", body: fd });
+      _previewCache.set(vid, res.wav_url);
+      state.previewing = vid;
+      // 走统一入口：试听的音频也更新播放器标题与真波形，
+      // 切回合成台不会看到「声音是新的、波形是上一次的」
+      playInPlayer(res.wav_url, `试听 · ${v.name}`);
+      toast(`试听「${v.name}」· ${Number(res.duration || 0).toFixed(1)} 秒（不写入历史）`);
+    } catch (e) {
+      toast("试听失败：" + e.message, true);
+    } finally {
+      if (el) el.classList.remove("is-loading");
+    }
+  }
+
   // ---------------------------------------------------------------- 播放
   function togglePlay() {
     if (!audio.src) { toast("还没有可播放的音频", true); return; }
@@ -1229,9 +1370,21 @@
     const pct = audio.duration ? audio.currentTime / audio.duration : 0;
     $("playerWave").dataset.progress = String(pct);
     $("playerWave").setAttribute("aria-valuenow", String(Math.round(pct * 100)));
+    markWave($("playerWave"), pct);      // 点亮走过的部分，别只写进 dataset
   });
   audio.addEventListener("ended", () => {
     $("playerWave").dataset.progress = "0";
+    markWave($("playerWave"), 0);
+  });
+  // 波形本身就是定位条：点哪跳哪，方向键 ±5%（role=slider 早已声明，之前没有实现）
+  $("playerWave").addEventListener("click", (e) => seekFromEvent($("playerWave"), e.clientX));
+  $("playerWave").addEventListener("keydown", (e) => {
+    if (!audio.duration) return;
+    const d = e.key === "ArrowRight" ? 0.05 : e.key === "ArrowLeft" ? -0.05 : 0;
+    if (!d) return;
+    e.preventDefault();
+    audio.currentTime = Math.min(audio.duration,
+      Math.max(0, audio.currentTime + d * audio.duration));
   });
 
   // ---------------------------------------------------------------- 事件绑定
@@ -1277,6 +1430,8 @@
       if (role) openRoleDialog(role.dataset.fixrole);
     });
     $("voiceList").addEventListener("click", async (e) => {
+      const pv = e.target.closest("[data-preview]");
+      if (pv) { e.stopPropagation(); previewVoice(pv.dataset.preview, pv); return; }
       const edit = e.target.closest("[data-edit]");
       if (edit) { e.stopPropagation(); openEdit(edit.dataset.edit); return; }
       const del = e.target.closest("[data-del]");
@@ -1432,7 +1587,12 @@
     // 历史
     $("historyScroll").addEventListener("click", async (e) => {
       const play = e.target.closest("[data-hplay]");
-      if (play) { audio.src = play.dataset.hplay; audio.play(); return; }
+      if (play) {
+        const row = play.closest(".hist-row, .lib-hist-row");
+        const t = row && row.querySelector(".hist-title");
+        playInPlayer(play.dataset.hplay, t ? t.textContent.trim() : "");
+        return;
+      }
       const del = e.target.closest("[data-hdel]");
       if (del) {
         try {
@@ -1519,6 +1679,8 @@
 
     // 音色库
     $("libraryGrid").addEventListener("click", (e) => {
+      const pv = e.target.closest("[data-preview]");
+      if (pv) { previewVoice(pv.dataset.preview, pv); return; }
       const edit = e.target.closest("[data-edit]");
       if (edit) { openEdit(edit.dataset.edit); return; }
       const card = e.target.closest("[data-voice]");
@@ -1530,7 +1692,12 @@
     });
     $("libraryHistory").addEventListener("click", async (e) => {
       const play = e.target.closest("[data-hplay]");
-      if (play) { audio.src = play.dataset.hplay; audio.play(); return; }
+      if (play) {
+        const row = play.closest(".hist-row, .lib-hist-row");
+        const t = row && row.querySelector(".hist-title");
+        playInPlayer(play.dataset.hplay, t ? t.textContent.trim() : "");
+        return;
+      }
       const del = e.target.closest("[data-hdel]");
       if (del) {
         try {
@@ -1657,8 +1824,9 @@
       const s = new URLSearchParams(location.search).get("screen");
       if (s === "clone" || s === "library" || s === "workbench" || s === "script") setScreen(s);
     } catch (e) { /* 忽略 */ }
-    // 波形装饰
+    // 波形装饰：只画没有真实音频来源的占位条；有 data-src 的等真波形
     document.querySelectorAll("[data-wave]").forEach((el) => {
+      if (el.dataset.src) return;
       const n = parseInt(el.dataset.wave || "20", 10);
       const seed = parseInt(el.dataset.seed || "1", 10);
       el.innerHTML = Array.from({ length: n }, (_, i) =>

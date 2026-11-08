@@ -131,6 +131,14 @@
   /* 克隆页文稿框：.sheet 默认 flex:1 会撑满整块，三行字配 300px 空白。
      改成固定高度、可手工拉高，把下半屏还给「质量检查 + 试听对比」 */
   #refText{flex:0 0 auto;height:200px;min-height:132px;max-height:340px;resize:vertical}
+  .ab-note{margin:6px 0 0;font-size:11.5px;line-height:1.6;color:var(--text-3)}
+
+  /* 音色试听：可点、加载中必须给反馈（一次合成要几秒，不能只是「没反应」） */
+  .voice-play{cursor:pointer}
+  .voice-play:hover,.voice-play:focus-visible{color:var(--accent)}
+  [data-preview].is-loading{
+    opacity:.45;pointer-events:none;animation:pulse 1.1s ease-in-out infinite;
+  }
 
   /* ---- 音色库 ---- */
   /* 卡片变多时别把分页条顶出视口：最后一段占满剩余高度，历史在内部滚动，

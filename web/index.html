@@ -377,9 +377,10 @@
           <input class="input" id="voiceInstruction" placeholder="例如：一位温柔自信的年轻女性，声音清晰">
           <label class="consent"><input type="checkbox" id="consentBox"> <span>我确认已获得声音本人的书面授权，并了解这份参考音频只保存在本机。</span></label>
           <div class="ab">
-            <div class="ab-head"><strong>同一句话，对比原声与克隆</strong><span id="abDuration">—</span></div>
-            <div class="ab-wave" data-wave="46" data-seed="8" data-progress="0" aria-hidden="true"></div>
-            <button class="ab-play" type="button" id="abPlayBtn" disabled><svg class="icon icon-sm"><use href="#i-play"/></svg>播放这一句</button>
+            <div class="ab-head"><strong>参考音频 · 原声</strong><span id="abDuration">—</span></div>
+            <div class="ab-wave" data-wave="46" data-progress="0" aria-hidden="true"></div>
+            <p class="ab-note">这里只能听原声本身；克隆效果保存后到「合成台」选它试听。</p>
+            <button class="ab-play" type="button" id="abPlayBtn" disabled><svg class="icon icon-sm"><use href="#i-play"/></svg>播放原声</button>
           </div>
           <button class="btn-primary save-btn" type="button" id="saveVoiceBtn" disabled>保存到音色库</button>
           <p class="profile-hint" id="profileHint">先上传参考音频并填写文稿，再保存。</p>
