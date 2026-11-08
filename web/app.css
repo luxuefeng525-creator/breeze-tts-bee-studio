@@ -128,6 +128,10 @@
   .help-note{margin-top:16px;padding:11px 13px;border-radius:var(--r-sm);background:var(--surface-2);border:1px solid var(--line);font-size:12.5px;color:var(--text-3)}
   .help-note code{font-family:var(--font-mono);color:var(--accent)}
 
+  /* 克隆页文稿框：.sheet 默认 flex:1 会撑满整块，三行字配 300px 空白。
+     改成固定高度、可手工拉高，把下半屏还给「质量检查 + 试听对比」 */
+  #refText{flex:0 0 auto;height:200px;min-height:132px;max-height:340px;resize:vertical}
+
   /* ---- 音色库 ---- */
   /* 卡片变多时别把分页条顶出视口：最后一段占满剩余高度，历史在内部滚动，
      分页条吸底常驻。只收紧间距是「这次刚好够」，内容再多又会溢出。 */
@@ -141,6 +145,9 @@
   .lib-head .search{width:260px}
   .voice-grid{grid-template-columns:repeat(auto-fill,minmax(258px,1fr))}
   .voice-card{
+    /* 固定 200px 会让「没有简介」的卡留一大片空白，一屏只装 6 张；
+       改由内容撑高（网格同排仍会拉伸对齐），信息密度上来了 */
+    height:auto;min-height:188px;
     background:var(--surface);border:1px solid var(--line);border-radius:var(--r-panel);
     padding:15px 16px;display:flex;flex-direction:column;gap:9px;cursor:pointer;
     transition:border-color .16s ease,background-color .16s ease;

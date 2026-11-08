@@ -950,6 +950,29 @@
       ? "可以保存了，保存后可在合成台直接选用。"
       : ("还不能保存：" + missing + "。");
     $("profileHint").classList.toggle("is-blocked", !ok);
+    updateStepper();
+  }
+
+  // 步骤条不是装饰：跟着真实状态走，用户扫一眼就知道还差哪一步。
+  // 第 4 步「试听保存」没有独立完成态——保存成功就跳回合成台了。
+  function updateStepper() {
+    const box = $("cloneStepper");
+    if (!box) return;
+    const c = state.clone;
+    // 设计型音色不走「上传参考音频」这套流程，步骤条对它没有意义
+    box.hidden = c.type === "design";
+    if (box.hidden) return;
+    const hasFile = !!c.file;
+    const hasText = hasFile && $("refText").value.trim().length > 0;
+    const checked = !!(c.quality && c.quality.score != null);
+    const done = [hasFile, hasText, checked, false];
+    const nextIdx = done.findIndex((d) => !d);
+    const curIdx = nextIdx === -1 ? 3 : nextIdx;
+    box.querySelectorAll(".step").forEach((el) => {
+      const i = parseInt(el.dataset.step, 10) - 1;
+      el.classList.toggle("done", !!done[i]);
+      el.classList.toggle("current", i === curIdx);
+    });
   }
 
   async function uploadRef(file) {
@@ -1555,7 +1578,8 @@
       });
     });
     $("helpBtn").addEventListener("click", () => $("helpDlg").showModal());
-    $("settingsBtn").addEventListener("click", async () => {
+    // 诊断弹层：顶栏入口与错误态的「查看诊断」共用同一份内容
+    const openDiag = async () => {
       await refreshModel();
       const m = state.model;
       $("diagBody").innerHTML = m
@@ -1568,7 +1592,10 @@
            <p class="help-note">这些是排查用的技术信息。数据目录：<code>data/</code></p>`
         : `<p class="help-note">推理服务（7860）当前未连接。请先启动推理服务，面板才能合成。</p>`;
       $("settingsDlg").showModal();
-    });
+    };
+    $("settingsBtn").addEventListener("click", openDiag);
+    // 错误态里的「查看诊断」以前是死按钮：点了毫无反应
+    $("diagBtn").addEventListener("click", openDiag);
     $("saveEditBtn").addEventListener("click", saveEdit);
   }
 

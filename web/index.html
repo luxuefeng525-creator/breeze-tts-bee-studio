@@ -242,7 +242,6 @@
         <div class="actionbar actionbar-default" id="actionDefault">
           <div class="estimate"><strong id="estimateTitle">等待输入</strong><span id="estimateSub">本地生成 · 失败可只重试单段</span></div>
           <div class="action-right">
-            <button class="btn-ghost" type="button" id="queueBtn">队列 0</button>
             <button class="btn-primary" type="button" id="generateBtn"><svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg>生成语音<kbd>Ctrl ↵</kbd></button>
           </div>
         </div>
@@ -300,7 +299,7 @@
         </section>
 
         <section class="history" aria-label="合成历史">
-          <div class="history-head"><h2>历史</h2><button type="button" id="historyFilterBtn">筛选</button></div>
+          <div class="history-head"><h2>历史</h2></div>
           <div class="history-scroll" id="historyScroll"></div>
           <div class="history-empty" id="historyEmpty"><strong>还没有生成记录</strong><span>生成第一段语音后，会按日期出现在这里。<br>可以重播、下载，或用同一组参数复现。</span></div>
           <button class="history-all" type="button" id="historyAllBtn">查看全部历史 <svg class="icon icon-xs" aria-hidden="true" style="margin-left:5px"><use href="#i-arrow"/></svg></button>
@@ -360,7 +359,6 @@
             <textarea class="sheet sheet-input" id="refText" placeholder="把你录音里说的话，逐字写在这里……" aria-label="参考文稿，逐字校对" disabled></textarea>
             <div class="transcript-foot">
               <span class="warn-line"><svg class="icon"><use href="#i-alert"/></svg>文稿必须与音频逐字一致，否则会明显降低相似度。</span>
-              <button type="button" id="refABBtn">试听对比</button>
             </div>
           </section>
         </div>
