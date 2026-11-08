@@ -401,12 +401,17 @@ def parse_script(
     role_defaults: dict[str, str] | None = None,
     role_instructions: dict[str, str] | None = None,
     scene_moods: dict[str, str] | None = None,
+    carry_emotion: bool = False,
 ) -> ParsedScript:
     """把剧本文本解析成行列表。
 
     role_defaults: 角色名 → 默认情绪
     role_instructions: 角色名 → 音色/原型指令（用于拼最终指令）
     scene_moods: 场景名 → 氛围指令
+    carry_emotion: 情绪跨行延续。只在「这一行没有任何情绪线索」
+        （没标注、角色没默认、文本也推断不出）时，才沿用本场上一行的情绪，
+        来源标成 carry，界面上单独显示。标注/角色默认/文本推断一律优先，
+        所以打开它不会悄悄改掉作者写过的东西。换场次即重置。
     """
     role_defaults = role_defaults or {}
     role_instructions = role_instructions or {}
@@ -415,6 +420,7 @@ def parse_script(
     out = ParsedScript()
     scene = ""
     scene_used = False
+    last_emotion = ""      # 本场上一行的情绪，供 carry_emotion 沿用
 
     # 报错要给「编辑器里的第几行」，不是「第几个解析行」——场次行与坏行
     # 也占行号，按 len(lines)+1 算会让用户找不到地方。
@@ -429,6 +435,7 @@ def parse_script(
             if scene and scene not in out.scenes:
                 out.scenes.append(scene)
             scene_used = False
+            last_emotion = ""      # 换场即重置：别把上一场的情绪带进雨夜
             continue
 
         m = _LINE_RE.match(line)
@@ -459,6 +466,11 @@ def parse_script(
             # 仍然产出一行，界面上可以就地新建角色，而不是让整段消失
         emotion, source = resolve_emotion(
             text, tag, role_defaults.get(name) if role_defaults else None)
+        if carry_emotion and source == "neutral" and last_emotion:
+            # 这一行什么都没说：沿用本场上一行的情绪（来源单独标 carry）
+            emotion, source = last_emotion, "carry"
+        if source != "neutral":
+            last_emotion = emotion
         instruction = build_instruction(
             role_instructions.get(name, ""),
             emotion,

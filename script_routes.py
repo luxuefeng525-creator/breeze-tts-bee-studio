@@ -47,6 +47,9 @@ DEFAULT_PARTS = ",".join(("full", "lines", "timeline", "script"))
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
+# 8GB 卡上同时跑两个合成任务会直接把显存打满（还会互相抢引擎，
+# 两边都变慢）。所以全局只有一个执行槽：后来的任务排队，位置可见、可取消。
+_JOB_QUEUE: list[str] = []
 # cast 要连着写 voices.json / roles.json / scripts.json 三个文件：单次 RMW
 # 各自原子，但几次之间需要一把进程内总锁，否则两个并发请求会基于同一份
 # 旧快照各建一遍角色，并在响应里谎报「建成功了」。
@@ -284,7 +287,8 @@ def parse_for(script: dict, roles: dict[str, dict] | None = None):
     probe = parse_script(raw)
     moods = {s["name"]: s.get("mood", "")
              for s in _scenes_view(probe.scenes, script.get("scenes"))}
-    return parse_script(raw, defaults, instr, moods)
+    return parse_script(raw, defaults, instr, moods,
+                        bool(script.get("emotion_carry")))
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -496,6 +500,24 @@ def _same_scalar(a, b) -> bool:
         return str(a) == str(b)
 
 
+def _lead_map(script: dict) -> dict[int, float]:
+    """行号 → 提前量（秒）。只留 0.05~2 秒的有效值，脏数据直接忽略。
+
+    提前量不参与 _line_hash：它只影响「这一行在整轨里放多早」，不改音频内容，
+    所以调它不该把已经合成好的行打回待重做。
+    """
+    out: dict[int, float] = {}
+    for k, v in (script.get("line_lead") or {}).items():
+        try:
+            idx = int(k)
+            sec = round(float(v or 0), 2)
+        except (TypeError, ValueError):
+            continue
+        if 0.05 <= sec <= 2.0:
+            out[idx] = sec
+    return out
+
+
 def _enriched(script: dict, parsed) -> list[dict]:
     """把解析结果补上 role_id/voice_id 与完成状态。
 
@@ -509,6 +531,7 @@ def _enriched(script: dict, parsed) -> list[dict]:
     cfg = float(script.get("cfg_scale") if script.get("cfg_scale") is not None
                 else DEFAULT_CFG)
     stored = {l["idx"]: l for l in script.get("lines") or [] if "idx" in l}
+    leads = _lead_map(script)
     out = []
     for line in parsed.lines:
         row = line.as_dict()
@@ -516,6 +539,7 @@ def _enriched(script: dict, parsed) -> list[dict]:
         row["role_id"] = role["id"] if role else None
         row["voice_id"] = (role or {}).get("voice_id") or None
         row["speed"] = _role_speed(role)
+        row["lead"] = leads.get(line.idx, 0.0)   # 抢话提前量（秒）
         row["hash"] = _line_hash(row)
         row["cfg_scale"] = cfg
         row["seed"] = _seed_for(script, role)
@@ -600,10 +624,17 @@ def _job_view(job: dict) -> dict:
     durs = list(job.get("durs") or [])
     per_line = (sum(durs) / len(durs)) if durs else 0.0
     remaining = max(0, job["total"] - finished)
+    pos = 0
+    if job.get("state") == "queued":
+        try:
+            pos = _JOB_QUEUE.index(job["id"]) + 1
+        except ValueError:
+            pos = 0
     return {
         "id": job["id"],
         "script_id": job["script_id"],
         "state": job["state"],
+        "queue_pos": pos,
         "total": job["total"],
         "done": job["done"],
         "failed": job["failed"],
@@ -728,6 +759,7 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
         # 拼接（与混音）都落盘之后才报完成：前端看到 done 就能直接下载
         if job["state"] == "running":
             job["state"] = "done"
+        _pump_queue()     # 这一单结束了，看看队列里还有没有下一单
 
 
 def _persist_line(script_id: str, idx: int, patch: dict) -> None:
@@ -769,10 +801,8 @@ def _concat(script_id: str, gap: float) -> None:
     rows = _enriched(script, parsed)
     out_dir = _lines_dir(script_id)
 
-    pcm = bytearray()
-    timeline: list[dict] = []
-    cursor = 0.0
-    last_done = -1
+    # 已完成、且音频真的在盘上的行，先取出来再决定走哪条拼接路径
+    done: list[tuple[dict, bytes]] = []
     for row in rows:
         if row["status"] != "done" or not row["wav"]:
             continue
@@ -781,25 +811,73 @@ def _concat(script_id: str, gap: float) -> None:
         path = P.DATA / row["wav"]
         if not path.is_file():
             continue
-        if last_done >= 0 and gap > 0:
-            pcm += _silence(gap)
-            cursor += gap
-        chunk = _read_pcm(path)
-        start = cursor
-        pcm += chunk
-        dur = len(chunk) / (P.SAMPLE_RATE * 2)
-        cursor += dur
-        last_done = row["idx"]
-        timeline.append({
-            "idx": row["idx"] + 1,
-            "role": row["role_name"],
-            "emotion": row["emotion"],
-            # 场次名：混音要靠它把环境声/BGM 铺到对应的那一段
-            "scene": row.get("scene") or "",
-            "start": round(start, 2),
-            "end": round(cursor, 2),
-            "text": row["text"],
-        })
+        done.append((row, _read_pcm(path)))
+
+    timeline: list[dict] = []
+    cursor = 0.0
+    overlap = any(float(r.get("lead") or 0) > 0 for r, _ in done)
+
+    if overlap:
+        # 抢话：第 N 行可以提前 lead 秒开始，和上一行在时间轴上叠一段。
+        # 逐段写字节做不到重叠，这里用 float 累加再限幅落回 s16。
+        import numpy as np
+
+        starts: list[float] = []
+        for i, (row, chunk) in enumerate(done):
+            dur = len(chunk) / (P.SAMPLE_RATE * 2)
+            if i == 0:
+                start = 0.0
+            else:
+                start = max(0.0, cursor + gap - float(row.get("lead") or 0))
+            starts.append(start)
+            cursor = max(cursor, start + dur)      # 重叠时游标不能倒退
+        total = cursor
+        n = int(round(total * P.SAMPLE_RATE))
+        buf = np.zeros(max(1, n), dtype=np.float32)
+        for (row, chunk), start in zip(done, starts):
+            arr = np.frombuffer(chunk, dtype="<i2").astype(np.float32) / 32768.0
+            i0 = int(round(start * P.SAMPLE_RATE))
+            buf[i0:i0 + len(arr)] += arr[:max(0, len(buf) - i0)]
+        peak = float(np.abs(buf).max())
+        if peak > 0.98:                            # 留 1~2 dB 余量，别削顶
+            buf *= 0.98 / peak
+        pcm = (np.clip(buf, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+        for (row, chunk), start in zip(done, starts):
+            dur = len(chunk) / (P.SAMPLE_RATE * 2)
+            timeline.append({
+                "idx": row["idx"] + 1,
+                "role": row["role_name"],
+                "emotion": row["emotion"],
+                "scene": row.get("scene") or "",
+                "start": round(start, 2),
+                "end": round(start + dur, 2),
+                "lead": round(float(row.get("lead") or 0), 2),
+                "text": row["text"],
+            })
+    else:
+        # 没有抢话：保持老的「逐段字节拼接 + 固定静音」，这样已有剧本的
+        # full.wav 仍然逐字节不变（有测试盯着这件事）
+        pcm = bytearray()
+        last_done = -1
+        for row, chunk in done:
+            if last_done >= 0 and gap > 0:
+                pcm += _silence(gap)
+                cursor += gap
+            start = cursor
+            pcm += chunk
+            dur = len(chunk) / (P.SAMPLE_RATE * 2)
+            cursor += dur
+            last_done = row["idx"]
+            timeline.append({
+                "idx": row["idx"] + 1,
+                "role": row["role_name"],
+                "emotion": row["emotion"],
+                # 场次名：混音要靠它把环境声/BGM 铺到对应的那一段
+                "scene": row.get("scene") or "",
+                "start": round(start, 2),
+                "end": round(cursor, 2),
+                "text": row["text"],
+            })
 
     if not pcm:
         return
@@ -1258,12 +1336,42 @@ def _new_job(sid: str, script: dict, rows: list[dict],
                             "role_name": r["role_name"], "text": r["text"],
                             "emotion": r["emotion"]} for r in todo},
     }
-    with _JOBS_LOCK:
-        _JOBS[job["id"]] = job
     gap = float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP)
-    threading.Thread(target=_run_job, args=(job, sid, todo, gap),
-                     daemon=True).start()
+    with _JOBS_LOCK:
+        # 先判忙再入表：job 自己的初始 state 就是 running，先入表会让它把自己
+        # 当成「正在跑」，于是每个任务都排队、永远不启动
+        busy = any(j["state"] == "running" for j in _JOBS.values())
+        _JOBS[job["id"]] = job
+        if busy:
+            job["state"] = "queued"
+            job["_args"] = (sid, todo, gap)     # 排队期间先握住参数
+            _JOB_QUEUE.append(job["id"])
+        else:
+            job["started_at"] = time.time()
+            threading.Thread(target=_run_job, args=(job, sid, todo, gap),
+                             daemon=True).start()
     return job
+
+
+def _pump_queue() -> None:
+    """有空槽了就启动队首。任务收尾时调用；失败/停止都会走到。"""
+    with _JOBS_LOCK:
+        if any(j["state"] == "running" for j in _JOBS.values()):
+            return
+        while _JOB_QUEUE:
+            jid = _JOB_QUEUE.pop(0)
+            job = _JOBS.get(jid)
+            if not job or job.get("state") != "queued":
+                continue
+            args = job.pop("_args", None)
+            if not args:
+                continue
+            sid, todo, gap = args
+            job["state"] = "running"
+            job["started_at"] = time.time()
+            threading.Thread(target=_run_job, args=(job, sid, todo, gap),
+                             daemon=True).start()
+            return
 
 
 def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
@@ -1384,8 +1492,17 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not job:
             h._err("任务不存在或已结束", 404)
             return True
-        job["stop"] = True
-        h._json({"ok": True})
+        with _JOBS_LOCK:
+            if job.get("state") == "queued":
+                # 还没轮到它：直接出队并置终态，不用等 worker 收尾
+                job["state"] = "stopped"
+                job.pop("_args", None)
+                job["finished_at"] = time.time()
+                if job["id"] in _JOB_QUEUE:
+                    _JOB_QUEUE.remove(job["id"])
+            else:
+                job["stop"] = True
+        h._json({"ok": True, "state": job["state"]})
         return True
 
     # ---- 列表 / 详情 ----
@@ -1449,6 +1566,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             # 本剧用的角色 id 表与是否隔离：界面据此标「剧本专属」
             "cast": list(script.get("cast") or []),
             "cast_isolated": bool(script.get("cast_isolated")),
+            "emotion_carry": bool(script.get("emotion_carry")),
+            "line_lead": _lead_map(script),
             # scenes 以解析结果为准（作者可能刚加了 ## 场次），mood 从已存配置里取
             "scenes": _scenes_view(parsed.scenes, script.get("scenes")),
             "lines": _enriched(script, parsed),
@@ -1739,6 +1858,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             # 老剧本没有这两个字段，保持「认领全局角色」的老语义
             "cast": [],
             "cast_isolated": True,
+            # 情绪跨行延续：新剧本默认开（老剧本缺这个字段 = 关，行为不变）
+            "emotion_carry": bool(d.get("emotion_carry", True)),
             "lines": [],
             "created_at": now,
             "updated_at": now,
@@ -1773,6 +1894,12 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             if n > HARD_MAX_LINES:
                 h._err(f"一次最多 {HARD_MAX_LINES} 行（当前 {n} 行），请分剧")
                 return True
+        if "emotion_carry" in d:
+            script["emotion_carry"] = bool(d["emotion_carry"])
+        before_lead = _lead_map(script)
+        if "line_lead" in d:
+            raw_lead = d["line_lead"] if isinstance(d["line_lead"], dict) else {}
+            script["line_lead"] = {str(k): v for k, v in _lead_map({"line_lead": raw_lead}).items()}
         if "title" in d:
             script["title"] = str(d["title"] or "未命名剧本")
         if "raw" in d:
@@ -1821,7 +1948,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             script["auto_cast"] = bool(d["auto_cast"])
         patch = {k: script[k] for k in
                  ("title", "raw", "scenes", "gap", "cfg_scale", "seed",
-                  "auto_cast", "mix_wav", "mix_stale") if k in script}
+                  "auto_cast", "emotion_carry", "line_lead",
+                  "mix_wav", "mix_stale") if k in script}
         patch["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         def _mut(items):
@@ -1835,6 +1963,13 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if "raw" in d and script.get("auto_cast", True):
             try:
                 _apply_cast(sid)
+            except Exception:
+                pass
+        # 提前量只改时间轴，不用重新合成：直接重拼整轨与混音。
+        # 不重拼的话界面上的时间轴和实际整轨会对不上。
+        if _lead_map(script) != before_lead and (script.get("full_wav") or ""):
+            try:
+                _concat(sid, float(script.get("gap") or 0.35))
             except Exception:
                 pass
         fresh = _find(sid) or script

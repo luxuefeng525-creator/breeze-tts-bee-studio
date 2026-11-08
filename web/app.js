@@ -1977,6 +1977,7 @@
 
   const EMOTION_SOURCE = {
     explicit: "标注", role: "角色默认", auto: "自动推断", neutral: "中性",
+    carry: "延续",
   };
 
   function roleHue(name) {
@@ -2028,6 +2029,7 @@
     S.gap = d.gap == null ? 0.35 : d.gap;
     $("scriptRaw").value = d.raw || "";
     $("scriptGap").value = S.gap;
+    $("emotionCarry").checked = !!d.emotion_carry;
     $("scriptTitleInput").value = d.title || "";
     $("scriptTitle").textContent = d.title || "未命名剧本";
     $("synthScriptBtn").disabled = false;
@@ -2135,7 +2137,8 @@
           <span class="line-emotion" title="情绪来源：${esc(EMOTION_SOURCE[l.emotion_source] || "")}">
             ${esc(l.emotion)}<em>${esc(EMOTION_SOURCE[l.emotion_source] || "")}</em>
           </span>
-          <span class="line-text">${esc(l.text)}${routeMark}</span>
+          <span class="line-text">${esc(l.text)}${routeMark}${l.lead
+            ? `<em class="line-lead" title="与前一句重叠 ${l.lead} 秒（抢话）">抢 ${l.lead}s</em>` : ""}</span>
           ${takeSel}
           <span class="line-state ${stat}">${mark}</span>
           <span class="line-acts">
@@ -2144,6 +2147,11 @@
             </button>
             <button class="icon-btn" type="button" data-redoline="${l.idx}" title="${takes.length ? `再录一版（当前 v${l.take}）` : "只重做这一行"}">
               <svg class="icon icon-sm"><use href="#i-refresh"/></svg>
+            </button>
+            <button class="icon-btn lead${l.lead ? " on" : ""}" type="button" data-leadline="${l.idx}"
+              aria-pressed="${l.lead ? "true" : "false"}"
+              title="抢话：这一句提前开始，和前一句叠着说。点一下加 0.3 秒，加到 0.9 秒后再点取消（不改音频，只改时间轴，立刻重拼整轨）">
+              <svg class="icon icon-sm"><use href="#i-ff"/></svg>
             </button>
           </span>
         </div>`;
@@ -2526,6 +2534,7 @@
             raw: $("scriptRaw").value,
             title: $("scriptTitleInput").value.trim() || "未命名剧本",
             gap: parseFloat($("scriptGap").value) || 0.35,
+            emotion_carry: $("emotionCarry").checked,
             scenes: scenesPayload(),
           }),
         });
@@ -2684,6 +2693,15 @@
         finishJob();
         return;
       }
+      if (d.state === "queued") {
+        // 全局只有一个执行槽：另一个剧本在跑时，这单在排队。
+        // 说清位置，别让用户以为卡住了；「停止」可以直接取消排队。
+        $("scriptBar").style.width = "2%";
+        $("scriptProgressText").textContent =
+          `引擎正在为另一个剧本合成，已排队${d.queue_pos ? `（第 ${d.queue_pos} 位）` : ""}…`;
+        S.timer = setTimeout(tick, 2000);
+        return;
+      }
       const done = d.done + d.failed;
       const pct = Math.min(99, Math.round((done / Math.max(1, d.total)) * 100));
       $("scriptBar").style.width = Math.max(2, pct) + "%";
@@ -2773,6 +2791,35 @@
       await openScript(S.current.id);
       toast(r && r.take > 1 ? `已生成 v${r.take}（旧版本仍可切回）` : "这一行已更新");
     } catch (e) { toast("重做失败：" + e.message, true); }
+  }
+
+  // 抢话：让这一行提前 0.3/0.6/0.9 秒开始，和上一行在整轨里叠一段。
+  // 不改音频、不重新合成，只重拼整轨（服务端 PUT 里做），所以是即时的。
+  const LEAD_STEPS = [0, 0.3, 0.6, 0.9];
+
+  async function cycleLead(idx) {
+    if (!S.current) return;
+    const map = { ...(S.current.line_lead || {}) };
+    const cur = Number(map[String(idx)] || 0);
+    const at = LEAD_STEPS.findIndex((v) => Math.abs(v - cur) < 0.001);
+    const next = LEAD_STEPS[(at + 1) % LEAD_STEPS.length];
+    if (next) map[String(idx)] = next;
+    else delete map[String(idx)];
+    try {
+      const d = await api(`/api/scripts/${S.current.id}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ line_lead: map }),
+      });
+      if (S.current && S.current.id === d.id) {
+        S.current = { ...S.current, ...d };
+        S.lines = d.lines || S.lines;
+        renderLines(d);
+      }
+      if (!next) toast("已取消抢话");
+      else if (idx === 0) toast("第一行本来就是从 0 秒开始，抢话对它不生效", true);
+      else if (!d.full_wav) toast(`下一句会提前 ${next} 秒开始（合成整轨时生效）`);
+      else toast(`这一句提前 ${next} 秒开始，整轨已重拼`);
+    } catch (e) { toast(e.message, true); }
   }
 
   // 一键补齐角色：后端按名字配原型/音色，回来后重新打开剧本，
@@ -3057,8 +3104,22 @@
     $("scriptRaw").addEventListener("blur", () => saveScript(true));
     $("scriptTitleInput").addEventListener("blur", () => saveScript(true));
     $("scriptGap").addEventListener("change", () => saveScript(true));
+    // 情绪跨行延续：改的是每行下发的指令，必须重新解析；已经合成过的行
+    // 会因为 hash 变化回到待重做，这一点要在提示里说清
+    $("emotionCarry").addEventListener("change", async () => {
+      if (!S.current) return;
+      const on = $("emotionCarry").checked;
+      if (await saveScript(true)) {
+        await previewScriptNow();     // 它会自己重绘行列表与场次区
+        toast(on
+          ? "已开启：没写情绪的台词会沿用本场上一行，改动的行需要重新合成"
+          : "已关闭：情绪回到各行独立判断");
+      }
+    });
     $("scriptLines").addEventListener("click", (e) => {
       if (e.target.closest("#castBtn")) { autoCast(); return; }
+      const leadBtn = e.target.closest("[data-leadline]");
+      if (leadBtn) { cycleLead(parseInt(leadBtn.dataset.leadline, 10)); return; }
       const play = e.target.closest("[data-playline]");
       if (play) {
         const idx = parseInt(play.dataset.playline, 10);

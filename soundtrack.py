@@ -5,7 +5,7 @@
 1. **解码**：把用户上传的 wav/flac/ogg/mp3 统一成 24kHz 单声道 s16le PCM。
    素材多是 44.1kHz stereo，直接按 24k 解释会拉慢约 1.84 倍且降调，
    必须先下混再重采样。
-2. **生成**：程序合成噪声底（白噪 / 棕噪 / 风 / 低频嗡鸣），
+2. **生成**：程序合成噪声底（白噪 / 棕噪 / 风 / 低频嗡鸣 / 雨 / 火 / 街道），
    **不内置任何第三方音乐**，避免版权问题。
 3. **铺底**：按场次时间范围把素材循环铺满，首尾做淡入淡出。
 4. **混音**：干声 + 铺底 → 按时间轴 ducking → 峰值限幅 → 写 WAV。
@@ -31,7 +31,15 @@ NOISE_KINDS: dict[str, str] = {
     "brown": "棕噪声（偏低沉，适合室内、街道底色）",
     "wind": "风声（缓慢起伏，适合户外、空旷场景）",
     "hum": "低频嗡鸣（空调/电器底噪，适合室内场景）",
+    "rain": "雨声（密集高频+雨滴点击，适合雨夜、离别等潮湿场景）",
+    "fire": "火声（低频火苗底+不规则噼啪，适合篝火、室内壁炉场景）",
+    "street": "街道（车流嗡鸣+缓慢起伏+远处呼啸，适合城市外景、过场）",
 }
+
+# 新增的场景底音：峰值定在 0.70 满量程（约 -3.1 dBFS），留 1~2 dB 余量
+_AMBIENCE_PEAK = 0.70
+# 这些 kind 的随机源偏移写死，避免依赖 str.hash 的进程随机化
+_AMBIENCE_OFFSETS = {"rain": 1103, "fire": 2207, "street": 3313}
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +135,133 @@ def decode_to_pcm24k(data: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 # 生成噪声底
 # ---------------------------------------------------------------------------
+def _band_noise(rng, n: int, hp: float | None = None,
+                lp: float | None = None):
+    """频域整形的高斯噪声（二阶高通/低通相加性掩模）。
+
+    二阶斜率很缓，不会像砖墙 FIR 那样在时域留下「金属味」的前回响；
+    整段 rfft 一次算完，30 秒也只要几十毫秒。
+    """
+    import numpy as np
+
+    spec = np.fft.rfft(rng.standard_normal(n))
+    f = np.fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
+    gain = np.ones_like(f)
+    if hp:
+        gain = gain * (f * f) / (f * f + hp * hp)
+    if lp:
+        gain = gain * (lp * lp) / (f * f + lp * lp)
+    return np.fft.irfft(spec * gain, n).astype(np.float32)
+
+
+def _bursts(rng, n: int, count: int, length: float, f_lo: float, f_hi: float,
+            tau_lo: float, tau_hi: float, noisy: bool = False,
+            clustered: bool = False):
+    """在随机位置叠加 `count` 个指数衰减短事件，返回整段加性层。
+
+    - 正弦衰减（noisy=False）：雨滴那种「叮」的点击感
+    - 噪声衰减（noisy=True）：柴火那种宽频「啪」
+    - clustered=True：事件间隔取指数分布，成簇出现，听感才不机械
+
+    全部用 `np.bincount` 一次性散点累加，不做逐采样 Python 循环。
+    """
+    import numpy as np
+
+    layer = np.zeros(n, dtype=np.float32)
+    if count <= 0 or n <= 2:
+        return layer
+    span = max(2, int(length * SAMPLE_RATE))
+    span = min(span, n)
+    hi = n - span
+    if clustered:
+        mean_gap = max(1.0, hi / max(1.0, count * 1.6))
+        gaps = rng.exponential(mean_gap, count)
+        starts = np.clip(np.cumsum(gaps).astype(np.int64), 0, max(0, hi))
+    else:
+        starts = rng.integers(0, max(1, hi), count) if hi > 0 else np.zeros(
+            count, dtype=np.int64)
+
+    t = np.arange(span, dtype=np.float32) / np.float32(SAMPLE_RATE)
+    tau = rng.uniform(tau_lo, tau_hi, count).astype(np.float32)
+    env = np.exp(-t[None, :] / tau[:, None]).astype(np.float32)
+    if noisy:
+        sig = rng.standard_normal((count, span)).astype(np.float32)
+        sig -= sig.mean(axis=1, keepdims=True)
+    else:
+        freq = rng.uniform(f_lo, f_hi, count).astype(np.float32)
+        phase = rng.uniform(0.0, 2.0 * np.pi, count).astype(np.float32)
+        sig = np.sin(2.0 * np.pi * freq[:, None] * t[None, :]
+                     + phase[:, None]).astype(np.float32)
+    sig *= env * rng.uniform(0.35, 1.0, count).astype(np.float32)[:, None]
+
+    idx = (starts[:, None] + np.arange(span, dtype=np.int64)[None, :]).ravel()
+    acc = np.bincount(idx, weights=sig.ravel(), minlength=n)[:n]
+    return acc.astype(np.float32)
+
+
+def _norm(x):
+    """按峰值归一到 [-1, 1]（全零时原样返回，避免除零）。"""
+    import numpy as np
+
+    m = float(np.max(np.abs(x))) if x.size else 0.0
+    return x / (m or 1.0)
+
+
+def _synth_rain(n: int, rng):
+    """雨：1.2k–9.5k 密集高频底 + 每秒约 55 个短促雨滴点击 + 雨势慢起伏。"""
+    import numpy as np
+
+    body = _norm(_band_noise(rng, n, hp=1200.0, lp=9500.0))
+    drops = _norm(_bursts(rng, n, int(round(n / SAMPLE_RATE * 55)), 0.014,
+                          2200.0, 7800.0, 0.0015, 0.006))
+    t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
+    # 雨势忽大忽小：0.05Hz 与 0.13Hz 两个慢 LFO 叠加
+    lfo = 0.74 + 0.16 * np.sin(2 * np.pi * 0.05 * t + 0.9) \
+        + 0.10 * np.sin(2 * np.pi * 0.13 * t + 2.4)
+    return (0.45 * body + 0.55 * drops) * lfo.astype(np.float32)
+
+
+def _synth_fire(n: int, rng):
+    """火：25–320Hz 火苗呼呼底 + 每秒约 9 个成簇的宽频噼啪（一阶差分提高频）。"""
+    import numpy as np
+
+    rumble = _norm(_band_noise(rng, n, hp=25.0, lp=320.0))
+    pops = _bursts(rng, n, int(round(n / SAMPLE_RATE * 9)), 0.030,
+                   0.0, 0.0, 0.0010, 0.0040, noisy=True, clustered=True)
+    # 差分掉低频 → 只剩「噼」的瞬态，像干柴爆裂
+    pops = _norm(np.diff(pops, prepend=np.float32(0.0)))
+    t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
+    flicker = 0.58 + 0.24 * np.sin(2 * np.pi * 0.09 * t + 1.7) \
+        + 0.18 * np.sin(2 * np.pi * 0.23 * t + 0.3)
+    return (0.42 * rumble * flicker.astype(np.float32) + 0.58 * pops)
+
+
+def _synth_street(n: int, rng):
+    """街道：18–180Hz 车流嗡鸣 + 400–2500Hz 路面细声 + 慢起伏 + 远处经过的呼啸。"""
+    import numpy as np
+
+    rumble = _norm(_band_noise(rng, n, hp=18.0, lp=180.0))
+    hiss = _norm(_band_noise(rng, n, hp=400.0, lp=2500.0))
+    t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
+    swell = (0.66 + 0.22 * np.sin(2 * np.pi * 0.031 * t + 0.4)
+             + 0.12 * np.sin(2 * np.pi * 0.077 * t + 2.1)).astype(np.float32)
+
+    # 偶发远处车辆经过：约每 9 秒一次，高斯包络先扬后落
+    whoosh = np.zeros(n, dtype=np.float32)
+    events = max(1, int(round(n / SAMPLE_RATE / 9.0)))
+    for _ in range(events):
+        span = int(rng.uniform(2.2, 4.0) * SAMPLE_RATE)
+        span = max(2, min(span, n))
+        start = int(rng.integers(0, max(1, n - span + 1)))
+        seg = _band_noise(rng, span, hp=250.0, lp=float(rng.uniform(900, 1800)))
+        x = np.linspace(0.0, 1.0, span, dtype=np.float32)
+        env = np.exp(-((x - 0.55) ** 2) / (2 * 0.16 ** 2))
+        seg = _norm(seg) * env * float(rng.uniform(0.5, 1.0))
+        whoosh[start:start + seg.size] += seg
+
+    return 0.50 * rumble * swell + 0.12 * hiss + 0.50 * whoosh
+
+
 def generate_noise(kind: str, seconds: float, seed: int = 20261107,
                    amplitude: float = 0.28) -> bytes:
     """程序合成噪声底（确定性：同样的 kind+seed 出来一样的波形）。"""
@@ -135,7 +270,10 @@ def generate_noise(kind: str, seconds: float, seed: int = 20261107,
     n = max(1, int(round(float(seconds) * SAMPLE_RATE)))
     import numpy as np
 
-    rng = np.random.default_rng(seed + abs(hash(kind)) % 100000)
+    if kind in _AMBIENCE_OFFSETS:
+        rng = np.random.default_rng(seed + _AMBIENCE_OFFSETS[kind])
+    else:
+        rng = np.random.default_rng(seed + abs(hash(kind)) % 100000)
     peak = max(1.0, amplitude * 32767)
 
     if kind == "white":
@@ -161,11 +299,20 @@ def generate_noise(kind: str, seconds: float, seed: int = 20261107,
         t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
         lfo = 0.55 + 0.45 * np.sin(2 * math.pi * 0.07 * t)
         wave = wave * lfo
-    else:  # hum
+    elif kind == "hum":
         t = np.arange(n, dtype=np.float32) / SAMPLE_RATE
         wave = (0.8 * np.sin(2 * math.pi * 50 * t)
                 + 0.25 * np.sin(2 * math.pi * 100 * t)
                 + 0.06 * rng.uniform(-1.0, 1.0, n).astype(np.float32)).astype(np.float32)
+    elif kind == "rain":
+        wave = _synth_rain(n, rng)
+        peak = max(peak, _AMBIENCE_PEAK * 32767)
+    elif kind == "fire":
+        wave = _synth_fire(n, rng)
+        peak = max(peak, _AMBIENCE_PEAK * 32767)
+    else:  # street
+        wave = _synth_street(n, rng)
+        peak = max(peak, _AMBIENCE_PEAK * 32767)
 
     wave = wave / (float(np.max(np.abs(wave))) or 1.0) * peak
     return np.clip(wave, -32768, 32767).astype("<i2").tobytes()

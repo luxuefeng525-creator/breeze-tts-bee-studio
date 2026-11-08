@@ -470,6 +470,10 @@
               <input class="input" id="scriptGap" type="number" min="0" max="1.5" step="0.05" value="0.35">
               <span>秒</span>
             </label>
+            <label class="script-check" title="这一行没写情绪、角色也没默认、文本也推断不出时，沿用本场上一行的情绪；显式标注与推断始终优先">
+              <input type="checkbox" id="emotionCarry">
+              <span>情绪跨行延续</span>
+            </label>
             <span class="script-hint" id="scriptHint">用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气</span>
           </div>
           <div class="scene-moods" id="sceneMoods" hidden>
@@ -548,11 +552,11 @@
     <h3>已知限制</h3>
     <p class="help-sub">下面这些不是 bug，是当前模型与部署条件决定的，已尽量在界面上标出来。</p>
     <ul class="help-limits">
-      <li><strong>对白不会重叠</strong>：逐行合成再按顺序拼接，任何时刻只有一个人在说话。抢话、多人同时说话的效果做不到。</li>
-      <li><strong>情绪不跨行延续</strong>：每行独立合成，上一行的语气不会带到下一行（一行之内是连贯的）。</li>
-      <li><strong>环境声不是 AI 生成的</strong>：只能用你自己上传的素材，或用素材库生成的白噪声 / 棕噪声 / 风声 / 低频嗡鸣。没有「描述一句就自动配真实雨声」这回事。</li>
+      <li><strong>同一句里不会多人同时说话</strong>：模型一次只念一句。想让两句叠着说，用剧本台每行的「抢话」按钮给它一个提前量（0.3 / 0.6 / 0.9 秒），重叠发生在拼接出的时间轴上。</li>
+      <li><strong>情绪只按行判断</strong>：上一行的语气不会自动带到下一行。需要延续时打开剧本台的「情绪跨行延续」，或在台词里标注 [情绪]；显式标注永远优先。</li>
+      <li><strong>环境声不是 AI 生成的</strong>：只能用你自己上传的素材，或用素材库生成的噪声 / 雨 / 火 / 街道（都是程序合成的，不是采样录音）。没有「描述一句就自动配真实雨声」这回事。</li>
       <li><strong>克隆音色不吃情绪指令</strong>：克隆模型不接受自然语言指令，克隆角色的情绪与方言标注不会生效（台词旁会标出来）；想让情绪生效，请把该角色换成设计型音色。</li>
-      <li><strong>同时只跑一个合成任务</strong>：显卡单并发，第二个任务会排队等待；同一个剧本同一时间只能有一个任务。</li>
+      <li><strong>同时只跑一个合成任务</strong>：8 GB 显存跑不动并行，第二个任务会排队（进度条上显示排第几位，可直接取消）；同一个剧本同一时间只能有一个任务。</li>
       <li><strong>大剧本要分批</strong>：一次最多 300 行，更多请分剧；每批 100 行，跑完自动续做。</li>
       <li><strong>混排音色会更慢</strong>：设计型与克隆型音色混用时，合成会按路线分组以减少模型加载，但整剧耗时仍比单一路线长。</li>
     </ul>
@@ -664,6 +668,9 @@
           <option value="brown">棕噪声 · 室内 / 街道底色</option>
           <option value="wind">风声 · 户外空旷</option>
           <option value="hum">低频嗡鸣 · 空调 / 电器</option>
+          <option value="rain">雨声 · 窗外 / 夜雨</option>
+          <option value="fire">火堆 · 壁炉 / 篝火</option>
+          <option value="street">街道 · 车流远景</option>
         </select>
       </label>
       <label class="asset-make-field asset-make-sec">
