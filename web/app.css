@@ -224,6 +224,12 @@
   @media (max-width:1024px){
     /* 单列后左栏隐藏：整屏纵向滚，右栏不再压缩高度 */
     .workbench{grid-template-columns:minmax(0,1fr);overflow-y:auto;align-items:start}
+    /* base 里写死了「只有一行」的栅格：单列后两个区块都被塞进这一行，
+       第一行塌成 0 高，播放器直接压在稿纸上。显式给两行 */
+    body[data-screen="workbench"] #screen-workbench{grid-template-rows:auto auto}
+    /* 顶栏三列写死 288/1fr/392，1024 下中间只剩 256px，导航标签被压成一列单字 */
+    .topbar{grid-template-columns:auto minmax(0,1fr) auto}
+    .brand-sub{display:none}
     .rail{display:none}
     .studio{min-height:520px}
     .right-rail{grid-column:1 / -1;width:auto;max-height:none;overflow:visible}
