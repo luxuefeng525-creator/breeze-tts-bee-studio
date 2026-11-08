@@ -24,6 +24,10 @@ on:
         description: "同时跑布局审计（需自备 7861 地址与 agent-browser）"
         type: boolean
         default: false
+      cross_browser:
+        description: "同时跑 Firefox / WebKit 巡检（会下载两个内核，约 200MB）"
+        type: boolean
+        default: false
 
 jobs:
   static:
@@ -55,3 +59,29 @@ jobs:
           UI_BASE_URL: http://127.0.0.1:7861
           AGENT_BROWSER: agent-browser
         run: bash tools/ui_audit.sh
+
+  cross-browser:
+    name: Firefox / WebKit 巡检（四屏 × 两视口）
+    if: ${{ inputs.cross_browser }}
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 装 playwright 与两个内核
+        run: |
+          mkdir -p .pw && cd .pw
+          npm init -y > /dev/null
+          npm i playwright@1.65.0 --no-audit --no-fund
+          npx playwright install firefox webkit
+      - name: 起面板
+        run: |
+          python -m pip install -r requirements-notorch.txt
+          nohup python panel.py > panel.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:7861/ > /dev/null && break; sleep 1; done
+      - name: 巡检
+        env:
+          UI_BASE_URL: http://127.0.0.1:7861
+          PLAYWRIGHT_HOME: ${{ github.workspace }}/.pw
+        run: node tools/xb_check.mjs firefox webkit
