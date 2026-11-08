@@ -566,17 +566,49 @@
             <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${esc((h.created_at || "").slice(11, 16))}</span>
           </span>
           <span class="hist-dur">${fmtTime(h.duration || 0).slice(0, 5)}</span>
-          <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" aria-label="播放：${esc(title)}"><svg class="icon"><use href="#i-play"/></svg></button>
+          <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" data-title="${esc(title)}" aria-label="播放：${esc(title)}"><svg class="icon"><use href="#i-play"/></svg></button>
           <button class="icon-btn del" type="button" data-hdel="${esc(h.id)}" aria-label="删除这条记录" title="删除"><svg class="icon icon-xs"><use href="#i-trash"/></svg></button>
         </div>`;
     });
     box.innerHTML = html;
     paintAllWaves(box);      // 每条历史画各自的真波形
+    syncPlayingMarks();      // 重绘会把播放态清掉，补回来
     const more = items.length > 8;
     $("historyAllBtn").hidden = !more;
     $("historyAllBtn").innerHTML = more
       ? `查看全部 ${items.length} 条历史 <svg class="icon icon-xs" aria-hidden="true" style="margin-left:5px"><use href="#i-arrow"/></svg>`
       : "查看全部历史";
+  }
+
+  // 点的是这一条就切换播放/暂停，别重头再来：图标已经变成「暂停」了，
+  // 再点却从头播，用户会以为按钮坏了
+  function togglePlayUrl(url, title) {
+    if (!url) return;
+    const cur = String(audio.getAttribute("src") || "").split("/").pop();
+    if (cur && cur === String(url).split("/").pop()) {
+      if (audio.paused) audio.play().catch(() => {});
+      else audio.pause();
+      return;
+    }
+    playInPlayer(url, title);
+  }
+
+  // 正在播哪一条：历史/音色库里的行都标出来。以前点完只有声音，
+  // 界面上没有任何「就是这条在放」的反馈，用户不敢再点第二次
+  function syncPlayingMarks() {
+    const cur = String(audio.getAttribute("src") || "").split("/").pop();
+    document.querySelectorAll("[data-hplay]").forEach((btn) => {
+      const same = !!cur && String(btn.dataset.hplay || "").split("/").pop() === cur;
+      const on = same && !audio.paused;
+      const label = btn.dataset.title || "";
+      btn.classList.toggle("is-playing", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.setAttribute("aria-label", (on ? "暂停" : "播放") + (label ? "：" + label : ""));
+      const use = btn.querySelector("use");
+      if (use) use.setAttribute("href", on ? "#i-pause" : "#i-play");
+      const row = btn.closest(".hist-row, .lib-hist-row");
+      if (row) row.classList.toggle("is-playing", on);
+    });
   }
 
   // 删掉的正是播放器里那条：不清掉的话播放器还挂着已删文件的 src，
@@ -1237,7 +1269,7 @@
             <span class="hist-title" title="${esc(h.text || "")}">${esc((h.text || "").replace(/\s+/g, " ") || "（无文本）")}</span>
             <span class="hist-sub">${esc(voiceName(h.voice_id))} · ${fmtTime(h.duration || 0)} · ${esc((h.created_at || "").slice(5, 16))}</span>
           </span>
-          <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" aria-label="播放"><svg class="icon"><use href="#i-play"/></svg></button>
+          <button class="hist-play" type="button" data-hplay="${esc(h.wav_url || "")}" data-title="${esc((h.text || "").replace(/\s+/g, " ").slice(0, 24))}" aria-label="播放"><svg class="icon"><use href="#i-play"/></svg></button>
           <button class="icon-btn del" type="button" data-hdel="${esc(h.id)}" aria-label="删除"><svg class="icon icon-xs"><use href="#i-trash"/></svg></button>
         </div>`).join("")
       : '<div class="empty-hint">还没有合成记录。</div>';
@@ -1254,6 +1286,7 @@
            ${last}
          </div>`);
     }
+    syncPlayingMarks();   // 重绘会把播放态清掉（标题、图标），重画完补回来
   }
 
   // ---------------------------------------------------------------- 数据刷新
@@ -1384,6 +1417,7 @@
     paintWave($("playerWave"), url);
     markWave($("playerWave"), 0);
     audio.play().catch(() => {});
+    syncPlayingMarks();
   }
 
   // ---------------------------------------------------------------- 试听
@@ -1438,10 +1472,12 @@
   audio.addEventListener("play", () => {
     $("playBtn").setAttribute("aria-pressed", "true");
     $("playBtn").innerHTML = '<svg class="icon"><use href="#i-pause"/></svg>';
+    syncPlayingMarks();
   });
   audio.addEventListener("pause", () => {
     $("playBtn").setAttribute("aria-pressed", "false");
     $("playBtn").innerHTML = '<svg class="icon"><use href="#i-play"/></svg>';
+    syncPlayingMarks();
   });
   audio.addEventListener("timeupdate", () => {
     $("playerNow").textContent = fmtTime(audio.currentTime);
@@ -1451,6 +1487,7 @@
   });
   audio.addEventListener("ended", () => {
     markWave($("playerWave"), 0);
+    syncPlayingMarks();      // 播完把行上的暂停图标换回播放
   });
   // 波形本身就是定位条：点哪跳哪，方向键 ±5%（role=slider 早已声明，之前没有实现）
   $("playerWave").addEventListener("click", (e) => seekFromEvent($("playerWave"), e.clientX));
@@ -1670,7 +1707,7 @@
         const el = play || row.querySelector("[data-hplay]");
         if (el && el.dataset.hplay) {
           const t = row && row.querySelector(".hist-title");
-          playInPlayer(el.dataset.hplay, t ? t.textContent.trim() : "");
+          togglePlayUrl(el.dataset.hplay, t ? t.textContent.trim() : "");
         }
         return;
       }
@@ -1782,7 +1819,7 @@
         const el = play || row.querySelector("[data-hplay]");
         if (el && el.dataset.hplay) {
           const t = row && row.querySelector(".hist-title");
-          playInPlayer(el.dataset.hplay, t ? t.textContent.trim() : "");
+          togglePlayUrl(el.dataset.hplay, t ? t.textContent.trim() : "");
         }
         return;
       }

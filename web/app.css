@@ -179,6 +179,8 @@
     flex:1 1 auto;min-height:0;overflow-y:auto;max-height:none;
   }
   .lib-hist-row{display:flex;align-items:center;gap:11px;padding:10px 12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);cursor:pointer}
+  .lib-hist-row.is-playing{border-color:var(--line-strong);background:var(--surface-2)}
+  .lib-hist-row.is-playing .hist-title{color:var(--accent)}
   .lib-hist-row .hist-main{flex:1;min-width:0}
 
   /* ---- Toast 显隐 ---- */

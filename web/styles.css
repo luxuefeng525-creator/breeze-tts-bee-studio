@@ -388,6 +388,9 @@
   .hist-dur{font-family:var(--font-mono);font-size:12px;color:var(--text-3);white-space:nowrap}
   .hist-play{width:22px;height:22px;display:grid;place-items:center;color:var(--text-3);border-radius:5px}
   .hist-play:hover{background:var(--surface-3);color:var(--text)}
+  /* 正在播的那一条：图标换暂停 + 琥珀色，行标题也跟着亮，别再让「有没有在放」靠猜 */
+  .hist-play.is-playing{color:var(--accent)}
+  .hist-row.is-playing .hist-title{color:var(--accent)}
   .hist-play .icon{width:13px;height:13px}
   .history-all{flex:0 0 34px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-3);border-top:1px solid var(--line);margin-top:6px}
   .history-all:hover{color:var(--text)}

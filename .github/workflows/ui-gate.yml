@@ -1,0 +1,57 @@
+# 前端闸门：静态契约永远跑；真布局审计要起服务 + 浏览器，放在手动触发里。
+#
+# 为什么分两段：
+#   静态部分（死控件、CSS 属性选择器、id 拼写）不依赖服务，几秒钟出结果，
+#   每次 push/PR 都跑得起；布局审计需要 7861 在跑 + agent-browser，
+#   在 GitHub 托管 runner 上装这套工具链不划算，改成 workflow_dispatch 手点。
+name: ui-gate
+
+on:
+  push:
+    paths:
+      - "web/**"
+      - "tools/ui_lint.py"
+      - "tools/ui_audit.js"
+      - "tools/ui_audit.sh"
+      - "tests/test_ui_contract.py"
+      - ".github/workflows/ui-gate.yml"
+  pull_request:
+    paths:
+      - "web/**"
+  workflow_dispatch:
+    inputs:
+      layout_audit:
+        description: "同时跑布局审计（需自备 7861 地址与 agent-browser）"
+        type: boolean
+        default: false
+
+jobs:
+  static:
+    name: 静态契约（死控件 / 属性选择器 / id 拼写）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 死控件体检
+        run: python tools/ui_lint.py
+      - name: 前端契约测试
+        run: python -m pytest tests/test_ui_contract.py -q
+
+  layout:
+    name: 布局 + 可访问性审计（四屏 × 四档视口）
+    if: ${{ inputs.layout_audit }}
+    runs-on: self-hosted          # 需要一台能起面板 + 有 agent-browser 的机器
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起面板
+        run: |
+          python -m pip install -r requirements-notorch.txt
+          nohup python panel.py > panel.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:7861/ > /dev/null && break; sleep 1; done
+      - name: 审计
+        env:
+          UI_BASE_URL: http://127.0.0.1:7861
+          AGENT_BROWSER: agent-browser
+        run: bash tools/ui_audit.sh
