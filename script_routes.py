@@ -335,6 +335,11 @@ def plan_cast(errors: list[dict], role_names: set[str],
     「小蜜蜂配音」，显然是想用同一个声音）；判据是 ≥3 字且长度差 ≤3，
     比早期的 ≥2 字更严，避免角色一多「小 X」「大 X」互相误命中。
     其余按名字猜原型新建一个设计型音色，避免五个角色听成一个人。
+
+    **克隆音色一律不复用**（PRD-v4 §4.1 定的修复）：clone 路线不收任何
+    自然语言指令，一旦自动把角色绑上去，这个角色的情绪、场次氛围、原型
+    口音就全被上游静默丢掉——界面看着「智能配好了」，实际一句都没生效。
+    作者真要用某个克隆音色，去角色卡里手动选，那是他自己的明确意图。
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -346,11 +351,18 @@ def plan_cast(errors: list[dict], role_names: set[str],
         arch = guess_archetype(name)
         hit = None
         best = 0
+        skipped_clone = ""
         for v in voices.values():
             vname = str(v.get("name") or "").strip()
             n = _common_prefix_len(name, vname)
-            if n >= 3 and abs(len(name) - len(vname)) <= 3 and n > best:
-                hit, best = v, n
+            if n < 3 or abs(len(name) - len(vname)) > 3 or n <= best:
+                continue
+            if _voice_route(v) == "clone":
+                # 见 docstring：自动配角不碰克隆音色。记下来，界面上告诉
+                # 作者「为什么没复用」，免得他又手动改回去
+                skipped_clone = skipped_clone or vname
+                continue
+            hit, best = v, n
         out.append({
             "name": name,
             "archetype": arch,
@@ -359,6 +371,7 @@ def plan_cast(errors: list[dict], role_names: set[str],
             "speed": ARCHETYPE_SPEED.get(arch, 1.0),
             "voice": hit,
             "route": _voice_route(hit),
+            "skipped_clone": skipped_clone,
         })
     return out
 
@@ -1232,6 +1245,8 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
                 "label": item["label"], "role_id": role["id"],
                 "voice_id": voice["id"], "voice_name": voice["name"],
                 "reused": reused, "route": route, "speed": item["speed"],
+                # 本该复用的那个克隆音色被跳过了 → 界面上说明为什么
+                "skipped_clone": item.get("skipped_clone") or "",
             })
 
         # 每个文件单独原子 RMW；mutator 内按名字查重，防止与用户在

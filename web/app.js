@@ -17,6 +17,8 @@
     screen: "workbench",
     voices: [],
     roles: [],
+    // 角色库批量编辑：选中的角色 id 集合（跨翻页保留）
+    roleSel: new Set(),
     history: [],
     voiceId: null,
     roleId: null,
@@ -247,11 +249,13 @@
 
   function voiceSubtitle(v) {
     const type = { clone: "克隆", design: "设计", direction: "导向" }[v.type] || v.type;
-    const desc = (v.instruction || "").slice(0, 14);
+    // 这里原来把 instruction 砍到 14 个字，等于把「这个音色什么性格」——
+    // 用户唯一能用来挑音色的信息——截掉一半。副标题只留类型与状态，
+    // 完整描述交给卡片的 .card-desc（不再截断）。
     const extra = v.type === "clone"
       ? (refTextState(v) === "missing" ? " · 文稿待补充" : "")
       : "";
-    return `${type}${desc ? " · " + desc : ""}${extra}`;
+    return `${type}${extra}`;
   }
 
   function renderVoices() {
@@ -334,9 +338,14 @@
     grid.innerHTML = rShown.map((r) => {
       const arch = S.archetypes.find((a) => a.key === (r.archetype || "custom"));
       const spd = Number(r.speed || 1);
+      const picked = state.roleSel.has(r.id);
       return `
-      <article class="role-card" data-rolecard="${esc(r.id)}">
+      <article class="role-card${picked ? " picked" : ""}" data-rolecard="${esc(r.id)}">
         <header>
+          <label class="role-pick" title="选中以批量编辑">
+            <input type="checkbox" data-rolesel="${esc(r.id)}" ${picked ? "checked" : ""}
+                   aria-label="选中角色 ${esc(r.name)}">
+          </label>
           <span class="voice-avatar">${esc((r.name || "?").slice(0, 1))}</span>
           <div>
             <h3>${esc(r.name)}</h3>
@@ -371,6 +380,66 @@
            ${last}
          </div>`);
     }
+    renderRoleBatch();
+  }
+
+  // 批量编辑条：选中数、音色下拉、整页全选状态都从这里刷新。
+  // 角色被删掉后要把选择里幽灵 id 清掉，否则「应用到选中」会带着不存在的 id
+  function renderRoleBatch() {
+    const bar = $("roleBatch");
+    if (!bar) return;
+    const alive = new Set(state.roles.map((r) => r.id));
+    for (const id of [...state.roleSel]) if (!alive.has(id)) state.roleSel.delete(id);
+    const n = state.roleSel.size;
+    bar.hidden = n === 0;
+    const cnt = $("roleBatchCount");
+    if (cnt) cnt.textContent = `已选 ${n} 个`;
+    // 音色下拉：内容变了才重建，免得每次重绘都把用户选的值冲掉
+    const vs = $("roleBatchVoice");
+    if (vs) {
+      const sig = state.voices.map((v) => v.id + ":" + (v.name || "")).join("|");
+      if (vs.dataset.sig !== sig) {
+        const keep = vs.value;
+        vs.innerHTML = `<option value="">（不改）</option>` + state.voices.map((v) =>
+          `<option value="${esc(v.id)}">${esc(v.name || v.id)}${v.type === "clone" ? "（克隆）" : ""}</option>`
+        ).join("");
+        vs.dataset.sig = sig;
+        vs.value = keep;
+      }
+    }
+    // 「本页全选」的三态：全选 / 半选 / 未选
+    const box = $("roleSelAll");
+    if (box) {
+      const cards = [...$("roleGrid").querySelectorAll("[data-rolesel]")];
+      const on = cards.filter((c) => c.checked).length;
+      box.checked = cards.length > 0 && on === cards.length;
+      box.indeterminate = on > 0 && on < cards.length;
+      box.disabled = cards.length === 0;
+    }
+  }
+
+  // 批量应用：只提交用户真改过的字段，没改的不动
+  async function applyRoleBatch() {
+    const ids = [...state.roleSel];
+    if (!ids.length) { toast("先选中要批量修改的角色", true); return; }
+    const patch = {};
+    const emo = $("roleBatchEmotion").value;
+    const spd = $("roleBatchSpeed").value.trim();
+    const vid = $("roleBatchVoice").value;
+    if (emo) patch.default_emotion = emo;
+    if (spd) patch.speed = parseFloat(spd);
+    if (vid) patch.voice_id = vid;
+    if (!Object.keys(patch).length) { toast("没有要改的内容", true); return; }
+    try {
+      const res = await api("/api/roles/batch", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids, patch }),
+      });
+      toast(`已更新 ${res.updated} 个角色`);
+      state.roleSel.clear();
+      state.roles = await api("/api/roles");
+      renderRoles();
+    } catch (e) { toast("批量修改失败：" + e.message, true); }
   }
 
   function selectRole(id) {
@@ -1222,7 +1291,7 @@
           <button class="icon-btn" type="button" data-preview="${esc(v.id)}" aria-label="试听 ${esc(v.name)}" title="试听一句"><svg class="icon icon-sm"><use href="#i-play"/></svg></button>
           <button class="icon-btn" type="button" data-edit="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}"><svg class="icon icon-sm"><use href="#i-edit"/></svg></button>
         </header>
-        <p class="card-desc">${esc(v.instruction || (v.type === "clone" ? "" : v.ref_text) || "（没有描述）")}</p>
+        <p class="card-desc" title="${esc(v.instruction || (v.type === "clone" ? "" : v.ref_text) || "（没有描述）")}">${esc(v.instruction || (v.type === "clone" ? "" : v.ref_text) || "（没有描述）")}</p>
         ${v.type === "clone" ? (refTextState(v) === "missing"
             ? '<span class="card-warn">文稿待补充</span>'
             : '<span class="card-ok">文稿已校对</span>') : ""}
@@ -1573,6 +1642,8 @@
     $("roleArchetype").addEventListener("change", prefillArchetypeEmotion);
     $("saveRoleBtn").addEventListener("click", saveRole);
     $("roleGrid").addEventListener("click", async (e) => {
+      // 勾选框要先拦：不然点勾选会连带触发「选中角色并跳到工作台」
+      if (e.target.closest("[data-rolesel]")) return;
       const ed = e.target.closest("[data-roleedit]");
       if (ed) { openRoleDialog(ed.dataset.roleedit); return; }
       const dl = e.target.closest("[data-roledel]");
@@ -1582,6 +1653,27 @@
         selectRole(card.dataset.rolecard);
         setScreen("workbench");
       }
+    });
+    // 勾选与全选走 change（click 已被上面的委托拦掉）
+    $("roleGrid").addEventListener("change", (e) => {
+      const cb = e.target.closest("[data-rolesel]");
+      if (!cb) return;
+      if (cb.checked) state.roleSel.add(cb.dataset.rolesel);
+      else state.roleSel.delete(cb.dataset.rolesel);
+      renderRoles();
+    });
+    $("roleSelAll").addEventListener("change", (e) => {
+      const on = e.target.checked;
+      for (const cb of $("roleGrid").querySelectorAll("[data-rolesel]")) {
+        if (on) state.roleSel.add(cb.dataset.rolesel);
+        else state.roleSel.delete(cb.dataset.rolesel);
+      }
+      renderRoles();
+    });
+    $("roleBatchApply").addEventListener("click", applyRoleBatch);
+    $("roleBatchClear").addEventListener("click", () => {
+      state.roleSel.clear();
+      renderRoles();
     });
 
     // 参数

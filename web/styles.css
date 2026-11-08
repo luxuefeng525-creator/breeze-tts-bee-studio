@@ -141,7 +141,9 @@
   .filter[aria-pressed="true"]{background:var(--surface-2);border-color:var(--line-strong);color:var(--text)}
   .filter b{font-weight:500;color:var(--text-3);font-size:12px}
   .group-label{margin:18px 0 5px;font-size:12px;color:var(--text-3);display:flex;justify-content:space-between;align-items:center}
-  .voice-list{display:flex;flex-direction:column;gap:2px;min-height:0}
+  /* 音色多了（自动配角会新建音色）不能把下面的角色库与克隆卡挤出屏幕：
+     自己内部滚动，绝不溢出。左栏是 flex 列，这里只允许收缩不允许长高。 */
+  .voice-list{display:flex;flex-direction:column;gap:2px;min-height:0;flex:0 1 auto;overflow-y:auto;overscroll-behavior:contain}
   .voice-item{position:relative;display:flex;align-items:center;gap:10px;height:62px;padding:0 8px;border-radius:8px;text-align:left;border:1px solid transparent;transition:background-color .16s ease,border-color .16s ease;width:100%}
   .voice-item:hover{background:var(--surface)}
   .voice-item[aria-pressed="true"]{background:var(--surface-2);border-color:var(--line-strong)}

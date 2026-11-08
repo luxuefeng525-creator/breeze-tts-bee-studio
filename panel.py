@@ -2250,6 +2250,50 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(f"转写失败：{type(exc).__name__}: {exc}"[:200], 500)
             return self._json(out)
 
+        if path == "/api/roles/batch":
+            # 批量编辑角色：一次改一批（默认情绪 / 语速 / 口音 / 音色 / 简介）。
+            # 角色一多（30+），一个一个点开改是纯体力活。
+            # 一次锁 + 一次写盘，别让前端发 N 个 PUT（中间态会互相覆盖）。
+            try:
+                d = json.loads(body or b"{}")
+            except Exception:
+                return self._err("invalid json")
+            ids = {str(x) for x in (d.get("ids") or [])}
+            patch = d.get("patch") or {}
+            if not ids:
+                return self._err("没选中任何角色")
+            if not isinstance(patch, dict) or not patch:
+                return self._err("没有要修改的内容")
+            allowed = ("default_emotion", "speed", "accent", "voice_id",
+                       "description", "archetype")
+            use = {k: patch[k] for k in allowed if k in patch}
+            if not use:
+                return self._err("没有可批量修改的字段")
+            if "speed" in use:
+                try:
+                    use["speed"] = min(2.0, max(0.5, float(use["speed"])))
+                except (TypeError, ValueError):
+                    return self._err("语速必须是 0.5~2 之间的数字")
+            if "voice_id" in use and use["voice_id"]:
+                if not any(v["id"] == use["voice_id"]
+                           for v in _load("voices.json")):
+                    return self._err("指定的音色不存在")
+
+            def _batch(items, _ids=ids, _use=use):
+                hit = 0
+                for r in items:
+                    if r["id"] in _ids:
+                        r.update(_use)
+                        hit += 1
+                return {"found": hit}
+
+            res = _update_json("roles.json", _batch)
+            n = int(res.get("found") or 0)
+            if not n:
+                return self._err("选中的角色都不存在了，请刷新后重试")
+            self._json({"updated": n, "ids": sorted(ids)})
+            return
+
         if path == "/api/roles":
             try:
                 d = json.loads(body or b"{}")
@@ -2880,7 +2924,27 @@ def _remultipart(fields: dict, files: dict) -> tuple[bytes, str]:
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
+def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """这个端口上是不是已经有东西在听。
+
+    Windows 上 socket 默认带 SO_REUSEADDR，两个进程可以「同时」绑定同一个
+    端口（后起的那个甚至会把前一个的连接抢走一半）。结果就是面板出现双实例：
+    任务状态在 A 进程、文件写盘在 B 进程，前端随机拿到一边，表现为
+    「Failed to fetch」「脚本一会儿有一会儿没有」。所以起服务前先探一下。
+    """
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.5)
+        return s.connect_ex((host, port)) == 0
+
+
 def main() -> None:
+    if _port_in_use(PANEL_PORT):
+        # 已有实例在服务就别再起一个：端口是本工作区的唯一口径，
+        # 双实例只会让状态分裂。让守护脚本去收敛旧进程。
+        print(f"BreezeTTS Studio panel: 端口 {PANEL_PORT} 已被占用，"
+              "已有实例在服务，本次不重复启动", flush=True)
+        raise SystemExit(0)
     server = ThreadingHTTPServer(("0.0.0.0", PANEL_PORT), Handler)
     print(f"BreezeTTS Studio panel: http://127.0.0.1:{PANEL_PORT}  (proxy -> {API_BASE}, port locked)", flush=True)
     server.serve_forever()
