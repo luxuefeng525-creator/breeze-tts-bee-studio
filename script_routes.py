@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 import panel as P
+import soundtrack as ST
 from tts_pipeline.script import (
     ARCHETYPES,
     ARCHETYPE_SPEED,
@@ -33,11 +34,14 @@ from tts_pipeline.script import (
     parse_script,
 )
 
-MAX_LINES = 100          # 超过这个行数提示分批（8 GB 卡约 20-30 分钟）
+MAX_LINES = 100          # 一批合成多少行（8 GB 卡约 20-30 分钟一批，超了自动续做）
+HARD_MAX_LINES = 300     # 剧本总行数上限：再大就先分剧，别把一张卡跑满
 MAX_TAKES = 8            # 单行最多留几版；超出后覆盖最旧一版（不删文件、不无限涨盘）
 DEFAULT_GAP = 0.35
 DEFAULT_CFG = 4.0
-EXPORT_PARTS = ("full", "lines", "timeline", "script", "subtitles")
+DEFAULT_SCENE_GAIN = 0.35   # 场次铺底默认音量（线性幅度，0–1）
+DUCK_DB = -12.0             # 人声段铺底压低的分贝数
+EXPORT_PARTS = ("full", "lines", "timeline", "script", "subtitles", "mix")
 # 默认仍是老四件套：新增的字幕要作者勾了才进包，免得旧导出包内容悄悄变
 DEFAULT_PARTS = ",".join(("full", "lines", "timeline", "script"))
 
@@ -229,18 +233,33 @@ def _norm_scenes(raw) -> list[dict]:
     for item in raw or []:
         if isinstance(item, str):
             name, mood = item.strip(), ""
+            ambience = bgm = ""
+            gain = DEFAULT_SCENE_GAIN
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             # auto=true 是系统推断的底色，不是作者选的；界面把 scenes
             # 整组回传时不能让它悄悄变成手动配置（否则清空就清不掉了）
             mood = "" if item.get("auto") else str(item.get("mood") or "").strip()
+            ambience = str(item.get("ambience") or "").strip()
+            bgm = str(item.get("bgm") or "").strip()
+            gain = _clamp_gain(item.get("gain"))
         else:
             continue
         if not name or name in seen:
             continue
         seen.add(name)
-        out.append({"name": name, "mood": mood})
+        out.append({"name": name, "mood": mood, "ambience": ambience,
+                    "bgm": bgm, "gain": gain})
     return out
+
+
+def _clamp_gain(value) -> float:
+    """场次铺底音量：脏数据（字符串/None/超范围）也要收敛到 0–1。"""
+    try:
+        g = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SCENE_GAIN
+    return min(1.0, max(0.0, g))
 
 
 def _scenes_view(names: list[str], configured) -> list[dict]:
@@ -249,12 +268,16 @@ def _scenes_view(names: list[str], configured) -> list[dict]:
     自动值**不落盘**：作者清空下拉就真的没有氛围，不会被下一次保存又填回来；
     界面用 auto 标记告诉用户「这层底色是系统加的，可以覆盖」。
     """
-    known = {s["name"]: s.get("mood", "") for s in _norm_scenes(configured)}
+    known = {s["name"]: s for s in _norm_scenes(configured)}
     out = []
     for n in names:
-        chosen = known.get(n, "")
+        cfg = known.get(n) or {}
+        chosen = cfg.get("mood", "")
         auto = not chosen
-        out.append({"name": n, "mood": chosen or guess_mood(n), "auto": auto})
+        out.append({"name": n, "mood": chosen or guess_mood(n), "auto": auto,
+                    "ambience": cfg.get("ambience", ""),
+                    "bgm": cfg.get("bgm", ""),
+                    "gain": cfg.get("gain", DEFAULT_SCENE_GAIN)})
     return out
 
 
@@ -378,8 +401,12 @@ def _enriched(script: dict, parsed) -> list[dict]:
 
 def _synth_line(text: str, role: dict | None, instruction: str,
                 cfg: float, seed: int, out_path: Path,
-                speed: float = 1.0) -> tuple[float, str]:
-    """合成一行到 out_path，返回 (时长秒, 错误串)。"""
+                speed: float = 1.0) -> tuple[float, str, str]:
+    """合成一行到 out_path，返回 (时长秒, 错误串, 引擎提示)。
+
+    引擎提示（X-Adapter-Note）承载静默降级原因，比如克隆路线忽略指令；
+    丢掉它等于把「为什么效果不对」藏起来，所以必须带回去。
+    """
     voices = _voices_by_id()
     fields: dict[str, str] = {"text": text, "seed": str(seed)}
     files: dict[str, tuple[str, bytes]] = {}
@@ -390,11 +417,11 @@ def _synth_line(text: str, role: dict | None, instruction: str,
         txt = (voice.get("ref_text") or "").strip()
         # 设计型音色本来就没有参考音频，只有「有音频却缺文稿」才是配置错误
         if ref and not txt:
-            return 0.0, f"音色「{voice.get('name', '')}」缺文字稿（参考音频与文稿必须成对）"
+            return 0.0, f"音色「{voice.get('name', '')}」缺文字稿（参考音频与文稿必须成对）", ""
         if ref:
             rp = P.DATA / ref
             if not rp.is_file():
-                return 0.0, f"音色「{voice.get('name', '')}」的参考音频文件缺失"
+                return 0.0, f"音色「{voice.get('name', '')}」的参考音频文件缺失", ""
             files["ref_audio"] = (rp.name, rp.read_bytes())
             fields["ref_text"] = txt
 
@@ -406,18 +433,20 @@ def _synth_line(text: str, role: dict | None, instruction: str,
         fields["cfg_scale"] = "1"
 
     body, ctype = P._remultipart(fields, files)
-    code, raw = P._post_with_retry("/v1/audio/speech", body, ctype)
+    hdrs: dict = {}
+    code, raw = P._post_with_retry("/v1/audio/speech", body, ctype, headers_out=hdrs)
     if code != 200:
         try:
             detail = json.loads(raw).get("detail")
         except Exception:
             detail = raw[:160].decode("utf-8", "replace")
-        return 0.0, str(detail)[:200]
+        return 0.0, str(detail)[:200], ""
 
+    note = P._engine_note(hdrs) if hdrs else ""
     pcm = P.resample_pcm(raw, speed) if abs(speed - 1.0) > 1e-6 else raw
     wav = P.pcm_to_wav(pcm)
     out_path.write_bytes(wav)
-    return len(pcm) / (P.SAMPLE_RATE * 2), ""
+    return len(pcm) / (P.SAMPLE_RATE * 2), "", note
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +475,11 @@ def _job_view(job: dict) -> dict:
         "per_line": round(per_line, 1),
         "eta": round(per_line * remaining, 1) if per_line else None,
         "rows": {k: dict(v) for k, v in job["rows"].items()},
+        # 终态原因要能分开说：任务本身崩了 / 整轨拼接失败 / 混音失败，
+        # 处理方式完全不同，前端不该只看到一个「完成」。
+        "error": job.get("error", ""),
+        "concat_error": job.get("concat_error", ""),
+        "mix_error": job.get("mix_error", ""),
     }
 
 
@@ -457,6 +491,15 @@ def _prune_jobs() -> None:
                     if v["state"] != "running"
                     and v.get("finished_at", 0) < cutoff]:
             _JOBS.pop(jid, None)
+
+
+def _batches(rows: list[dict], size: int):
+    """按固定大小切批（生成器）。"""
+    if size <= 0:
+        yield rows
+        return
+    for i in range(0, len(rows), size):
+        yield rows[i:i + size]
 
 
 def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
@@ -473,50 +516,61 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
         rows = sorted(rows, key=lambda r: (0 if r.get("route") != "clone" else 1,
                                           r["idx"]))
 
-        for row in rows:
+        # >100 行自动分批：8 GB 卡一次扛不住 200 行连着跑，
+        # 但用户不该自己记得分批——这里按 MAX_LINES 切批，批与批之间
+        # 留一口气给引擎的 409 队列排空，进度照常上报，不丢。
+        for batch_no, batch in enumerate(_batches(rows, MAX_LINES)):
             if job["stop"]:
                 job["state"] = "stopped"
                 return
-            idx = row["idx"]
-            job["current"] = idx
-            job["rows"][idx]["state"] = "running"
+            job["batch"] = batch_no + 1
+            job["batches"] = (len(rows) + MAX_LINES - 1) // MAX_LINES
+            for row in batch:
+                if job["stop"]:
+                    job["state"] = "stopped"
+                    return
+                idx = row["idx"]
+                job["current"] = idx
+                job["rows"][idx]["state"] = "running"
 
-            role = roles.get(row["role_name"])
-            if role is None:
-                # 未知角色在启动前已被拦下，这里是兜底：按行失败，不影响其他行
-                job["rows"][idx].update(state="failed", error="未知角色")
-                job["failed"] += 1
-                continue
+                role = roles.get(row["role_name"])
+                if role is None:
+                    # 未知角色在启动前已被拦下，这里是兜底：按行失败，不影响其他行
+                    job["rows"][idx].update(state="failed", error="未知角色")
+                    job["failed"] += 1
+                    continue
 
-            name = f"line_{idx:03d}.wav"
-            t_line = time.time()
-            # clone 路线上游会直接忽略 instruction / cfg_scale，
-            # 与其下发一堆无效参数，不如明确置空并让界面标出来。
-            clone_row = row.get("route") == "clone"
-            instruction = "" if clone_row else row.get("instruction", "")
-            try:
-                dur, err = _synth_line(row["text"], role, instruction,
-                                       1.0 if clone_row else cfg,
-                                       int(row.get("seed") or base_seed),
-                                       out_dir / name,
-                                       float(row.get("speed") or 1.0))
-            except Exception as exc:          # 单行异常不该终止整部剧
-                dur, err = 0.0, f"{type(exc).__name__}: {exc}"[:200]
+                name = f"line_{idx:03d}.wav"
+                t_line = time.time()
+                # clone 路线上游会直接忽略 instruction / cfg_scale，
+                # 与其下发一堆无效参数，不如明确置空并让界面标出来。
+                clone_row = row.get("route") == "clone"
+                instruction = "" if clone_row else row.get("instruction", "")
+                try:
+                    dur, err, note = _synth_line(row["text"], role, instruction,
+                                                 1.0 if clone_row else cfg,
+                                                 int(row.get("seed") or base_seed),
+                                                 out_dir / name,
+                                                 float(row.get("speed") or 1.0))
+                except Exception as exc:          # 单行异常不该终止整部剧
+                    dur, err, note = 0.0, f"{type(exc).__name__}: {exc}"[:200], ""
 
-            job.setdefault("durs", []).append(time.time() - t_line)
-            if err:
-                job["rows"][idx].update(state="failed", error=err)
-                job["failed"] += 1
-            else:
-                rel = f"audio/scripts/{script_id}/{name}"
-                job["rows"][idx].update(state="done", wav=rel,
-                                        duration=round(dur, 3), error="")
-                job["done"] += 1
-                # 整剧合成落的是「新内容的第 1 版」：顺手清掉旧内容的版本，
-                # 不然换完台词还能切回上一版的音频，文不对音
-                _persist_take(script_id, idx, row, 1, dur, rel, reset=True)
+                job.setdefault("durs", []).append(time.time() - t_line)
+                if err:
+                    job["rows"][idx].update(state="failed", error=err)
+                    job["failed"] += 1
+                else:
+                    rel = f"audio/scripts/{script_id}/{name}"
+                    job["rows"][idx].update(state="done", wav=rel,
+                                            duration=round(dur, 3), error="",
+                                            engine_note=note)
+                    job["done"] += 1
+                    # 整剧合成落的是「新内容的第 1 版」：顺手清掉旧内容的版本，
+                    # 不然换完台词还能切回上一版的音频，文不对音
+                    _persist_take(script_id, idx, row, 1, dur, rel, reset=True)
 
-        job["state"] = "done"
+        # 终态在 finally 里置位：拼接与混音都落盘之后才算「完成」。
+        # 早一步报 done，前端会立刻去下载导出包，拿到的是上一版整轨。
     except Exception as exc:
         # 任何意外都要落到一个终态，否则前端会无限轮询、ETA 一直涨
         job["state"] = "failed"
@@ -527,6 +581,16 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
             _concat(script_id, gap)
         except Exception as exc:
             job["concat_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        # 混音在 _concat 内部完成，失败只落在剧本记录上；任务快照也带一份，
+        # 前端轮询的是 job，不该再翻一次剧本才知道「混音没成」。
+        try:
+            job["mix_error"] = "" if job.get("concat_error") else str(
+                (_find(script_id) or {}).get("mix_error") or "")
+        except Exception:
+            job["mix_error"] = ""
+        # 拼接（与混音）都落盘之后才报完成：前端看到 done 就能直接下载
+        if job["state"] == "running":
+            job["state"] = "done"
 
 
 def _persist_line(script_id: str, idx: int, patch: dict) -> None:
@@ -593,6 +657,8 @@ def _concat(script_id: str, gap: float) -> None:
             "idx": row["idx"] + 1,
             "role": row["role_name"],
             "emotion": row["emotion"],
+            # 场次名：混音要靠它把环境声/BGM 铺到对应的那一段
+            "scene": row.get("scene") or "",
             "start": round(start, 2),
             "end": round(cursor, 2),
             "text": row["text"],
@@ -615,6 +681,139 @@ def _concat(script_id: str, gap: float) -> None:
                 s.update(patch)
 
     P._update_json("scripts.json", _mut)
+    # 铺底是拼接之后的后处理：不推理、不占显存，重混一次几秒钟。
+    # 失败只记错误，不影响已经落盘的干声整轨。
+    try:
+        mix_rel, mix_err = _build_mix(script_id)
+    except Exception as exc:
+        mix_rel, mix_err = "", f"{type(exc).__name__}: {exc}"[:200]
+
+    # 有没有结果都要写回：场次铺底被清空、或素材被删之后 _build_mix 返回
+    # ("", "")，此时旧的 mix.wav 必须作废——否则导出会把含已删素材的旧混音
+    # 当成新成片交付，用户完全看不出来。
+    def _mut_mix(items):
+        for s in items:
+            if s["id"] == script_id:
+                s["mix_wav"] = mix_rel
+                s["mix_error"] = mix_err
+                s["mix_stale"] = False
+
+    P._update_json("scripts.json", _mut_mix)
+
+
+# ---------------------------------------------------------------------------
+# 素材库（环境声 / BGM）与混音
+# ---------------------------------------------------------------------------
+def _assets_dir() -> Path:
+    d = P.DATA / "assets"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _assets() -> list[dict]:
+    return P._load("assets.json")
+
+
+def _asset_by_id(aid: str) -> dict | None:
+    for a in _assets():
+        if str(a.get("id")) == str(aid):
+            return a
+    return None
+
+
+def _asset_pcm(aid: str) -> bytes:
+    """读素材的 24k 单声道 PCM 缓存；素材丢了就当没有，不让整条链路崩。"""
+    a = _asset_by_id(aid)
+    if not a:
+        return b""
+    rel = str(a.get("path") or "")
+    if not rel:
+        return b""
+    p = P.DATA / rel
+    try:
+        if not p.is_file():
+            return b""
+        return p.read_bytes()
+    except OSError:
+        return b""
+
+
+def _store_asset(meta: dict, pcm: bytes) -> dict:
+    """落盘素材（PCM 缓存 + 索引），返回最终元信息。"""
+    aid = str(meta["id"])
+    rel = f"assets/{aid}.pcm"
+    _assets_dir().joinpath(f"{aid}.pcm").write_bytes(pcm)
+    meta = dict(meta)
+    meta["path"] = rel
+    meta["duration"] = round(ST.pcm_duration(pcm), 2)
+
+    def _mut(items):
+        if not any(str(a.get("id")) == aid for a in items):
+            items.append(meta)
+
+    P._update_json("assets.json", _mut)
+    return meta
+
+
+def _asset_public(a: dict) -> dict:
+    """对外只暴露界面需要的字段（路径是内部细节）。"""
+    return {
+        "id": a.get("id"),
+        "name": a.get("name"),
+        "kind": a.get("kind"),
+        "source": a.get("source"),
+        "duration": a.get("duration"),
+        "created_at": a.get("created_at"),
+    }
+
+
+def _build_mix(script_id: str) -> tuple[str, str]:
+    """按场次铺底重算混音，返回 (mix.wav 相对路径, 错误说明)。
+
+    干声 full.wav 一个字节都不动；混音另存 mix.wav。没配铺底素材时返回
+    ("", "")——不产出「只是干声换了个名字」的假混音。
+    """
+    script = _find(script_id)
+    if not script:
+        return "", "剧本不存在"
+    timeline = script.get("timeline") or []
+    if not timeline:
+        return "", "还没有整轨音频，先点「合成全剧」"
+    full_rel = str(script.get("full_wav") or "")
+    full = P.DATA / full_rel if full_rel else None
+    if not full or not full.is_file():
+        return "", "还没有整轨音频，先点「合成全剧」"
+    voice = _read_pcm(full)
+    if not voice:
+        return "", "整轨音频读不出来"
+
+    scenes = {s["name"]: s for s in _norm_scenes(script.get("scenes"))}
+    beds: list[dict] = []
+    for name, start, end in ST.scene_ranges(timeline):
+        sc = scenes.get(name) or {}
+        amb = str(sc.get("ambience") or "")
+        bgm = str(sc.get("bgm") or "")
+        if not amb and not bgm:
+            continue
+        gain = _clamp_gain(sc.get("gain", DEFAULT_SCENE_GAIN))
+        dur = max(0.0, float(end) - float(start))
+        if dur <= 0:
+            continue
+        if amb:
+            pcm = ST.loop_pcm(_asset_pcm(amb), dur)
+            if pcm:
+                beds.append({"pcm": pcm, "start": start, "gain": gain * 0.8,
+                             "fade_in": 0.5, "fade_out": 0.5})
+        if bgm:
+            pcm = ST.loop_pcm(_asset_pcm(bgm), dur)
+            if pcm:
+                beds.append({"pcm": pcm, "start": start, "gain": gain,
+                             "fade_in": 1.5, "fade_out": 1.5})
+    if not beds:
+        return "", ""
+    mix = ST.build_mix(voice, beds, timeline, duck_db=DUCK_DB)
+    _lines_dir(script_id).joinpath("mix.wav").write_bytes(ST.write_wav(mix))
+    return f"audio/scripts/{script_id}/mix.wav", ""
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +881,11 @@ def _export_plan(script: dict, parts: list[str]) -> tuple[list[dict], str]:
                       "整轨、时间轴和字幕都是上一版的，先合成再导出")
     if "subtitles" in parts and not (script.get("timeline") or []):
         return done, "还没有时间轴，先点「合成全剧」再导出字幕"
+    if "mix" in parts:
+        mix_rel = str(script.get("mix_wav") or "")
+        if not mix_rel or not (P.DATA / mix_rel).is_file():
+            return done, ("还没有混音音频（给场次配上环境声或 BGM 后会自动生成，"
+                          "也可以点「一键出片」）")
     return done, ""
 
 
@@ -707,15 +911,20 @@ def _export_zip(script: dict, parts: list[str], rows: list[dict]) -> bytes:
         if "timeline" in parts:
             csv_buf = io.StringIO()
             w = csv.writer(csv_buf)
-            w.writerow(["序号", "角色", "情绪", "起", "止", "台词"])
+            w.writerow(["序号", "场次", "角色", "情绪", "起", "止", "台词"])
             for t in script.get("timeline") or []:
-                w.writerow([t["idx"], t["role"], t["emotion"], t["start"], t["end"], t["text"]])
+                w.writerow([t["idx"], t.get("scene", ""), t["role"], t["emotion"],
+                            t["start"], t["end"], t["text"]])
             zf.writestr("timeline.csv", "\ufeff" + csv_buf.getvalue())
         if "script" in parts:
             zf.writestr("script.txt", script.get("raw", ""))
         if "subtitles" in parts:
             zf.writestr("subtitles.srt", _subtitle_text(script, "srt"))
             zf.writestr("subtitles.vtt", _subtitle_text(script, "vtt"))
+        if "mix" in parts:
+            mix = P.DATA / str(script.get("mix_wav") or "")
+            if mix.is_file():
+                zf.write(mix, "mix.wav")
     return buf.getvalue()
 
 
@@ -736,8 +945,8 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
         # 锁内重读：两个并发请求不能共用同一份旧快照
         script = _find(sid) or script
         parsed = parse_for(script)
-        if len(parsed.lines) > MAX_LINES:
-            return 400, {"detail": f"一次最多 {MAX_LINES} 行"}
+        if len(parsed.lines) > HARD_MAX_LINES:
+            return 400, {"detail": f"一次最多 {HARD_MAX_LINES} 行"}
         if forced and forced not in _voices_by_id():
             return 400, {"detail": "指定的音色不存在"}
         plan = plan_cast(parsed.errors, set(_roles_by_name()), _voices_by_id())
@@ -851,10 +1060,122 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
                      "remaining": remaining}
 
 
+def _new_job(sid: str, script: dict, rows: list[dict],
+             todo: list[dict]) -> dict:
+    """登记一个逐行合成任务并起线程。
+
+    「合成全剧」和「一键出片」共用它：两者跑的是同一套逐行合成，
+    区别只是出片额外要走混音与打包。
+    """
+    job = {
+        "id": "j_" + uuid.uuid4().hex[:10],
+        "script_id": sid,
+        "state": "running",
+        "total": len(todo),
+        "done": 0,
+        "failed": 0,
+        "current": -1,
+        "started_at": time.time(),
+        "stop": False,
+        "durs": [],
+        "rows": {r["idx"]: {"idx": r["idx"], "state": "pending",
+                            "role_name": r["role_name"], "text": r["text"],
+                            "emotion": r["emotion"]} for r in todo},
+    }
+    with _JOBS_LOCK:
+        _JOBS[job["id"]] = job
+    gap = float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP)
+    threading.Thread(target=_run_job, args=(job, sid, todo, gap),
+                     daemon=True).start()
+    return job
+
+
 def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
     """处理剧本相关请求；不是本模块的路由时返回 False。"""
-    if not path.startswith("/api/scripts") and path != "/api/archetypes":
+    if (not path.startswith("/api/scripts") and path != "/api/archetypes"
+            and not path.startswith("/api/assets")):
         return False
+
+    # ---- 素材库（环境声 / BGM）----
+    if method == "GET" and path == "/api/assets":
+        h._json([_asset_public(a) for a in _assets()])
+        return True
+
+    if method == "POST" and path == "/api/assets/generate":
+        try:
+            d = json.loads(body or b"{}")
+        except Exception:
+            d = {}
+        kind = str(d.get("kind") or "white")
+        if kind not in ST.NOISE_KINDS:
+            h._err(f"未知的噪声类型：{kind}", 400)
+            return True
+        try:
+            seconds = float(d.get("seconds") or 30)
+        except (TypeError, ValueError):
+            seconds = 30.0
+        seconds = min(600.0, max(1.0, seconds))
+        name = str(d.get("name") or "").strip() or f"{ST.NOISE_KINDS[kind].split('（')[0]} {int(seconds)}秒"
+        pcm = ST.generate_noise(kind, seconds)
+        meta = {
+            "id": P._new_id("a"),
+            "name": name[:60],
+            "kind": kind,
+            "source": "generated",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        h._json({"asset": _asset_public(_store_asset(meta, pcm))}, 201)
+        return True
+
+    if method == "POST" and path == "/api/assets":
+        fields, files = P.parse_multipart(body or b"", ctype or "")
+        if "file" not in files:
+            h._err("请选择要上传的音频文件", 400)
+            return True
+        # 素材版权由用户自己负责：没勾授权声明就不让入库
+        if str(fields.get("license_confirmed") or "").strip().lower() not in (
+                "1", "true", "on", "yes"):
+            h._err("请先确认你拥有该素材的使用授权", 400)
+            return True
+        fname, payload = files["file"]
+        try:
+            pcm = ST.decode_to_pcm24k(payload)
+        except Exception as exc:
+            h._err(f"这个文件解不开：{exc}", 400)
+            return True
+        if not pcm:
+            h._err("这个文件里没有可用的音频", 400)
+            return True
+        name = str(fields.get("name") or "").strip() or str(fname or "上传素材")
+        meta = {
+            "id": P._new_id("a"),
+            "name": name[:60],
+            "kind": "upload",
+            "source": "upload",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        h._json({"asset": _asset_public(_store_asset(meta, pcm))}, 201)
+        return True
+
+    if method == "DELETE" and path.startswith("/api/assets/") and path.count("/") == 3:
+        aid = path.rsplit("/", 1)[-1]
+        asset = _asset_by_id(aid)
+        if not asset:
+            h._err("素材不存在", 404)
+            return True
+
+        def _mut(items):
+            items[:] = [a for a in items if str(a.get("id")) != str(aid)]
+
+        P._update_json("assets.json", _mut)
+        rel = str(asset.get("path") or "")
+        if rel:
+            try:
+                (P.DATA / rel).unlink(missing_ok=True)
+            except OSError:
+                pass
+        h._json({"deleted": aid})
+        return True
 
     # ---- 元数据 ----
     if method == "GET" and path == "/api/archetypes":
@@ -862,7 +1183,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "archetypes": [{"key": k, **v} for k, v in ARCHETYPES.items()],
             "emotions": list(EMOTIONS.keys()),
             "moods": [{"key": k, "instruction": v} for k, v in MOODS.items() if k],
-            "max_lines": MAX_LINES,
+            "max_lines": HARD_MAX_LINES,
+            "batch_lines": MAX_LINES,
             "default_gap": DEFAULT_GAP,
             "default_parts": DEFAULT_PARTS.split(","),
         })
@@ -942,7 +1264,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             h._err("剧本不存在", 404)
             return True
         parsed = parse_for(script)
-        h._json({
+        resp = {
             **{k: script.get(k) for k in
                ("id", "title", "raw", "gap", "duration", "full_wav",
                 "timeline", "cfg_scale", "seed", "updated_at")},
@@ -951,7 +1273,13 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "lines": _enriched(script, parsed),
             "errors": parsed.errors,
             "estimate": round(estimate_seconds(parsed), 1),
-        })
+        }
+        # 混音是可选产物：没配铺底时给空串而不是 null，界面少一处判空
+        resp["mix_wav"] = script.get("mix_wav") or ""
+        resp["mix_stale"] = bool(script.get("mix_stale"))
+        # 上次混音失败的原因：干声整轨仍在，界面据此提示而不是静默无声
+        resp["mix_error"] = script.get("mix_error") or ""
+        h._json(resp)
         return True
 
     # ---- 解析预览 ----
@@ -971,7 +1299,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "errors": parsed.errors,
             "scenes": _scenes_view(parsed.scenes, probe.get("scenes")),
             "estimate": round(estimate_seconds(parsed), 1),
-            "max_lines": MAX_LINES,
+            "max_lines": HARD_MAX_LINES,
+            "batch_lines": MAX_LINES,
         })
         return True
 
@@ -991,8 +1320,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not rows:
             h._err("剧本还没有可合成的台词")
             return True
-        if len(rows) > MAX_LINES:
-            h._err(f"一次最多合成 {MAX_LINES} 行（当前 {len(rows)} 行），请分批")
+        if len(rows) > HARD_MAX_LINES:
+            h._err(f"一次最多合成 {HARD_MAX_LINES} 行（当前 {len(rows)} 行），请分剧")
             return True
 
         bad = [r for r in rows if r.get("role_id") is None]
@@ -1019,28 +1348,74 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         resume = bool(d.get("resume", True))
         todo = [r for r in rows if not (resume and r["status"] == "done")]
 
-        job = {
-            "id": "j_" + uuid.uuid4().hex[:10],
-            "script_id": sid,
-            "state": "running",
-            "total": len(todo),
-            "done": 0,
-            "failed": 0,
-            "current": -1,
-            "started_at": time.time(),
-            "stop": False,
-            "durs": [],
-            "rows": {r["idx"]: {"idx": r["idx"], "state": "pending",
-                                "role_name": r["role_name"], "text": r["text"],
-                                "emotion": r["emotion"]} for r in todo},
-        }
-        with _JOBS_LOCK:
-            _JOBS[job["id"]] = job
-        threading.Thread(target=_run_job,
-                         args=(job, sid, todo, float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP)),
-                         daemon=True).start()
+        job = _new_job(sid, script, rows, todo)
         h._json({"job_id": job["id"], "total": len(todo),
                  "skipped": len(rows) - len(todo)})
+        return True
+
+    # 一键出片：合成 → 拼接 → 混音，一条龙。
+    # 与「合成全剧」共用同一个任务机制，区别是这里不跳过已完成的行，
+    # 出片要保证整轨与当前台词完全一致。
+    if method == "POST" and path.endswith("/produce") and path.count("/") == 4:
+        sid = path.split("/")[3]
+        script = _find(sid)
+        if not script:
+            h._err("剧本不存在", 404)
+            return True
+        parsed = parse_for(script)
+        rows = _enriched(script, parsed)
+        if not rows:
+            h._err("剧本还没有可合成的台词")
+            return True
+        bad = [r for r in rows if r.get("role_id") is None]
+        if bad:
+            where = "、".join(str(r["idx"] + 1) for r in bad[:5])
+            h._err(f"第 {where} 行的角色不存在，请先在角色库里建好")
+            return True
+        unbound = [r for r in rows if not r.get("voice_id")]
+        if unbound:
+            names = sorted({r["role_name"] for r in unbound})
+            h._err("这些角色还没绑定音色：" + "、".join(names))
+            return True
+        with _JOBS_LOCK:
+            for j in _JOBS.values():
+                if j["script_id"] == sid and j["state"] == "running":
+                    h._err("这个剧本正在合成中，请等它结束或先停止", 409)
+                    return True
+        _prune_jobs()
+        # 已完成的行直接复用，但**要重录**的行照样重做：出片必须与当前
+        # 台词一致，否则导出的整轨和剧本对不上
+        todo = [r for r in rows if r["status"] != "done"]
+        job = _new_job(sid, script, rows, todo)
+        h._json({"job_id": job["id"], "total": len(todo),
+                 "skipped": len(rows) - len(todo),
+                 "parts": list(EXPORT_PARTS)})
+        return True
+
+    # 只重算混音：改完场次的铺底不必重合成整剧，几秒钟出结果
+    if method == "POST" and path.endswith("/mix") and path.count("/") == 4:
+        sid = path.split("/")[3]
+        if not _find(sid):
+            h._err("剧本不存在", 404)
+            return True
+        try:
+            mix_rel, err = _build_mix(sid)
+        except Exception as exc:
+            h._err(f"混音失败：{type(exc).__name__}: {exc}"[:200], 500)
+            return True
+        if err:
+            h._err(err)
+            return True
+
+        def _mut(items):
+            for s in items:
+                if s["id"] == sid:
+                    s["mix_wav"] = mix_rel
+                    s["mix_error"] = ""
+                    s["mix_stale"] = False
+
+        P._update_json("scripts.json", _mut)
+        h._json({"mix_wav": mix_rel})
         return True
 
     if method == "POST" and "/lines/" in path and path.endswith("/redo"):
@@ -1079,11 +1454,11 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             take_no = max(t["n"] for t in takes) + 1
         name = _take_name(idx, take_no)
         clone_row = row.get("route") == "clone"
-        dur, err = _synth_line(row["text"], role,
-                               "" if clone_row else row.get("instruction", ""),
-                               1.0 if clone_row else float(row.get("cfg_scale") or DEFAULT_CFG),
-                               int(row.get("seed") or 42),
-                               out_dir / name, row.get("speed") or 1.0)
+        dur, err, note = _synth_line(row["text"], role,
+                                     "" if clone_row else row.get("instruction", ""),
+                                     1.0 if clone_row else float(row.get("cfg_scale") or DEFAULT_CFG),
+                                     int(row.get("seed") or 42),
+                                     out_dir / name, row.get("speed") or 1.0)
         if err:
             h._err(err)
             return True
@@ -1093,7 +1468,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         _persist_take(sid, idx, row, take_no, dur, rel, reset=not same_content)
         _concat(sid, float(script.get("gap") if script.get("gap") is not None else DEFAULT_GAP))
         h._json({"ok": True, "idx": idx, "take": take_no,
-                 "duration": round(dur, 3), "wav": rel})
+                 "duration": round(dur, 3), "wav": rel, "engine_note": note})
         return True
 
     # 切换某一行的版本：多 take 里选一个当成品，整轨跟着重拼
@@ -1165,8 +1540,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             h._err("请求体必须是 JSON")
             return True
         raw = str(d.get("raw") or "")
-        if len(parse_script(raw).lines) > MAX_LINES:
-            h._err(f"一次最多 {MAX_LINES} 行")
+        if len(parse_script(raw).lines) > HARD_MAX_LINES:
+            h._err(f"一次最多 {HARD_MAX_LINES} 行")
             return True
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         script = {
@@ -1208,8 +1583,8 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if "raw" in d:
             raw_text = str(d["raw"] or "")
             n = len(parse_script(raw_text).lines)
-            if n > MAX_LINES:
-                h._err(f"一次最多 {MAX_LINES} 行（当前 {n} 行），请分批")
+            if n > HARD_MAX_LINES:
+                h._err(f"一次最多 {HARD_MAX_LINES} 行（当前 {n} 行），请分剧")
                 return True
         if "title" in d:
             script["title"] = str(d["title"] or "未命名剧本")
@@ -1218,10 +1593,40 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if "scenes" in d:
             # 合并而不是整体替换：作者临时删掉或改名一行 `## 场次` 时，
             # 那个场次配好的氛围不该在普通保存里被永久丢掉（改回来还能找回）。
-            merged = {s["name"]: s.get("mood", "") for s in _norm_scenes(script.get("scenes"))}
-            for s in _norm_scenes(d["scenes"]):
-                merged[s["name"]] = s.get("mood", "")
-            script["scenes"] = [{"name": n, "mood": m} for n, m in merged.items()]
+            before_beds = {s["name"]: (s["ambience"], s["bgm"], s["gain"])
+                           for s in _norm_scenes(script.get("scenes"))}
+            merged = {s["name"]: s for s in _norm_scenes(script.get("scenes"))}
+            for item in d["scenes"] or []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                prev = merged.get(name) or {}
+                norm = next(iter(_norm_scenes([item])), None)
+                if norm is None:
+                    continue
+                merged[name] = {
+                    "name": name,
+                    "mood": norm["mood"],
+                    # 铺底字段按「有没有这个键」判断：只改氛围时不该把
+                    # 已经配好的环境声/BGM 悄悄清掉；显式传空串才是清空
+                    "ambience": (str(item.get("ambience") or "").strip()
+                                 if "ambience" in item
+                                 else prev.get("ambience", "")),
+                    "bgm": (str(item.get("bgm") or "").strip()
+                            if "bgm" in item else prev.get("bgm", "")),
+                    "gain": (_clamp_gain(item.get("gain")) if "gain" in item
+                             else prev.get("gain", DEFAULT_SCENE_GAIN)),
+                }
+            script["scenes"] = list(merged.values())
+            after_beds = {s["name"]: (s["ambience"], s["bgm"], s["gain"])
+                          for s in _norm_scenes(script["scenes"])}
+            # 铺底一改，旧的 mix.wav 就跟新配置对不上了。留着字段会让导出
+            # 把过期混音当成成片交付，所以直接作废，等「重算混音」或一键出片。
+            if before_beds != after_beds:
+                script["mix_wav"] = ""
+                script["mix_stale"] = True
         for k, cast in (("gap", float), ("cfg_scale", float), ("seed", int)):
             if k in d:
                 script[k] = cast(d[k])
@@ -1229,7 +1634,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             script["auto_cast"] = bool(d["auto_cast"])
         patch = {k: script[k] for k in
                  ("title", "raw", "scenes", "gap", "cfg_scale", "seed",
-                  "auto_cast") if k in script}
+                  "auto_cast", "mix_wav", "mix_stale") if k in script}
         patch["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         def _mut(items):

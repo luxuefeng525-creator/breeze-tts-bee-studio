@@ -117,9 +117,18 @@
     } catch (e) { /* 忽略 */ }
     if (name === "library") renderLibrary();
     if (name === "clone") refreshCloneState();
-    if (name === "script") refreshScripts();
-    // 切走就别再轮询：后台还在打接口、改的是隐藏 DOM，用户也看不到
-    if (name !== "script" && S.timer) { clearTimeout(S.timer); S.timer = null; }
+    if (name === "script") {
+      refreshScripts();
+      // 素材还没加载过就先拉一次：场次铺底的下拉要显示素材名，不能只有「不铺」
+      if (!S.assets.length) refreshAssets().then(renderSceneMoods);
+    }
+    // 切走就别再轮询：后台还在打接口、改的是隐藏 DOM，用户也看不到。
+    // 同时要放开「出片中」闸门：轮询已经停了，标志还留着的话，切回来
+    // 点「一键出片」会被 S.producing 直接挡掉，看起来像按钮坏了。
+    if (name !== "script") {
+      if (S.timer) { clearTimeout(S.timer); S.timer = null; }
+      if (S.producing) { S.producing = false; finishJob(); }
+    }
     if (name === "workbench") {
       // 从隐藏状态切回来，textarea 在 display:none 时量不出高度，必须重算
       requestAnimationFrame(() => updatePaper());
@@ -1610,9 +1619,9 @@
   // ============================================================ 剧本台
   const S = {
     list: [], current: null, lines: [], job: null, timer: null,
-    gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [],
+    gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [], assets: [],
     missingRoles: [], lineFilter: "all", lineRole: "", jumpIdx: 0,
-    lastRender: null,
+    lastRender: null, producing: false, produceParts: [],
   };
 
   // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
@@ -1675,6 +1684,7 @@
     $("scriptTitleInput").value = d.title || "";
     $("scriptTitle").textContent = d.title || "未命名剧本";
     $("synthScriptBtn").disabled = false;
+    $("produceScriptBtn").disabled = false;
     $("exportScriptBtn").disabled = false;
     renderLines(d);
     renderSceneMoods();
@@ -1682,6 +1692,9 @@
     const full = audioUrl(d.full_wav);
     const audio = $("scriptAudio");
     if (full) { audio.src = full; audio.hidden = false; } else { audio.hidden = true; audio.removeAttribute("src"); }
+    // 打开/重载剧本一律回到干声源，别让上一部剧的「试听混音」状态留在播放器上
+    audio.dataset.src = "full";
+    $("playMixBtn").textContent = "试听混音";
   }
 
   function renderLines(d) {
@@ -1809,43 +1822,301 @@
   // 自动推断的氛围不能因为界面把 scenes 整组回传就被固化成「作者选的」：
   // 发送时把 auto 项的 mood 清空，后端会按场次名重新推断（结果一致）。
   function scenesPayload() {
+    // 铺底字段照发：后端按「有没有这个键」判断，只传 name/mood 时它会保留
+    // 旧值——但如果界面刚把 BGM 清成「不铺」，不传就等于清不掉。
     return (S.scenes || []).map((s) => ({
       name: s.name, mood: s.auto ? "" : (s.mood || ""),
+      ambience: s.ambience || "", bgm: s.bgm || "",
+      gain: s.gain == null ? 0.35 : s.gain,
     }));
   }
 
-  // 场次氛围：以解析出的场次为准，一行一个下拉。改了立刻保存并重新解析，
-  // 行列表随新指令重算（悬停某一行能看到实际下发的指令）。
+  // ---------------------------------------------------------------- 素材库
+  // 环境声 / BGM 都来自这里：既可以是程序生成的噪声底（无第三方版权），
+  // 也可以是用户自己上传的音频（上传时必须勾授权，版权自负）。
+  const ASSET_KIND = {
+    white: "白噪声", brown: "棕噪声", wind: "风声", hum: "低频嗡鸣", upload: "上传",
+  };
+
+  function assetName(a) {
+    const kind = ASSET_KIND[a.kind] || a.kind || "素材";
+    const dur = a.duration ? `${Number(a.duration).toFixed(1)}s` : "";
+    return `${a.name || "未命名素材"}（${kind}${dur ? " · " + dur : ""}）`;
+  }
+
+  async function refreshAssets() {
+    try {
+      S.assets = await api("/api/assets");
+    } catch (e) {
+      // 拉取失败就保留上一次的列表：清空会让所有已配好的铺底变成
+      // 「（素材已删除）」，看着像配置丢了
+    }
+    return S.assets;
+  }
+
+  function renderAssets() {
+    const box = $("assetList");
+    if (!S.assets.length) {
+      box.innerHTML = '<div class="empty-hint">还没有素材。生成一段噪声底，或上传自己的环境声。</div>';
+      return;
+    }
+    box.innerHTML = S.assets.map((a) => `
+      <div class="asset-item">
+        <span class="asset-kind">${esc(ASSET_KIND[a.kind] || "素材")}</span>
+        <strong class="asset-name" title="${esc(a.name || "")}">${esc(a.name || "未命名素材")}</strong>
+        <span class="asset-dur">${a.duration ? Number(a.duration).toFixed(1) + " 秒" : "—"}</span>
+        <span class="asset-src">${a.source === "generated" ? "生成" : "上传"}</span>
+        <button class="icon-btn" type="button" data-delasset="${esc(a.id)}" title="删除这个素材">
+          <svg class="icon icon-sm"><use href="#i-x"/></svg>
+        </button>
+      </div>`).join("");
+  }
+
+  async function openAssetsDialog() {
+    const dlg = $("assetsDlg");
+    if (dlg.open) return;          // 双击按钮会第二次 showModal 抛 InvalidStateError
+    await refreshAssets();
+    renderAssets();
+    dlg.showModal();
+  }
+
+  async function generateAsset() {
+    const btn = $("assetGenBtn");
+    const seconds = Math.min(600, Math.max(1, parseFloat($("assetSeconds").value) || 30));
+    btn.disabled = true;
+    btn.textContent = "生成中…";
+    try {
+      const d = await api("/api/assets/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: $("assetKindSel").value,
+          seconds,
+          name: $("assetGenName").value.trim(),
+        }),
+      });
+      $("assetGenName").value = "";
+      await refreshAssets();
+      renderAssets();
+      // 新素材要能立刻在下面的场次下拉里选到，否则用户会以为没生成成功
+      renderSceneMoods();
+      toast(`已生成「${d.asset ? d.asset.name : "素材"}」，回场次里选它就能铺底`);
+    } catch (e) {
+      toast("生成失败：" + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "生成";
+    }
+  }
+
+  async function uploadAsset() {
+    const input = $("assetFile");
+    const file = input.files && input.files[0];
+    if (!file) { toast("先选一个音频文件", true); return; }
+    // 前端先拦一道：让用户看到「缺的是什么」，而不是等 400 回来再猜
+    if (!$("assetLicense").checked) {
+      toast("请先确认你拥有该素材的使用授权", true);
+      return;
+    }
+    const btn = $("assetUploadBtn");
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("name", $("assetUpName").value.trim());
+    fd.append("license_confirmed", "1");
+    btn.disabled = true;
+    btn.textContent = "上传中…";
+    try {
+      await api("/api/assets", { method: "POST", body: fd });
+      input.value = "";
+      $("assetUpName").value = "";
+      await refreshAssets();
+      renderAssets();
+      renderSceneMoods();
+      toast("素材已存入素材库");
+    } catch (e) {
+      toast("上传失败：" + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "上传";
+    }
+  }
+
+  async function deleteAsset(id) {
+    const a = S.assets.find((x) => x.id === id);
+    if (!a) return;
+    if (!confirm(`删除素材「${a.name || a.id}」？\n当前剧本里用到它的场次会变回「不铺」；别的剧本引用了同一素材的，需要各自重新配一下。`)) return;
+    try {
+      await api("/api/assets/" + encodeURIComponent(id), { method: "DELETE" });
+      await refreshAssets();
+      renderAssets();
+      // 场次里指向已删素材的引用要一起清掉：留着一个空 id 会让用户
+      // 看着「已铺」但实际没声音
+      let touched = false;
+      (S.scenes || []).forEach((s) => {
+        if (s.ambience === id) { s.ambience = ""; touched = true; }
+        if (s.bgm === id) { s.bgm = ""; touched = true; }
+      });
+      renderSceneMoods();
+      if (touched && S.current) {
+        if (await saveScript(true)) await remixScript(true);
+      }
+      toast("已删除素材");
+    } catch (e) {
+      toast("删除失败：" + e.message, true);
+    }
+  }
+
+  // ---------------------------------------------------------------- 混音
+  // 铺底是拼接之后的后处理：只重算混音，不推理、不占显存。
+  function renderMixState() {
+    const hasMix = !!(S.current && S.current.mix_wav);
+    const play = $("playMixBtn");
+    if (play) play.hidden = !hasMix;
+    const remix = $("remixBtn");
+    if (remix) remix.disabled = !(S.current && S.current.full_wav);
+  }
+
+  // 混音串行化：连续改两个场次会并发 POST /mix，两次各自读「开始那一刻」的
+  // 场景快照，后落盘的可能是旧快照，却把 mix_stale 标成最新——导出就拿到
+  // 与配置不符的成片。和 saveScript 用同一套排队思路。
+  let _remixChain = Promise.resolve();
+
+  function remixScript(quiet) {
+    const run = async () => {
+      if (!S.current) return false;
+      if (!S.current.full_wav) {
+        if (!quiet) toast("还没有整轨音频，先点「合成全剧」或「一键出片」", true);
+        return false;
+      }
+      try {
+        const r = await api(`/api/scripts/${S.current.id}/mix`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        // 后端在变更铺底时已把旧 mix.wav 作废，这里拿到的是本次结果
+        S.current.mix_wav = r.mix_wav || "";
+        S.current.mix_stale = false;
+        renderMixState();
+        if (!quiet) {
+          toast(r.mix_wav ? "混音已更新，干声整轨没有改动"
+                          : "这个剧本没有可铺的环境声 / BGM，未生成混音");
+        }
+        return !!r.mix_wav;
+      } catch (e) {
+        toast("混音失败（干声整轨不受影响）：" + e.message, true);
+        return false;
+      }
+    };
+    _remixChain = _remixChain.then(run, run);
+    return _remixChain;
+  }
+
+  // 场次铺底：以解析出的场次为准，一行一个场次卡片。
+  // 氛围（mood）影响语调、需要重新合成；环境声 / BGM / 音量只影响混音，
+  // 改完存盘再重算混音即可——不要把「加个背景雨声」变成重跑整部剧。
+  function assetOptions(sel) {
+    const opts = ['<option value="">不铺</option>'];
+    S.assets.forEach((a) => {
+      opts.push(`<option value="${esc(a.id)}"${a.id === sel ? " selected" : ""}>${esc(assetName(a))}</option>`);
+    });
+    // 素材被删了但场次还引用着：如实显示，别静默变回「不铺」
+    if (sel && !S.assets.some((a) => a.id === sel)) {
+      opts.push(`<option value="${esc(sel)}" selected>（素材已删除）</option>`);
+    }
+    return opts.join("");
+  }
+
   function renderSceneMoods() {
     const box = $("sceneMoods");
     const list = $("sceneMoodList");
     const scenes = S.scenes || [];
-    box.hidden = !scenes.length;
-    if (!scenes.length) { list.innerHTML = ""; return; }
+    box.hidden = false;
+    if (!scenes.length) {
+      // 没写 ## 场次就没有可配的场次：与其整块藏起来（用户以为没这功能），
+      // 不如说清前置条件。试听 / 重算混音按钮仍可用
+      list.innerHTML = S.current
+        ? '<div class="empty-hint">在剧本里用 <code>## 场次名</code> 分出场景，就能给每一场配环境声与 BGM。</div>'
+        : "";
+      renderMixState();
+      return;
+    }
 
     list.innerHTML = scenes.map((s, i) => {
-      const opts = ['<option value="">（无氛围）</option>']
+      const moodOpts = ['<option value="">（无氛围）</option>']
         .concat(S.moods.map((m) => `<option value="${esc(m.key)}">${esc(m.key)}</option>`));
       // 词表之外的自定义氛围也要显示出来，否则下拉看着像「设置丢了」
       if (s.mood && !S.moods.some((m) => m.key === s.mood)) {
-        opts.push(`<option value="${esc(s.mood)}">${esc(s.mood)}（自定义）</option>`);
+        moodOpts.push(`<option value="${esc(s.mood)}">${esc(s.mood)}（自定义）</option>`);
       }
-      return `<label class="scene-mood" title="对这一场的所有行生效，行内情绪优先">
-        <span class="scene-mood-name">${esc(s.name)}${s.auto && s.mood ? '<em class="mood-auto">自动</em>' : ""}</span>
-        <select class="input input-select" data-scene="${i}" aria-label="场次「${esc(s.name)}」的氛围">${opts.join("")}</select>
-      </label>`;
+      const gain = Math.round((s.gain == null ? 0.35 : s.gain) * 100);
+      const bedOn = (s.ambience || s.bgm)
+        ? '<em class="scene-bed-on">已铺</em>' : "";
+      return `<div class="scene-bed">
+        <div class="scene-bed-head">
+          <span class="scene-bed-name" title="${esc(s.name)}">${esc(s.name)}</span>
+          ${s.auto && s.mood ? '<em class="mood-auto">自动氛围</em>' : ""}${bedOn}
+        </div>
+        <label class="scene-bed-field"><span>氛围</span>
+          <select class="input input-select" data-scene="${i}" data-field="mood"
+            aria-label="场次「${esc(s.name)}」的氛围">${moodOpts.join("")}</select></label>
+        <label class="scene-bed-field"><span>环境声</span>
+          <select class="input input-select" data-scene="${i}" data-field="ambience"
+            aria-label="场次「${esc(s.name)}」的环境声">${assetOptions(s.ambience)}</select></label>
+        <label class="scene-bed-field"><span>BGM</span>
+          <select class="input input-select" data-scene="${i}" data-field="bgm"
+            aria-label="场次「${esc(s.name)}」的 BGM">${assetOptions(s.bgm)}</select></label>
+        <label class="scene-bed-field scene-bed-gain"><span>音量</span>
+          <input class="input" type="range" min="0" max="100" step="5" value="${gain}"
+            data-scene="${i}" data-field="gain" aria-label="场次「${esc(s.name)}」的铺底音量">
+          <em>${gain}%</em></label>
+      </div>`;
     }).join("");
 
+    // 回填下拉值：mood 可能是词表外的自定义值，靠 option 的 selected 不够稳
     list.querySelectorAll("select[data-scene]").forEach((sel) => {
       const i = parseInt(sel.dataset.scene, 10);
-      sel.value = (S.scenes[i] && S.scenes[i].mood) || "";
-      sel.addEventListener("change", async () => {
-        if (!S.scenes[i]) return;
-        S.scenes[i].mood = sel.value;
-        S.scenes[i].auto = false;   // 作者动过手，之后由作者说了算
-        if (await saveScript(true)) previewScriptNow();
-      });
+      const s = S.scenes[i];
+      if (!s) return;
+      sel.value = String(s[sel.dataset.field] || "");
     });
+
+    list.querySelectorAll("[data-scene][data-field]").forEach((el) => {
+      const i = parseInt(el.dataset.scene, 10);
+      const field = el.dataset.field;
+      const apply = async () => {
+        const s = S.scenes[i];
+        if (!s) return;
+        if (field === "gain") {
+          s.gain = Math.min(1, Math.max(0, (parseInt(el.value, 10) || 0) / 100));
+        } else {
+          s[field] = el.value;
+          // 作者动过手，氛围之后由作者说了算
+          if (field === "mood") s.auto = false;
+        }
+        const saved = await saveScript(true);
+        if (!saved) return;
+        if (field === "mood") {
+          // 氛围进指令 → 需要重新解析（行内指令提示跟着变），不需要混音。
+          // previewScriptNow 自己会重绘场次区，这里不用再来一次。
+          await previewScriptNow();
+          return;
+        }
+        if (S.current && S.current.full_wav) {
+          // 铺底变了，旧 mix.wav 已被后端作废：立刻重算，别让「导出混音」偷偷用旧文件
+          await remixScript(true);
+        } else {
+          toast("铺底已保存；合成整轨后混音会自动生成");
+        }
+        renderSceneMoods();
+      };
+      if (field === "gain") {
+        // 拖动过程只更新数字，松手才落盘：不然每 5% 就发一次 PUT
+        const out = el.parentElement.querySelector("em");
+        el.addEventListener("input", () => { if (out) out.textContent = el.value + "%"; });
+        el.addEventListener("change", apply);
+      } else {
+        el.addEventListener("change", apply);
+      }
+    });
+    renderMixState();
   }
 
   let _parseTimer = null;
@@ -1858,7 +2129,24 @@
         body: JSON.stringify({ raw, scenes: scenesPayload() }),
       });
       S.lines = d.lines || [];
-      if (d.scenes) S.scenes = d.scenes;
+      if (d.scenes) {
+        // 只采纳服务端的氛围推断结果；铺底三字段以本地为准——parse 的响应
+        // 基于「发请求那一刻」的 scenes 快照，晚到会把刚配好的环境声 / BGM
+        // 覆盖成空，而下一次自动保存就把空串写进服务端，配置真丢了。
+        const local = new Map((S.scenes || []).map((s) => [s.name, s]));
+        S.scenes = d.scenes.map((s) => {
+          const mine = local.get(s.name);
+          if (!mine) return s;
+          return {
+            ...s,
+            ambience: mine.ambience || "",
+            bgm: mine.bgm || "",
+            gain: mine.gain == null ? s.gain : mine.gain,
+            mood: mine.auto ? s.mood : mine.mood,
+            auto: mine.auto ? s.auto : false,
+          };
+        });
+      }
       renderLines(d);
       renderSceneMoods();
     } catch (e) { /* 解析失败保持上一份结果，不打断输入 */ }
@@ -1917,14 +2205,10 @@
     } catch (e) { toast("新建失败：" + e.message, true); }
   }
 
-  async function synthScript() {
-    if (!S.current) return;
-    // 保存失败还继续，服务端用的就是上一版文本：用户看到的行数与合出来的内容对不上
-    const saved = await saveScript(true);
-    if (!saved) { toast("文本没保存成功，先解决再合成", true); return; }
-    // 角色可能在音色库里手工建好、或刚被一键补齐：以服务端**此刻**的解析
-    // 为准，不用渲染时缓存的 missingRoles（切屏回来后它会过期，
-    // 会把明明能合成的剧本硬拦下来，连文本都不让保存）。
+  // 开跑前以服务端**此刻**的解析为准：切屏回来后缓存的 missingRoles 会过期，
+  // 会把明明能合成的剧本硬拦下来。解析接口挂了就返回 null，交给后端守卫。
+  async function probeMissing() {
+    if (!S.current) return null;
     try {
       const probe = await api(`/api/scripts/${S.current.id}/parse`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1933,12 +2217,24 @@
       const missing = [...new Set((probe.errors || []).filter((e) => e.role_name)
         .map((e) => e.role_name))];
       S.missingRoles = missing;
-      if (missing.length) {
-        toast(`还有 ${missing.length} 个角色没配好：${missing.slice(0, 3).join("、")}，去分镜上方一键补齐`, true);
-        return;
-      }
-    } catch (e) { /* 解析接口挂了就交给后端守卫，不在这里误拦 */ }
+      return missing;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function synthScript() {
+    if (!S.current) return;
+    // 保存失败还继续，服务端用的就是上一版文本：用户看到的行数与合出来的内容对不上
+    const saved = await saveScript(true);
+    if (!saved) { toast("文本没保存成功，先解决再合成", true); return; }
+    const missing = await probeMissing();
+    if (missing && missing.length) {
+      toast(`还有 ${missing.length} 个角色没配好：${missing.slice(0, 3).join("、")}，去分镜上方一键补齐`, true);
+      return;
+    }
     $("synthScriptBtn").disabled = true;
+    $("produceScriptBtn").disabled = true;
     $("stopScriptBtn").hidden = false;
     $("scriptProgress").hidden = false;
     $("scriptBar").style.width = "2%";
@@ -1962,13 +2258,52 @@
     }
   }
 
+  // 一键出片：合成没做完的行 → 拼接整轨 → 混音 → 打包下载。
+  // 与「合成全剧」的区别是这里必须保证整轨与当前台词一致，所以已完成
+  // 的行直接用、要重录的行照样重做，最后连 ZIP 一起给。
+  async function produceScript() {
+    if (!S.current || S.producing) return;
+    const saved = await saveScript(true);
+    if (!saved) { toast("文本没保存成功，先解决再出片", true); return; }
+    const missing = await probeMissing();
+    if (missing && missing.length) {
+      toast(`还有 ${missing.length} 个角色没配好：${missing.slice(0, 3).join("、")}，先补齐再出片`, true);
+      return;
+    }
+    S.producing = true;
+    $("produceScriptBtn").disabled = true;
+    $("synthScriptBtn").disabled = true;
+    $("stopScriptBtn").hidden = false;
+    $("scriptProgress").hidden = false;
+    $("scriptBar").style.width = "2%";
+    $("scriptProgressText").textContent = "正在出片…";
+    try {
+      const r = await api(`/api/scripts/${S.current.id}/produce`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (r.skipped) toast(`复用已完成 ${r.skipped} 行，本次合成 ${r.total} 行`);
+      else if (r.total) toast(`本次合成 ${r.total} 行`);
+      S.produceParts = r.parts || [];
+      S.job = r.job_id;
+      // total 可能是 0（全部行都已完成）：这时仍在拼接与混音，不能提前退出
+      pollJob(r.job_id, r.total, { produce: true });
+    } catch (e) {
+      toast(e.message, true);
+      S.producing = false;
+      finishJob();
+    }
+  }
+
   function finishJob() {
     $("synthScriptBtn").disabled = false;
+    $("produceScriptBtn").disabled = !S.current;
     $("stopScriptBtn").hidden = true;
     clearTimeout(S.timer);
   }
 
-  function pollJob(jobId, total) {
+  function pollJob(jobId, total, opts) {
+    const producing = !!(opts && opts.produce);
     let strikes = 0;
     const tick = async () => {
       let d;
@@ -1984,6 +2319,7 @@
           return;
         }
         toast("与任务失去联系：" + e.message, true);
+        S.producing = false;
         finishJob();
         return;
       }
@@ -1992,25 +2328,56 @@
       $("scriptBar").style.width = Math.max(2, pct) + "%";
       const cur = d.rows && d.rows[d.current] ? d.rows[d.current] : null;
       const eta = d.eta == null ? "正在估算剩余" : `预计还需 ${Math.round(d.eta)} 秒`;
-      $("scriptProgressText").textContent =
-        `第 ${Math.min(done + 1, d.total)}/${d.total} 行 · ${cur ? cur.role_name + "：" + (cur.text || "").slice(0, 12) : ""} · ${eta}`;
+      if (producing && done >= d.total) {
+        // 逐行合成已经收尾、终态还没到：这段时间在拼接与混音，报「第 N/N 行」
+        // 会让人以为卡住了
+        $("scriptProgressText").textContent = d.total
+          ? "全部行已合成，正在拼接整轨并混音…"
+          : "台词都已就绪，正在拼接整轨并混音…";
+      } else {
+        $("scriptProgressText").textContent =
+          `${producing ? "出片中 · " : ""}第 ${Math.min(done + 1, d.total)}/${d.total} 行 · `
+          + `${cur ? cur.role_name + "：" + (cur.text || "").slice(0, 12) : ""} · ${eta}`;
+      }
       renderJobRows(d.rows);
       if (d.state === "running") {
         S.timer = setTimeout(tick, 1500);
       } else {
         $("scriptBar").style.width = "100%";
-        $("scriptProgressText").textContent =
-          d.state === "stopped" ? `已停止（完成 ${d.done} 行，可再次点合成继续）`
-                                : `完成：${d.done} 行成功${d.failed ? "，" + d.failed + " 行失败" : ""}`;
+        const failed = d.failed || 0;
+        // 拼接/混音都在终态之前：失败要如实说，别让用户拿着没混音的包当成片
+        const tail = d.error ? `，任务失败：${d.error}`
+          : d.concat_error ? `，但整轨拼接失败：${d.concat_error}`
+            : d.mix_error ? `，但混音失败（干声整轨不受影响）：${d.mix_error}` : "";
+        // total=0 表示所有行都已完成（一键出片复用了它们）：这时没有「成功几行」
+        // 可说，报「0 行成功」会让人以为什么都没做
+        const doneText = d.total === 0
+          ? "台词全部就绪，已重新拼接整轨并混音"
+          : `完成：${d.done} 行成功${failed ? "，" + failed + " 行失败" : ""}`;
+        $("scriptProgressText").textContent = d.state === "stopped"
+          ? `已停止（完成 ${d.done} 行，可再次点合成继续）`
+          : `${doneText}${tail}`;
+        S.producing = false;
         finishJob();
         // 只重载同一个剧本：用户可能已经切到别的剧本并改了内容，
         // 这时整页重开会把未保存的编辑冲掉。
         if (S.current && S.current.id === d.script_id) {
           await openScript(S.current.id);
-          if (d.state === "done" && !d.failed) toast("整轨已生成，可直接播放或导出");
+          if (d.error) {
+            toast("任务失败：" + d.error, true);
+          } else if (d.concat_error) {
+            toast("整轨拼接失败：" + d.concat_error, true);
+          } else if (d.mix_error) {
+            toast("混音失败（干声整轨不受影响）：" + d.mix_error, true);
+          } else if (producing && d.state === "done" && !failed) {
+            toast("成片已生成，正在打包下载");
+            await deliverZip();
+          } else if (d.state === "done" && !failed) {
+            toast("整轨已生成，可直接播放或导出");
+          }
         } else {
           refreshScripts();
-          if (d.state === "done") toast("剧本已合成完成");
+          if (d.state === "done") toast(producing ? "成片已生成" : "剧本已合成完成");
         }
       }
     };
@@ -2092,8 +2459,52 @@
   // 用户拿到只有 script.txt 的 ZIP 会以为合成丢了。
   const EXPORT_IDS = {
     full: "expFull", lines: "expLines", timeline: "expTimeline",
-    script: "expScript", subtitles: "expSubtitles",
+    script: "expScript", subtitles: "expSubtitles", mix: "expMix",
   };
+
+  // 下载走 fetch 而不是 location.href：后者在 4xx 时会把 JSON 错误当页面
+  // 渲染，用户看到一屏 {"detail": "…"}，还不知道怎么回去。
+  async function downloadZip(parts) {
+    if (!S.current) return false;
+    const resp = await fetch(`/api/scripts/${S.current.id}/export?parts=${parts.join(",")}`);
+    if (!resp.ok) {
+      let msg = `导出失败（HTTP ${resp.status}）`;
+      try {
+        const j = await resp.json();
+        if (j && j.detail) msg = j.detail;
+      } catch (e) { /* 非 JSON 响应，保留状态码 */ }
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${($("scriptTitleInput").value.trim() || "剧本")}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    return true;
+  }
+
+  // 出片后自动打包：整轨 + 混音（有才带）+ 时间轴 + 字幕 + 剧本。
+  // 不带分行音频：一部剧几十个 wav，成片交付用不上，还会把包撑大。
+  async function deliverZip() {
+    const s = S.current || {};
+    // 可交付项以后端 produce 回包的 parts 为准（契约 §3），只去掉分行音频；
+    // 再按实际产物收敛——没有 mix_wav 还带 mix 会被后端整包拒绝。
+    let parts = (S.produceParts || []).length
+      ? S.produceParts.filter((p) => p !== "lines")
+      : ["full", "script", "timeline", "subtitles"];
+    if (!s.mix_wav) parts = parts.filter((p) => p !== "mix");
+    if (!s.full_wav) parts = parts.filter((p) => p !== "full");
+    if (!(s.timeline || []).length) parts = parts.filter((p) => p !== "timeline" && p !== "subtitles");
+    try {
+      await downloadZip(parts);
+    } catch (e) {
+      toast("成片已生成，但打包下载失败：" + e.message + "（可点「导出 ZIP」重试）", true);
+    }
+  }
 
   async function openExportDialog() {
     if (!S.current) return;
@@ -2101,6 +2512,8 @@
     if (!(await saveScript(true))) return;
     const hasFull = !!(S.current.full_wav);
     const hasLines = (S.lines || []).some((l) => l.wav);
+    // 混音只在真的生成过时可选：没配铺底时后端不会产出「只有干声」的假混音
+    const hasMix = !!(S.current.mix_wav);
     const pending = (S.lines || []).filter((l) => l.status !== "done").length;
     const setOpt = (key, ok, def = true) => {
       const el = $(EXPORT_IDS[key]);
@@ -2116,15 +2529,17 @@
     // 时间轴由拼接时算出：没有整轨就没有可用的时间轴
     setOpt("timeline", freshFull);
     setOpt("script", true);
-    // 字幕是新增项，默认不勾：老用户导出包内容不悄悄变
+    // 字幕与混音都是新增项，默认不勾：老用户导出包内容不悄悄变
     setOpt("subtitles", freshFull, false);
+    setOpt("mix", hasMix && freshFull, false);
 
     const rows = (S.lines || []).length;
     $("exportSub").textContent = pending
-      ? `还有 ${pending} 行没合成或台词改过还没重做。整轨与时间轴都是上一版的，先「合成全剧」再导出。`
+      ? `还有 ${pending} 行没合成或台词改过还没重做。整轨与时间轴都是上一版的，先「合成全剧」或「一键出片」再导出。`
       : (hasFull
-          ? `${rows} 行 · 整轨 ${Number(S.current.duration || 0).toFixed(1)} 秒 · 勾选要放进 ZIP 的内容`
-          : "这个剧本还没合成，音频与时间轴暂时不可选；现在只能导出剧本文本。");
+          ? `${rows} 行 · 整轨 ${Number(S.current.duration || 0).toFixed(1)} 秒`
+            + `${hasMix ? " · 混音已就绪" : " · 还没有混音（配好场次铺底后点「重算混音」）"} · 勾选要放进 ZIP 的内容`
+          : "这个剧本还没合成，音频、混音与时间轴暂时不可选；现在只能导出剧本文本。");
     $("exportDlg").showModal();
   }
 
@@ -2138,26 +2553,7 @@
     const btn = $("exportConfirmBtn");
     btn.disabled = true;
     try {
-      // 用 fetch 而不是 location.href：后者在 4xx 时会把 JSON 错误当页面渲染，
-      // 用户看到一屏 {"detail": "…"}，还不知道怎么回去。
-      const resp = await fetch(`/api/scripts/${S.current.id}/export?parts=${parts.join(",")}`);
-      if (!resp.ok) {
-        let msg = `导出失败（HTTP ${resp.status}）`;
-        try {
-          const j = await resp.json();
-          if (j && j.detail) msg = j.detail;
-        } catch (e) { /* 非 JSON 响应，保留状态码 */ }
-        throw new Error(msg);
-      }
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${($("scriptTitleInput").value.trim() || "剧本")}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      await downloadZip(parts);
       $("exportDlg").close();
       toast("已导出 ZIP");
     } catch (e) {
@@ -2251,11 +2647,42 @@
   function bindScript() {
     $("newScriptBtn").addEventListener("click", newScript);
     $("synthScriptBtn").addEventListener("click", synthScript);
+    $("produceScriptBtn").addEventListener("click", produceScript);
     $("exportScriptBtn").addEventListener("click", openExportDialog);
     $("exportConfirmBtn").addEventListener("click", confirmExport);
     $("protoVoiceBtn").addEventListener("click", openProtoDialog);
     $("protoArchetype").addEventListener("change", fillProtoFromArchetype);
     $("protoSaveBtn").addEventListener("click", saveProtoVoice);
+    // 素材库：生成 / 上传 / 删除都在同一个弹层里完成
+    $("openAssetsBtn").addEventListener("click", openAssetsDialog);
+    $("assetGenBtn").addEventListener("click", generateAsset);
+    $("assetUploadBtn").addEventListener("click", uploadAsset);
+    $("assetList").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-delasset]");
+      if (b) deleteAsset(b.dataset.delasset);
+    });
+    $("remixBtn").addEventListener("click", () => remixScript(false));
+    // 试听混音 / 切回干声：播放器一直是同一个控件，不给个来回切换的话，
+    // 用户听完 mix 会以为「干声被改掉了」——而这正是这里最要紧的边界
+    $("playMixBtn").addEventListener("click", () => {
+      const a = $("scriptAudio");
+      const btn = $("playMixBtn");
+      if (a.dataset.src === "mix") {
+        a.src = audioUrl(S.current && S.current.full_wav);
+        a.dataset.src = "full";
+        btn.textContent = "试听混音";
+        a.play().catch(() => {});
+        toast("已切回干声整轨 full.wav");
+        return;
+      }
+      if (!(S.current && S.current.mix_wav)) { toast("还没有混音成片", true); return; }
+      a.src = audioUrl(S.current.mix_wav);
+      a.dataset.src = "mix";
+      a.hidden = false;
+      btn.textContent = "切回干声";
+      a.play().catch(() => {});
+      toast("正在播放混音版；整轨干声 full.wav 没有改动");
+    });
     $("stopScriptBtn").addEventListener("click", async () => {
       if (!S.job) return;
       try { await api(`/api/scripts/jobs/${S.job}/stop`, { method: "POST", body: "{}" }); } catch (e) { /* 忽略 */ }

@@ -227,10 +227,29 @@ def test_line_emotion_still_wins_over_scene_mood():
     ("小蜜蜂", "neutral"), ("陌生人", "neutral"),
     # 最长命中：不能被更短的「外孙」「老板」抢走性别
     ("外孙女", "teen_f"), ("老板娘", "adult_f"),
+    # 扩词表：亲属、职业、性别前缀
+    ("老爷爷", "elder_m"), ("老太太", "elder_f"), ("小和尚", "teen_m"),
+    ("和尚", "adult_m"), ("大嫂", "adult_f"), ("女婿", "adult_m"),
+    ("女老师", "adult_f"), ("男护士", "adult_m"),
+    ("客服", "adult_f"), ("外卖员", "adult_m"), ("律师", "adult_m"),
+    # 两性组合名整名钉死：靠词长/顺序裁不出性别，选任一边都会演错另一半
+    ("爸爸妈妈", "neutral"), ("大哥大嫂", "neutral"), ("爷爷奶奶", "neutral"),
+    ("爹", "adult_m"), ("娘", "adult_f"),
 ])
 def test_guess_archetype_reads_common_role_names(name, arch):
     from tts_pipeline.script import guess_archetype
     assert guess_archetype(name) == arch
+
+
+def test_every_exact_archetype_is_actually_consulted():
+    """ARCHETYPE_EXACT 建了就必须被 guess_archetype 查表。
+
+    这条是防「常量写完忘了接线」：词表加了、常量加了，但函数没读它，
+    表面上一片绿，两性组合名照样被判成单一性别。
+    """
+    from tts_pipeline.script import ARCHETYPE_EXACT, guess_archetype
+    for name, arch in ARCHETYPE_EXACT.items():
+        assert guess_archetype(name) == arch, name
 
 
 def test_every_guessed_archetype_has_an_instruction():

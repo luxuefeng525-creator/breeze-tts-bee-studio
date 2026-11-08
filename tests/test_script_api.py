@@ -18,7 +18,7 @@ import pytest
 
 import panel as P
 
-from script_routes import MAX_LINES  # noqa: E402  (需先 import panel)
+from script_routes import HARD_MAX_LINES, MAX_LINES  # noqa: E402  (需先 import panel)
 
 
 @pytest.fixture(scope="module")
@@ -190,10 +190,13 @@ def test_synth_rejects_role_without_voice(base_url):
 
 
 def test_synth_rejects_too_many_lines(base_url):
-    raw = "\n".join(f"旁白：第{i}句。" for i in range(MAX_LINES + 1))
+    # MAX_LINES 是「每批多少行」（超了自动分批续做），剧本总行数的硬上限是
+    # HARD_MAX_LINES —— 别再拿 MAX_LINES 当总上限断言，否则分批能力一落地
+    # 这条用例就假失败。
+    raw = "\n".join(f"旁白：第{i}句。" for i in range(HARD_MAX_LINES + 1))
     code, err = _json_req(base_url + "/api/scripts", "POST", {"title": "超长", "raw": raw})
     assert code == 400, err
-    assert str(MAX_LINES) in str(err.get("detail", "")), err
+    assert str(HARD_MAX_LINES) in str(err.get("detail", "")), err
 
 
 # ---------------------------------------------------------------- 合成任务

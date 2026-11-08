@@ -441,9 +441,12 @@
         </div>
         <div class="head-actions">
           <button class="btn" type="button" id="newScriptBtn">新建剧本</button>
+          <button class="btn" type="button" id="openAssetsBtn" title="环境声 / BGM 素材，可生成噪声底或上传自己的音频">素材库</button>
           <button class="btn" type="button" id="exportScriptBtn" disabled>导出 ZIP</button>
           <button class="btn" type="button" id="stopScriptBtn" hidden>停止</button>
-          <button class="btn-primary" type="button" id="synthScriptBtn" disabled>合成全剧</button>
+          <button class="btn" type="button" id="synthScriptBtn" disabled>合成全剧</button>
+          <button class="btn-primary" type="button" id="produceScriptBtn" disabled
+            title="合成没做完的行 → 拼接整轨 → 混入环境声 / BGM → 打包下载">一键出片</button>
         </div>
       </div>
 
@@ -469,7 +472,15 @@
             <span class="script-hint" id="scriptHint">用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气</span>
           </div>
           <div class="scene-moods" id="sceneMoods" hidden>
-            <span class="scene-moods-label">场次氛围</span>
+            <div class="scene-moods-head">
+              <span class="scene-moods-label">场次铺底</span>
+              <div class="scene-bed-acts">
+                <button class="btn-sm" type="button" id="playMixBtn" hidden
+                  title="播放混音成片：干声 + 环境声 / BGM，干声本身不变">试听混音</button>
+                <button class="btn-sm" type="button" id="remixBtn"
+                  title="改完铺底后重算混音，不重新合成，几秒钟出结果">重算混音</button>
+              </div>
+            </div>
             <div class="scene-mood-list" id="sceneMoodList"></div>
           </div>
         </section>
@@ -612,10 +623,67 @@
       <span><strong>剧本文本</strong><em>script.txt · 原始剧本，换设备也能接着改</em></span></label>
     <label class="opt-row"><input type="checkbox" id="expSubtitles">
       <span><strong>字幕文件</strong><em>subtitles.srt / .vtt · 按时间轴自动生成，带角色名</em></span></label>
+    <label class="opt-row"><input type="checkbox" id="expMix">
+      <span><strong>混音成片</strong><em>mix.wav · 干声叠上环境声 / BGM 并对人声做压低（ducking），干声本身不变</em></span></label>
   </div>
   <div class="dlg-actions">
     <button class="btn" type="button" data-close="exportDlg">取消</button>
     <button class="btn-primary" type="button" id="exportConfirmBtn">下载 ZIP</button>
+  </div>
+</dialog>
+
+<dialog class="dlg dlg-wide" id="assetsDlg" aria-label="素材库">
+  <div class="dlg-head">
+    <h2>素材库</h2>
+    <button class="icon-btn" type="button" aria-label="关闭" data-close="assetsDlg"><svg class="icon icon-sm"><use href="#i-x"/></svg></button>
+  </div>
+  <p class="dlg-sub">环境声与 BGM 都从这里选。上传的素材请自备授权；生成的噪声底没有第三方版权。</p>
+
+  <div class="asset-make">
+    <div class="asset-make-row">
+      <label class="asset-make-field">
+        <span>生成噪声底</span>
+        <select class="input input-select" id="assetKindSel" aria-label="噪声类型">
+          <option value="white">白噪声 · 压住环境杂音</option>
+          <option value="brown">棕噪声 · 室内 / 街道底色</option>
+          <option value="wind">风声 · 户外空旷</option>
+          <option value="hum">低频嗡鸣 · 空调 / 电器</option>
+        </select>
+      </label>
+      <label class="asset-make-field asset-make-sec">
+        <span>时长</span>
+        <input class="input" id="assetSeconds" type="number" min="1" max="600" step="5" value="30" aria-label="生成时长（秒）">
+      </label>
+      <label class="asset-make-field">
+        <span>名称（可空）</span>
+        <input class="input" id="assetGenName" placeholder="例如：雨夜底噪" aria-label="生成素材名称">
+      </label>
+      <button class="btn-sm" type="button" id="assetGenBtn">生成</button>
+    </div>
+
+    <div class="asset-make-row">
+      <label class="asset-make-field">
+        <span>上传音频</span>
+        <input class="input" id="assetFile" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg" aria-label="选择音频文件">
+      </label>
+      <label class="asset-make-field asset-make-wide">
+        <span>名称（可空）</span>
+        <input class="input" id="assetUpName" placeholder="例如：街边车流" aria-label="上传素材名称">
+      </label>
+      <button class="btn-sm" type="button" id="assetUploadBtn">上传</button>
+    </div>
+    <label class="asset-license" for="assetLicense">
+      <input type="checkbox" id="assetLicense">
+      <span>我确认拥有这段音频的使用授权，并自行承担版权责任</span>
+    </label>
+  </div>
+
+  <div class="asset-list" id="assetList">
+    <div class="empty-hint">还没有素材。生成一段噪声底，或上传自己的环境声。</div>
+  </div>
+
+  <div class="dlg-actions">
+    <button class="btn" type="button" data-close="assetsDlg">关闭</button>
   </div>
 </dialog>
 
