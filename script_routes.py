@@ -47,9 +47,9 @@ DEFAULT_PARTS = ",".join(("full", "lines", "timeline", "script"))
 
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
-# cast 要连写 voices.json / roles.json 两个文件：单次 RMW 各自原子，
-# 但两次之间需要一把进程内总锁，否则两个并发请求会基于同一份旧快照
-# 各建一遍角色，并在响应里谎报「建成功了」。
+# cast 要连着写 voices.json / roles.json / scripts.json 三个文件：单次 RMW
+# 各自原子，但几次之间需要一把进程内总锁，否则两个并发请求会基于同一份
+# 旧快照各建一遍角色，并在响应里谎报「建成功了」。
 _CAST_LOCK = threading.Lock()
 
 
@@ -86,8 +86,141 @@ def _lines_dir(script_id: str) -> Path:
 # ---------------------------------------------------------------------------
 # 角色 / 音色
 # ---------------------------------------------------------------------------
+def _roles_all() -> list[dict]:
+    return P._load("roles.json")
+
+
 def _roles_by_name() -> dict[str, dict]:
-    return {r["name"]: r for r in P._load("roles.json")}
+    """全局角色（不属于任何剧本）按名字索引。
+
+    只给「不需要剧本上下文」的调用方用；解析链路一律走 _roles_for()，
+    否则两个剧的同名「旁白」会互相顶掉。
+    """
+    return {str(r.get("name") or "").strip(): r for r in _roles_all()
+            if not r.get("script_id")}
+
+
+def _roles_for(script: dict | None) -> dict[str, dict]:
+    """这个剧本眼里的「名字 → 角色」：本剧 cast 优先，其次全局。
+
+    roles.json 允许同名共存（靠 script_id 区分），所以不能只按 name 建一次
+    索引就完事——两个剧的「旁白」谁是谁，只有 cast 说了算。
+
+    仍然保留「回退全局」：作者在角色库里手工建的角色是全局的，剧本要能用上。
+    「新剧本别静默用上别人的同名角色」这件事由 auto_cast 负责——它用
+    _roles_cast_only 判定缺谁（见 _apply_cast），不在这里屏蔽全局。
+    """
+    by_id = {str(r.get("id")): r for r in _roles_all()}
+    out = _roles_by_name()
+    for rid in (script or {}).get("cast") or []:
+        r = by_id.get(str(rid))
+        if r:
+            out[str(r.get("name") or "").strip()] = r
+    return out
+
+
+def _roles_cast_only(script: dict | None) -> dict[str, dict]:
+    """只取本剧 cast 里的角色，**不**回退全局。
+
+    auto_cast 用它判断「这个剧本还缺谁」：隔离剧本里全局有同名「旁白」
+    也不算已配，否则新剧本会静默用上别人剧本的音色。
+    """
+    by_id = {str(r.get("id")): r for r in _roles_all()}
+    out: dict[str, dict] = {}
+    for rid in (script or {}).get("cast") or []:
+        r = by_id.get(str(rid))
+        if r:
+            out[str(r.get("name") or "").strip()] = r
+    return out
+
+
+def _sync_cast(script: dict, roles: dict | None = None, parsed=None) -> dict:
+    """把台词命中的角色 id 补进 cast（幂等，只补不删）。
+
+    解析允许回退全局角色，但那个「回退」不能是临时的：下次保存时
+    auto_cast 会把它换成新建的专属副本，role_id 一变，已合成的行全部
+    变 pending。回退命中就固化进 cast。
+
+    全新的隔离剧本（cast 还是空的）不认领：那时还没有任何绑定，要让
+    auto_cast 按隔离语义给它建专属角色。
+    """
+    if not script.get("id"):
+        return script
+    if script.get("cast_isolated") and not script.get("cast"):
+        return script
+    roles = _roles_for(script) if roles is None else roles
+    try:
+        parsed = parsed if parsed is not None else parse_for(script, roles)
+    except Exception:
+        return script
+
+    ids: list[str] = []
+    for line in parsed.lines:
+        r = roles.get(line.role_name)
+        if r and str(r.get("id")) not in ids:
+            ids.append(str(r["id"]))
+    if not ids:
+        return script
+    have = {str(x) for x in (script.get("cast") or [])}
+    if set(ids) <= have:
+        return script          # 已经都认领过了，不再写盘
+
+    def _mut(items):
+        for s in items:
+            if s.get("id") != script["id"]:
+                continue
+            # 双检：并发首读/并发保存时只写一次，且不覆盖别人刚加的角色
+            cast = [str(x) for x in (s.get("cast") or [])]
+            for rid in ids:
+                if rid not in cast:
+                    cast.append(rid)
+            s["cast"] = cast
+
+    P._update_json("scripts.json", _mut)
+    merged = list(dict.fromkeys(list(have) + ids))
+    return {**script, "cast": merged}
+
+
+def purge_script_roles(sid: str) -> list[str]:
+    """删剧本时连带删掉它的专属角色，返回被删的角色名（给日志/响应看）。
+
+    专属角色只属于这部剧本，剧本没了就永远用不上；留在角色库里既是孤儿，
+    又会顶着已经不存在的剧本名，用户没法判断该不该删。音色不动——它可能
+    被别的角色复用。
+    """
+    names: list[str] = []
+
+    def _mut(items):
+        keep = []
+        for r in items:
+            if str(r.get("script_id") or "") == str(sid):
+                names.append(str(r.get("name") or ""))
+                continue
+            keep.append(r)
+        items[:] = keep
+
+    P._update_json("roles.json", _mut)
+    return names
+
+
+def drop_role_from_casts(rid: str) -> int:
+    """删角色后清理所有剧本的 cast 引用，返回清理条数。
+
+    不清理会留一个悬空 id：解析时找不到角色、界面也不报错，用户只会
+    觉得「这一行突然没声音了」。
+    """
+    hit = 0
+
+    def _mut(items):
+        nonlocal hit
+        for s in items:
+            cast = s.get("cast")
+            if isinstance(cast, list) and str(rid) in [str(x) for x in cast]:
+                s["cast"] = [x for x in cast if str(x) != str(rid)]
+                hit += 1
+
+    P._update_json("scripts.json", _mut)
+    return hit
 
 
 def _voices_by_id() -> dict[str, dict]:
@@ -135,9 +268,13 @@ def _role_default_emotion(role: dict | None) -> str:
     return value if value in EMOTIONS else ""
 
 
-def parse_for(script: dict):
-    """按当前角色/音色重新解析剧本（角色改名或换音色后要重新算）。"""
-    roles = _roles_by_name()
+def parse_for(script: dict, roles: dict[str, dict] | None = None):
+    """按当前角色/音色重新解析剧本（角色改名或换音色后要重新算）。
+
+    roles 显式传入时就用它，不再回退全局：角色隔离模式下「本剧还缺谁」
+    必须只看 cast，传进来的就是 cast 限定集。
+    """
+    roles = _roles_for(script) if roles is None else roles
     voices = _voices_by_id()
     defaults = {name: _role_default_emotion(r) for name, r in roles.items()}
     instr = {name: _role_instruction(r, voices) for name, r in roles.items()}
@@ -367,7 +504,7 @@ def _enriched(script: dict, parsed) -> list[dict]:
     还拿旧音频当新成品。老记录里没有 cfg_scale/seed 字段时用当前值兜底，
     所以升级不会把用户已经合成好的整剧变成一片「未合成」。
     """
-    roles = _roles_by_name()
+    roles = _roles_for(script)
     voices = _voices_by_id()
     cfg = float(script.get("cfg_scale") if script.get("cfg_scale") is not None
                 else DEFAULT_CFG)
@@ -506,7 +643,7 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
     try:
         script = _find(script_id) or {}
         out_dir = _lines_dir(script_id)
-        roles = _roles_by_name()
+        roles = _roles_for(script)
         cfg = float(script.get("cfg_scale") if script.get("cfg_scale") is not None
                     else DEFAULT_CFG)
         base_seed = int(script.get("seed") if script.get("seed") is not None else 42)
@@ -944,12 +1081,25 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
     with _CAST_LOCK:
         # 锁内重读：两个并发请求不能共用同一份旧快照
         script = _find(sid) or script
-        parsed = parse_for(script)
+        # cast_isolated=True（新剧本）= 缺的角色各建一份专属；
+        # 缺省（老剧本）= 保持升级前的「全局同名复用」行为
+        isolated = bool(script.get("cast_isolated"))
+        has_cast = bool(script.get("cast"))
+        # 判定「缺谁」用哪套角色：
+        #  * 全新的隔离剧本（cast 还是空的）→ 只看 cast，保证它的「旁白」是自己的
+        #  * 其余（老剧本 / 已经在用的隔离剧本）→ cast 优先 + 回退全局，
+        #    手工建的全局角色要能用，回退命中的绑定下面会被固化进 cast
+        roles_ctx = (_roles_cast_only(script) if isolated and not has_cast
+                     else _roles_for(script))
+        parsed = parse_for(script, roles_ctx)
         if len(parsed.lines) > HARD_MAX_LINES:
             return 400, {"detail": f"一次最多 {HARD_MAX_LINES} 行"}
         if forced and forced not in _voices_by_id():
             return 400, {"detail": "指定的音色不存在"}
-        plan = plan_cast(parsed.errors, set(_roles_by_name()), _voices_by_id())
+        # 回退命中的角色先固化进 cast，再决定缺谁去新建——否则保存一次就把
+        # 临时回退的角色换成新建的专属副本，role_id 一变已合成行全变 pending
+        script = _sync_cast(script, roles_ctx, parsed)
+        plan = plan_cast(parsed.errors, set(roles_ctx), _voices_by_id())
         if not plan:
             return 200, {"created": [], "count": 0,
                          "remaining": len(parsed.errors)}
@@ -993,6 +1143,9 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
                 "speed": item["speed"],
                 "accent": "",
                 "defaults": {"cfg_scale": DEFAULT_CFG, "seed": 42},
+                # 隔离模式下这个角色属于本剧：别的剧本写同名会各建一份，
+                # 改这里的音色不会波及别人
+                "script_id": sid if isolated else "",
                 "created_at": now,
             }
             new_roles.append(role)
@@ -1015,12 +1168,15 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
                     names.add(key)
 
         def _add_roles(items, _new=new_roles):
-            names = {str(r.get("name") or "").strip() for r in items}
+            # 查重键是「名字 + 归属剧本」：隔离模式下不同剧本的同名角色要共存，
+            # 同一个剧本内重复建同名才是要拦的
+            keys = {(str(r.get("name") or "").strip(), str(r.get("script_id") or ""))
+                    for r in items}
             for r in _new:
-                key = str(r["name"]).strip()
-                if key not in names:
+                key = (str(r["name"]).strip(), str(r.get("script_id") or ""))
+                if key not in keys:
                     items.append(r)
-                    names.add(key)
+                    keys.add(key)
 
         if new_voices:
             P._update_json("voices.json", _add_voices)
@@ -1041,13 +1197,16 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
             return 400, {"detail": f"音色没写成功：{', '.join(dangling[:3])}，请重试"}
         P._update_json("roles.json", _add_roles)
 
-        # 以落盘结果为准回报，不能把「被查重跳过」的对象算成新建
-        real_roles = {str(r.get("name") or "").strip(): r
+        # 以落盘结果为准回报，不能把「被查重跳过」的对象算成新建。
+        # 查重键是「名字 + 归属剧本」——同名角色在不同剧本里可以共存。
+        scope = sid if isolated else ""
+        real_roles = {(str(r.get("name") or "").strip(),
+                       str(r.get("script_id") or "")): r
                       for r in P._load("roles.json")}
         real_voices = {v["id"]: v for v in P._load("voices.json")}
         verified = []
         for c in created:
-            r = real_roles.get(c["name"])
+            r = real_roles.get((c["name"], scope))
             if not r or r.get("voice_id") not in real_voices:
                 continue
             c["role_id"] = r["id"]
@@ -1055,6 +1214,23 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
             c["voice_name"] = real_voices[r["voice_id"]]["name"]
             c["route"] = _voice_route(real_voices[r["voice_id"]])
             verified.append(c)
+
+        # 认领进 cast：写落盘后的真实 role id，不能拿计划对象里的临时 id
+        if verified:
+            ids = [str(c["role_id"]) for c in verified]
+
+            def _add_cast(items):
+                for s in items:
+                    if s.get("id") != sid:
+                        continue
+                    cast = [str(x) for x in (s.get("cast") or [])]
+                    for rid in ids:
+                        if rid not in cast:
+                            cast.append(rid)
+                    s["cast"] = cast
+
+            P._update_json("scripts.json", _add_cast)
+
         remaining = len(parse_for(_find(sid) or script).errors)
         return 201, {"created": verified, "count": len(verified),
                      "remaining": remaining}
@@ -1263,11 +1439,16 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not script:
             h._err("剧本不存在", 404)
             return True
+        # 老剧本第一次被读时把现有全局角色认领进 cast（幂等，认领过就不再写）
+        script = _sync_cast(script)
         parsed = parse_for(script)
         resp = {
             **{k: script.get(k) for k in
                ("id", "title", "raw", "gap", "duration", "full_wav",
                 "timeline", "cfg_scale", "seed", "updated_at")},
+            # 本剧用的角色 id 表与是否隔离：界面据此标「剧本专属」
+            "cast": list(script.get("cast") or []),
+            "cast_isolated": bool(script.get("cast_isolated")),
             # scenes 以解析结果为准（作者可能刚加了 ## 场次），mood 从已存配置里取
             "scenes": _scenes_view(parsed.scenes, script.get("scenes")),
             "lines": _enriched(script, parsed),
@@ -1439,7 +1620,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         if not row.get("voice_id"):
             h._err(f"角色「{row['role_name']}」还没绑定音色")
             return True
-        role = _roles_by_name().get(row["role_name"])
+        role = _roles_for(script).get(row["role_name"])
         out_dir = _lines_dir(sid)
         # 重录 = 追加一版，不是覆盖：同一句常要试两三遍才满意，覆盖掉
         # 上一版等于逼用户在「两个都还行」之间反复重抽。
@@ -1554,6 +1735,10 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "seed": int(d.get("seed") or 42),
             # 保存就自动配角色；作者在剧本上关掉这项才会退回手工模式
             "auto_cast": bool(d.get("auto_cast", True)),
+            # 新剧本走角色隔离：它的「旁白」是自己的，改音色不波及别的剧。
+            # 老剧本没有这两个字段，保持「认领全局角色」的老语义
+            "cast": [],
+            "cast_isolated": True,
             "lines": [],
             "created_at": now,
             "updated_at": now,
@@ -1566,7 +1751,9 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
                 _apply_cast(script["id"])
             except Exception:
                 pass
-        h._json(script, 201)
+        # 回读一次再返回：auto_cast 刚写进去的 cast 与角色要能被调用方看到，
+        # 否则 201 里永远是空的 cast，前端只能再发一次 GET
+        h._json(_find(script["id"]) or script, 201)
         return True
 
     if method == "PUT" and path.startswith("/api/scripts/") and path.count("/") == 3:
@@ -1670,6 +1857,10 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             items[:] = [s for s in items if s["id"] != sid]
 
         P._update_json("scripts.json", _drop)
+        # 专属角色是这部剧情的一部分：剧本没了它就永远用不上（孤儿角色会
+        # 一直堆在角色库里，还顶着别人的剧本名）。音色不动——可能被别的
+        # 角色复用，让用户在音色库里自己决定
+        purged = purge_script_roles(sid)
         # 分行音频与整轨一起清掉，避免留下孤儿目录。
         # 删除是尽力而为：某些环境会拦批量删除并抛非 OSError，
         # 那不该让「删除剧本」这个操作失败。
@@ -1684,7 +1875,7 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
                 d.rmdir()
             except Exception:
                 pass
-        h._json({"ok": True})
+        h._json({"ok": True, "purged_roles": purged})
         return True
 
     return False

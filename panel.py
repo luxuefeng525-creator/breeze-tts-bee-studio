@@ -1935,7 +1935,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(_load("voices.json"))
             return
         if path == "/api/roles":
-            self._json(_load("roles.json"))
+            roles = _load("roles.json")
+            # 专属角色带上所属剧本标题：角色库里可能同时存在多个「旁白」，
+            # 只给 script_id 用户分不清谁是谁
+            titles = {s.get("id"): s.get("title", "") for s in _load("scripts.json")}
+            for r in roles:
+                # 老角色没有这个键：统一补出来，消费方才能直接按它判断归属
+                r.setdefault("script_id", "")
+                sid = str(r.get("script_id") or "")
+                r["script_title"] = titles.get(sid, "") if sid else ""
+            self._json(roles)
             return
         if path == "/api/history":
             items = _load("history.json")
@@ -2154,6 +2163,12 @@ class Handler(BaseHTTPRequestHandler):
             # 剧本按名字找角色：同名角色会让后建的那个静默顶掉前一个，
             # 作者以为在改"雪峰"，实际合成用的是另一个人的音色。
             wanted = str(d["name"]).strip()
+            # 归属剧本必须真实存在：否则会建出谁也认领不了的孤儿角色，
+            # 角色库里只能显示成「已删剧本」
+            scope_id = str(d.get("script_id") or "").strip()
+            if scope_id and not any(s.get("id") == scope_id
+                                    for s in _load("scripts.json")):
+                return self._err("指定的剧本不存在")
             try:
                 speed = float(d.get("speed") or 1.0)
             except (TypeError, ValueError):
@@ -2173,14 +2188,21 @@ class Handler(BaseHTTPRequestHandler):
                 "speed": min(2.0, max(0.5, speed)),
                 "accent": str(d.get("accent") or "").strip(),
                 "defaults": d.get("defaults") or {"cfg_scale": 4, "seed": 42},
+                # 专属角色归属的剧本 id；空 = 全局角色。同名角色可以共存
+                # （不同剧本各一份），但同一个剧本/全局内不允许重名
+                "script_id": scope_id,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             # 查重放进 mutator：先查后写会让两个并发请求都通过检查，
             # 最后写进两条同名角色——正是这次要根治的问题。
             def _add(items, _role=role):
-                if any(str(r.get("name") or "").strip() == _role["name"] for r in items):
-                    raise _ValidationError(
-                        f"已经有同名角色「{_role['name']}」了，换一个名字，或直接编辑那个角色")
+                for r in items:
+                    if (str(r.get("name") or "").strip() == _role["name"]
+                            and str(r.get("script_id") or "") == _role["script_id"]):
+                        where = "这个剧本里" if _role["script_id"] else ""
+                        raise _ValidationError(
+                            f"{where}已经有同名角色「{_role['name']}」了，"
+                            "换一个名字，或直接编辑那个角色")
                 items.append(_role)
 
             try:
@@ -2629,9 +2651,12 @@ class Handler(BaseHTTPRequestHandler):
             def _apply(items, _rid=rid, _name=wanted):
                 for r in items:
                     if r["id"] == _rid:
-                        # 改名查重也放在锁内，否则两个并发改名都能通过
+                        same_scope = str(r.get("script_id") or "")
+                        # 改名查重也放在锁内，否则两个并发改名都能通过。
+                        # 只在同一个归属内比：别的剧本的「旁白」不该拦这次改名
                         if _name and any(x["id"] != _rid
                                          and str(x.get("name") or "").strip() == _name
+                                         and str(x.get("script_id") or "") == same_scope
                                          for x in items):
                             raise _ValidationError(f"已经有同名角色「{_name}」了")
                         for k in ("description", "voice_id", "defaults",
@@ -2705,7 +2730,18 @@ class Handler(BaseHTTPRequestHandler):
             res = _update_json("roles.json", _drop)
             if not res["hit"]:
                 return self._err("role not found", 404)
-            return self._json({"ok": True})
+            # 剧本 cast 里留着这个 id 会变成悬空引用：解析时找不到角色、
+            # 界面也不报错，用户只会觉得「这一行突然没声音了」
+            cleaned, warning = 0, ""
+            try:
+                from script_routes import drop_role_from_casts
+                cleaned = drop_role_from_casts(rid)
+            except Exception as exc:
+                # 角色已经删掉了，这里失败没法回滚；但要如实告诉用户
+                # 「剧本里的引用没清干净」，否则他只会在下次打开剧本时
+                # 看到某个角色莫名其妙消失了
+                warning = f"角色已删除，但清理剧本引用失败：{exc}"
+            return self._json({"ok": True, "cleaned": cleaned, "warning": warning})
         if path.startswith("/api/history/"):
             hid = path.rsplit("/", 1)[-1]
             items = _load("history.json")

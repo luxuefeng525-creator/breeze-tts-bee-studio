@@ -115,7 +115,11 @@
       u.searchParams.set("screen", name);
       history.replaceState(null, "", u);
     } catch (e) { /* 忽略 */ }
-    if (name === "library") renderLibrary();
+    if (name === "library") {
+      // 角色可能刚被「保存即自动配角」改过（新剧本会建专属角色），
+      // 进库先拉一次最新，否则角色卡上缺刚建的那几个
+      refreshRoles().then(renderLibrary);
+    }
     if (name === "clone") refreshCloneState();
     if (name === "script") {
       refreshScripts();
@@ -282,12 +286,17 @@
   function renderRoles() {
     const chips = $("roleChips");
     const label = $("roleGroupLabel");
-    if (!state.roles.length) {
+    // 工作台不隶属任何剧本，这里只列全局「人设」；剧本专属角色在各剧本的
+    // cast 里自动生效（去角色库看），不然几个剧本下来左栏会被同名角色淹没
+    const chipRoles = state.roles.filter((r) => !r.script_id);
+    // 这个计数就挂在工作台左栏「角色库」分组上，跟着 chips 走；
+    // 用全量数字会出现「说 12 个却只列出 6 个」
+    $("roleCount").textContent = `${chipRoles.length} 个`;
+    if (!chipRoles.length) {
       chips.hidden = true; label.hidden = true;
     } else {
       label.hidden = false; chips.hidden = false;
-      $("roleCount").textContent = `${state.roles.length} 个`;
-      chips.innerHTML = state.roles.map((r) => `
+      chips.innerHTML = chipRoles.map((r) => `
         <button class="role-chip${state.roleId === r.id ? " active" : ""}" type="button"
                 data-role="${esc(r.id)}" aria-pressed="${state.roleId === r.id}"
                 title="${esc(r.description || roleVoiceName(r.voice_id))}">
@@ -325,6 +334,9 @@
         </header>
         <div class="role-meta">
           <span>${esc((arch && arch.label) || "自定义")}</span>
+          ${r.script_id
+            ? `<span class="role-scope" title="只属于《${esc(r.script_title || "已删剧本")}》：改它不影响别的剧本">${esc(String(r.script_title || "已删剧本").slice(0, 8))}${String(r.script_title || "").length > 8 ? "…" : ""}</span>`
+            : ""}
           ${r.default_emotion ? `<span>默认 ${esc(r.default_emotion)}</span>` : ""}
           ${spd !== 1 ? `<span>语速 ×${spd.toFixed(2).replace(/0$/, "")}</span>` : ""}
           ${r.accent ? `<span>${esc(String(r.accent).slice(0, 12))}</span>` : ""}
@@ -438,12 +450,19 @@
   async function deleteRole(id) {
     const r = state.roles.find((x) => x.id === id);
     if (!r) return;
-    if (!confirm(`删除角色「${r.name}」？`)) return;
+    // 专属角色在剧本里是有归属的：说清删掉之后会发生什么，别让人以为
+    // 「角色没了剧本就报错」或者「剧本会静默换一个音色」都无所谓
+    const scope = r.script_title
+      ? `\n它只属于《${r.script_title}》；删除后若角色库里有同名角色，那个剧本会改用它，否则那一行会变成「未配」`
+      : "";
+    if (!confirm(`删除角色「${r.name}」？${scope}`)) return;
     try {
-      await api("/api/roles/" + id, { method: "DELETE" });
+      const res = await api("/api/roles/" + id, { method: "DELETE" });
       if (state.roleId === id) state.roleId = null;
       await refreshRoles();
-      toast("已删除");
+      if (res && res.warning) { toast(res.warning, true); return; }
+      const cleaned = Number((res && res.cleaned) || 0);
+      toast(cleaned ? `已删除，${cleaned} 个剧本的角色表已同步清理` : "已删除");
     } catch (err) { toast(err.message, true); }
   }
 
@@ -1140,7 +1159,12 @@
   }
 
   async function refreshRoles() {
-    state.roles = await api("/api/roles").catch(() => []);
+    try {
+      state.roles = await api("/api/roles");
+    } catch (e) {
+      // 拉取失败保留上一次的列表：清空会让工作台和角色库突然
+      // 变成「一个角色都没有」，用户会以为角色被删了
+    }
     renderRoles();
     syncVoiceReadiness();   // 保存/删除角色都会走这里，是唯一的收敛点
   }
@@ -2426,6 +2450,7 @@
       });
       const brief = (r.created || []).slice(0, 3)
         .map((c) => `${c.name}（${c.label}）`).join("、");
+      await refreshRoles();          // 新配的角色要立刻出现在角色库（专属角色不进工作台左栏）
       await openScript(S.current.id);
       toast(r.count
         ? `已配好 ${r.count} 个角色：${brief}${r.count > 3 ? " 等" : ""}${r.remaining ? `，还有 ${r.remaining} 处要修` : "，现在可以合成全剧了"}`

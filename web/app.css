@@ -518,6 +518,10 @@
   .role-meta span{
     border:1px solid var(--line);border-radius:999px;padding:1px 8px;background:var(--surface-2);
   }
+  /* 剧本专属角色：同名角色可以共存，不标出来用户分不清谁是谁 */
+  .role-meta span.role-scope{
+    color:var(--accent);background:var(--accent-soft);border-color:transparent;
+  }
 
   /* 窄屏把分镜折到下面，而不是藏起来——进度、报错、整轨播放器都在那一列 */
   @media (max-width:1280px){
