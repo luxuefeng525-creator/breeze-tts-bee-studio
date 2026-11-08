@@ -20,7 +20,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from urllib.request import Request, urlopen
 import http.client as _httpclient
 
@@ -72,12 +72,20 @@ def _resolve_audio(rel: str) -> Path | None:
     return target
 
 
-def _post_upstream(api_path: str, body: bytes, content_type: str, timeout: int = 600):
-    """POST 到推理 API，返回 (status, body, ctype)。错误已翻译成人话。"""
+def _post_upstream(api_path: str, body: bytes, content_type: str, timeout: int = 600,
+                   headers_out: dict | None = None):
+    """POST 到推理 API，返回 (status, body, ctype)。错误已翻译成人话。
+
+    headers_out 非空时把上游响应头写入该字典。Qwen 适配层用
+    X-Adapter-Note 说明静默降级（例如克隆音色忽略指令），必须让 UI 看见，
+    而不是像早期版本那样只取 body 就把头丢掉。
+    """
     req = Request(API_BASE + api_path, data=body, method="POST")
     req.add_header("Content-Type", content_type)
     try:
         with urlopen(req, timeout=timeout) as resp:
+            if headers_out is not None:
+                headers_out.update({k: resp.headers.get(k) for k in resp.headers.keys()})
             return resp.status, resp.read(), resp.headers.get("Content-Type",
                                                               "application/octet-stream")
     except HTTPError as e:
@@ -94,17 +102,24 @@ def _post_upstream(api_path: str, body: bytes, content_type: str, timeout: int =
 
 
 def _post_with_retry(api_path: str, body: bytes, content_type: str,
-                     timeout: int = 600) -> tuple[int, bytes]:
+                     timeout: int = 600,
+                     headers_out: dict | None = None) -> tuple[int, bytes]:
     """排队 + 409 自动重试。剧本逐行合成也要走这里，否则会跟单条请求撞车。"""
     code, raw = 502, b"{}"
     with _INFER_LOCK:
         for attempt in range(60):
-            code, raw, _ct = _post_upstream(api_path, body, content_type, timeout)
+            code, raw, _ct = _post_upstream(api_path, body, content_type,
+                                            timeout, headers_out)
             if code != 409:
                 return code, raw
             if attempt < 59:
                 time.sleep(3.0)
     return code, raw
+
+
+def _engine_note(headers: dict) -> str:
+    """还原上游 percent-encode 过的降级说明（HTTP 头不支持非 latin-1 字符）。"""
+    return unquote(headers.get("X-Adapter-Note", "") or "")
 
 
 def _safe_int(value, default: int) -> int:
@@ -890,6 +905,29 @@ PAGE = r"""<!DOCTYPE html>
           <input id="maxTokens" type="number" min="50" max="1500" step="50" value="600"></div>
       </div>
 
+      <div class="row" style="margin-top:4px">
+        <div><label for="langSel">文本语种</label>
+          <select id="langSel">
+            <option value="">Auto 自动识别（推荐）</option>
+            <option value="Chinese">中文</option>
+            <option value="English">English</option>
+            <option value="Japanese">日本語</option>
+            <option value="Korean">한국어</option>
+            <option value="German">Deutsch</option>
+            <option value="French">Français</option>
+            <option value="Russian">Русский</option>
+            <option value="Portuguese">Português</option>
+            <option value="Spanish">Español</option>
+            <option value="Italian">Italiano</option>
+          </select></div>
+        <div><label for="instructPolicySel">克隆音色遇到情绪 / 方言指令时</label>
+          <select id="instructPolicySel">
+            <option value="voice">保留克隆音色（指令不生效）</option>
+            <option value="instruct">让指令生效（改用原生预设音色）</option>
+          </select>
+          <div class="hint">Qwen3-TTS 的克隆模型不接受指令；选「让指令生效」会换用 CustomVoice 预设音色承载方言与情绪。</div></div>
+      </div>
+
       <div class="player" id="playerBox">
         <button class="btn btn-cta" id="synthBtn" onclick="synthesize()">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -905,6 +943,7 @@ PAGE = r"""<!DOCTYPE html>
       <div class="progress-track" id="progTrack" style="display:none"><div class="bar" id="progBar" style="animation:none;width:0%"></div></div>
       <div class="hint" id="segProgress"></div>
       <div class="hint" id="lastInstrWrap" style="display:none">本次指令：<span class="mono" id="lastInstr"></span></div>
+      <div class="hint" id="engineNoteWrap" style="display:none;color:var(--warn,#b8860b)">引擎提示：<span id="engineNote"></span></div>
 
       <div class="player-box" id="playerBoxWrap" style="display:none">
         <audio id="player" controls></audio>
@@ -994,7 +1033,7 @@ const state = {
   lastWavUrl: null, lastWavName: null, refFile: null,
   accent: "", accentLabel: "", histOffset: 0,
   emotion: "", emotionLabel: "", segPlaying: 0,
-  segDefs: [], segFiles: [], failedIdx: [],
+  segDefs: [], segFiles: [], failedIdx: [], engineNote: "",
 };
 
 const TYPE_LABEL = { design:"设计", clone:"克隆", direction:"导向" };
@@ -1468,8 +1507,13 @@ async function runSegments(idxs, segs, segFiles, t0) {
       fd.append("cfg_scale", $("cfgScale").value || 4);
       fd.append("seed", $("seed").value || 42);
       fd.append("speed", $("speedSel").value || 1);
+      const _lang = $("langSel").value || "";
+      if (_lang) fd.append("language", _lang);
+      const _policy = $("instructPolicySel").value || "voice";
+      if (_policy && _policy !== "voice") fd.append("instruct_policy", _policy);
       if (n > 1) fd.append("no_history", "1");
       const res = await api("/api/synthesize", { method: "POST", body: fd });
+      if (res.engine_note) state.engineNote = res.engine_note;
       segFiles[i] = (res.wav_url || "").split("/").pop();
       const player = $("player");
       const idle = player.paused || player.ended || !player.src;
@@ -1503,6 +1547,7 @@ async function synthesize() {
   state.segDefs = segs;
   state.segFiles = new Array(segs.length).fill(null);
   state.failedIdx = [];
+  state.engineNote = "";
 
   const chars = text.replace(/\s/g, "").length;
   const est = estimateSeconds(chars);
@@ -1581,6 +1626,13 @@ async function synthesize() {
     const insEl = $("lastInstr");
     insEl.textContent = extraInstruction() || "（无指令：默认/纯克隆音色）";
     $("lastInstrWrap").style.display = "";
+    const noteEl = $("engineNoteWrap");
+    if (state.engineNote) {
+      $("engineNote").textContent = state.engineNote;
+      noteEl.style.display = "";
+    } else {
+      noteEl.style.display = "none";
+    }
     await refreshHistory();
   } catch (e) {
     setStatus("合成失败：" + friendlyErr(e.message), "err");
@@ -1780,6 +1832,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("X-Sample-Rate", resp.getheader("X-Sample-Rate", "24000"))
             self.send_header("X-Sample-Format", resp.getheader("X-Sample-Format", "s16le"))
+            _note = resp.getheader("X-Adapter-Note", "")
+            if _note:
+                # 降级原因必须能到前端，不能像早期版本那样静默吞掉
+                self.send_header("X-Adapter-Note", _note)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
@@ -1826,9 +1882,10 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
-    def _infer_with_retry(self, api_path: str, body: bytes, content_type: str, timeout: int = 600):
+    def _infer_with_retry(self, api_path: str, body: bytes, content_type: str,
+                          timeout: int = 600, headers_out: dict | None = None):
         """上游单并发：锁内排队 + 409 撞车自动重试（跨进程/外部客户端撞车也能消化）。"""
-        return _post_with_retry(api_path, body, content_type, timeout)
+        return _post_with_retry(api_path, body, content_type, timeout, headers_out)
 
     def log_message(self, fmt: str, *args) -> None:  # 安静日志
         pass
@@ -2220,6 +2277,12 @@ class Handler(BaseHTTPRequestHandler):
                 "cfg_scale": fields.get("cfg_scale", "4"),
                 "seed": fields.get("seed", "42"),
             }
+            # Qwen 适配层新增字段：显式语种、原生预设音色、克隆/指令冲突策略。
+            # 留空时上游分别回落到 Auto / 自动推断 / 保音色，旧前端零改动可用。
+            for _k in ("language", "speaker", "instruct_policy"):
+                _v = (fields.get(_k) or "").strip()
+                if _v:
+                    api_fields[_k] = _v
             # W2-3c: 文本规范化 + 发音词典（norm=2）——此前这条路径漏了接线，
             # 导致 norm=2 只在预览和流式端点生效。
             _scope = fields.get("voice_id", "") or ""
@@ -2295,8 +2358,11 @@ class Handler(BaseHTTPRequestHandler):
                 api_fields["cfg_scale"] = "1"
                 cfg_used = "1"
             # 重新封 multipart 发给 7860（上游单并发，加锁排队 + 409 自动重试）
+            # 取回上游响应头：X-Adapter-Note 承载静默降级原因，必须回显给 UI。
             out_body, out_ctype = _remultipart(api_fields, files)
-            code, raw = self._infer_with_retry("/v1/audio/speech", out_body, out_ctype)
+            _up_hdrs: dict = {}
+            code, raw = self._infer_with_retry("/v1/audio/speech", out_body, out_ctype,
+                                               headers_out=_up_hdrs)
             if code != 200:
                 try:
                     self.send_response(code)
@@ -2338,6 +2404,9 @@ class Handler(BaseHTTPRequestHandler):
                 "duration": len(raw) / (SAMPLE_RATE * 2),
                 "cfg_used": _safe_int(cfg_used, 1),
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
+                "text_used": api_fields.get("text", ""),
+                "engine_note": _engine_note(_up_hdrs),
+                "engine_route": _up_hdrs.get("X-Adapter-Route", ""),
             })
             return
 
@@ -2363,6 +2432,10 @@ class Handler(BaseHTTPRequestHandler):
                 "seed": fields.get("seed", "42"),
                 "max_new_tokens": fields.get("max_new_tokens", "600"),
             }
+            for _k in ("language", "speaker", "instruct_policy"):
+                _v = (fields.get(_k) or "").strip()
+                if _v:
+                    api_fields[_k] = _v
             voices = {v["id"]: v for v in _load("voices.json")}
             roles = {r["id"]: r for r in _load("roles.json")}
             role = roles.get(fields.get("role_id", ""))
@@ -2420,7 +2493,9 @@ class Handler(BaseHTTPRequestHandler):
                 api_fields["cfg_scale"] = "1"
                 cfg_used = "1"
             out_body, out_ctype = _remultipart(api_fields, files)
-            code, raw = self._infer_with_retry("/v1/audio/speech/batch", out_body, out_ctype)
+            _up_hdrs: dict = {}
+            code, raw = self._infer_with_retry("/v1/audio/speech/batch", out_body, out_ctype,
+                                               headers_out=_up_hdrs)
             if code != 200:
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -2451,6 +2526,8 @@ class Handler(BaseHTTPRequestHandler):
                 "count": len(texts),
                 "cfg_used": _safe_int(cfg_used, 1),
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
+                "engine_note": _engine_note(_up_hdrs),
+                "engine_route": _up_hdrs.get("X-Adapter-Route", ""),
             })
             return
 
