@@ -78,9 +78,17 @@ def sha1(p: Path) -> str:
     return hashlib.sha1(p.read_bytes()).hexdigest()
 
 
+def _voice_ids() -> set:
+    _, d = jget("/api/voices")
+    return {v["id"] for v in (d or [])}
+
+
 def main() -> int:
     user_wav = DATA_DIR / "audio" / "scripts" / USER_SCRIPT_ID / "full.wav"
     user_before = sha1(user_wav) if user_wav.is_file() else ""
+    # 记录开工前的音色：E2E 的自动配角会新建音色，剧本删了但音色会留下
+    # （上一轮跑完就多出「母亲的声音」「父亲的声音」这种垃圾）
+    voices_before = _voice_ids()
 
     # ---------------------------------------------------------------- 情绪延续
     s1 = make_script("E2E 情绪延续", "## 客厅\n母亲[愤怒]：你怎么又回来了。\n父亲：我回来看看。")
@@ -157,6 +165,17 @@ def main() -> int:
                 S.delete(BASE + path, timeout=60)
             except Exception as exc:            # noqa: BLE001
                 print(f"清理 {path} 失败：{exc}", flush=True)
+    # 清理自动配角新建的音色：只删本次新增的，且没有角色还在引用
+    _, roles = jget("/api/roles")
+    used = {r.get("voice_id") for r in (roles or [])}
+    for vid in sorted(_voice_ids() - voices_before):
+        if vid in used:
+            continue
+        try:
+            S.delete(BASE + f"/api/voices/{vid}", timeout=60)
+            print(f"清理新建音色 {vid}", flush=True)
+        except Exception as exc:            # noqa: BLE001
+            print(f"清理音色 {vid} 失败：{exc}", flush=True)
     if USER_SCRIPT_ID and user_before:
         user_after = sha1(user_wav) if user_wav.is_file() else ""
         check("用户真实剧本未被改动", user_before == user_after, user_before[:12])
