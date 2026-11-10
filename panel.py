@@ -303,25 +303,67 @@ def _apply_text_pipeline(text: str, norm_flag: str, scope: str = "global"):
                 changes.append({"before": h.get("original", ""),
                                 "after": h.get("replacement", ""),
                                 "kind": "dict-" + h.get("kind", "replace")})
-    except Exception:
-        pass
+    except Exception as exc:
+        # 词典失败原来被静默吞掉：用户专门为纠音维护的词表不生效，
+        # 他只会听到错的读音，界面上毫无提示。同一函数里 normalize 的失败
+        # 是写进 changes 的，这里照同样的口径处理。
+        changes.append({"before": "", "after": "",
+                        "kind": "dict-failed", "error": str(exc)[:120]})
     return out, changes
 
 
 # ---------- 持久化（W2-4: 原子写 + 损坏恢复） ----------
+# 损坏且无法恢复的文件：写保护名单。
+# 以前 _load 解析失败就返回 []，于是「界面上什么都没有」；而下一次任意写入
+# 会把这个空列表落盘，把用户全部数据覆盖掉——这才是最致命的一步。
+# 现在：先留证据（.corrupt）→ 尝试从 .bak 恢复 → 恢复不了就禁止写入该文件。
+_DATA_CORRUPT: set[str] = set()
+
+
+class _DataCorrupt(RuntimeError):
+    """状态文件损坏且没有可用备份：必须让调用方知道。"""
+
+
+def _log(msg: str) -> None:
+    """写一行带时间戳的日志到 stderr（面板的 stdout 是 HTTP 响应体，不能用）。"""
+    import sys
+    import time as _t
+    try:
+        sys.stderr.write(f"[{_t.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _load(name: str) -> list:
     p = DATA / name
     if p.exists():
         try:
             return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as exc:
             # R1: 损坏时保留备份，不静默丢弃
             import shutil
-            backup = p.with_suffix(".json.corrupt")
+            corrupt = p.with_suffix(p.suffix + ".corrupt")
             try:
-                shutil.copy2(p, backup)
+                shutil.copy2(p, corrupt)
             except Exception:
                 pass
+            # 新增：能从上一版 .bak 恢复就直接恢复，用户无感
+            bak = p.with_suffix(p.suffix + ".bak")
+            if bak.is_file():
+                try:
+                    data = json.loads(bak.read_text(encoding="utf-8"))
+                    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+                    _DATA_CORRUPT.discard(name)
+                    _log(f"[data] {name} 损坏，已从 {bak.name} 恢复：{exc}")
+                    return data
+                except Exception:
+                    pass
+            # 恢复不了：标记写保护，别让下一次写入把原始数据盖掉
+            _DATA_CORRUPT.add(name)
+            _log(f"[data] {name} 损坏且无可用备份（{exc}）；"
+                 "已保留 .corrupt 副本并禁止写入该文件")
             return []
     return []
 
@@ -329,6 +371,17 @@ def _load(name: str) -> list:
 def _save(name: str, items: list) -> None:
     with _LOCK:
         target = DATA / name
+        if name in _DATA_CORRUPT:
+            # 损坏且没有备份：宁可不写，也不把空数据盖回用户的文件上
+            raise _DataCorrupt(
+                f"{name} 已损坏且没有可用备份，为避免覆盖原始数据已拒绝写入")
+        # 写前留一份上一版：写坏了还能回滚（只保留一份，够应急）
+        if target.is_file():
+            try:
+                import shutil
+                shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+            except Exception:
+                pass
         tmp = target.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -437,6 +490,23 @@ class _file_lock:
         return False
 
 
+HISTORY_LIMIT = 200   # 历史保留条数上限（只增不减的数组会让每次写入重写整个文件）
+
+
+def _append_history(item: dict) -> list:
+    """追加一条历史，并裁掉超出上限的老条目。
+
+    history.json 原来只增不减：每合成一条都要全量读-改-写整个数组
+    （139 条就是 51 KB，几千条时每次写 1.8 MB，写放大是 O(N²)）。
+    留最近 200 条足够回看，超出的从记录里去掉（音频文件本身仍留在磁盘上）。
+    """
+    def _mut(items):
+        items.append(item)
+        if len(items) > HISTORY_LIMIT:
+            del items[:len(items) - HISTORY_LIMIT]
+    return _update_json("history.json", _mut)
+
+
 def _update_json(name: str, mutator) -> list:
     """读-改-写原子操作（R2 修复）：进程内锁 + 跨进程文件锁，整个 RMW 不被打断。
 
@@ -447,7 +517,14 @@ def _update_json(name: str, mutator) -> list:
         with _file_lock(name):
             items = _load(name)
             result = mutator(items)
-            _save(name, items)  # _LOCK 是 RLock，这里重入安全；写盘只在 _save 一处
+            try:
+                _save(name, items)  # _LOCK 是 RLock，这里重入安全；写盘只在 _save 一处
+            except _DataCorrupt as exc:
+                # 数据文件坏了：拒绝写入，但不能把异常抛到 socket 层
+                # （那会让浏览器看到连接被掐断，而不是一条能读懂的错误）。
+                # 原文件仍在磁盘上（.corrupt 副本也在），用户可以手动救。
+                _log(f"[data] 写入被拒绝：{exc}")
+                raise
             return result if result is not None else items
 
 
@@ -1856,7 +1933,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Cache-Control", "max-age=3600")
+        # 音频原来给的是 max-age=3600：同一行的文件名（line_001.wav）在重录后
+        # 不变，浏览器一小时内会继续播旧音频——用户听到的还是上一版。
+        # 改成 no-cache：每次都问一次服务器，本地网络开销可以忽略。
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -1967,6 +2047,26 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:  # 安静日志
         pass
 
+    def handle_one_request(self) -> None:
+        """状态文件损坏时给一条能读懂的 500，而不是把连接掐断。
+
+        以前 _save 抛错会一路冒到 socket 层，浏览器只看到「Failed to fetch」，
+        用户完全不知道发生了什么。现在返回 JSON 错误，前端能弹出来。
+        """
+        try:
+            super().handle_one_request()
+        except _DataCorrupt as exc:
+            _log(f"[http] 数据文件损坏，写入被拒绝：{exc}")
+            try:
+                body = json.dumps({"detail": str(exc)}).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+
     # ---- GET ----
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -2035,6 +2135,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(json.loads(resp.read()))
             except Exception as e:
                 self._err(f"API 7860 不可达: {e}", 502)
+            return
+        if path == "/api/status":
+            # 运维可见性：现在「在跑什么、排队几个、引擎在不在、数据文件坏没坏」
+            # 全都要靠猜。这个端点一次给全，故障排查时先看它。
+            self._json(_status_snapshot())
             return
         if path.startswith("/api/audio/"):
             target = _resolve_audio(path[len("/api/audio/"):])   # 模块级函数，不是方法
@@ -2547,20 +2652,17 @@ class Handler(BaseHTTPRequestHandler):
             fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{hid}.wav"
             (AUDIOS / fname).write_bytes(wav)
             if (fields.get("no_history") or "") != "1":
-                def _append_hist(items, _row=None):
-                    items.append({
-                        "id": hid,
-                        "role_id": fields.get("role_id"),
-                        "voice_id": vid,
-                        "text": text,
-                        "params": {"cfg_scale": api_fields.get("cfg_scale"),
-                                   "seed": api_fields.get("seed")},
-                        "wav": f"audio/{fname}",
-                        "duration": len(raw) / (SAMPLE_RATE * 2),
-                        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    })
-                    return items
-                _update_json("history.json", _append_hist)
+                _append_history({
+                    "id": hid,
+                    "role_id": fields.get("role_id"),
+                    "voice_id": vid,
+                    "text": text,
+                    "params": {"cfg_scale": api_fields.get("cfg_scale"),
+                               "seed": api_fields.get("seed")},
+                    "wav": f"audio/{fname}",
+                    "duration": len(raw) / (SAMPLE_RATE * 2),
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
             self._json({
                 "id": hid,
                 "wav_url": f"/api/audio/{fname}",
@@ -2671,7 +2773,7 @@ class Handler(BaseHTTPRequestHandler):
             hid = _new_id("h")
             fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{hid}_batch.wav"
             (AUDIOS / fname).write_bytes(wav)
-            _update_json("history.json", lambda it: it.append({
+            _append_history({
                 "id": hid,
                 "role_id": fields.get("role_id"),
                 "voice_id": vid,
@@ -2680,7 +2782,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wav": f"audio/{fname}",
                 "duration": len(raw) / (SAMPLE_RATE * 2),
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }))
+            })
             self._json({
                 "id": hid,
                 "wav_url": f"/api/audio/{fname}",
@@ -2729,7 +2831,7 @@ class Handler(BaseHTTPRequestHandler):
             fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{hid}_merged.wav"
             (AUDIOS / fname).write_bytes(wav)
             dur = len(pcm) / (SAMPLE_RATE * 2)
-            _update_json("history.json", lambda it: it.append({
+            _append_history({
                 "id": hid,
                 "role_id": d.get("role_id"),
                 "voice_id": d.get("voice_id"),
@@ -2738,7 +2840,7 @@ class Handler(BaseHTTPRequestHandler):
                 "wav": f"audio/{fname}",
                 "duration": dur,
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }))
+            })
             self._json({"id": hid, "wav_url": f"/api/audio/{fname}", "duration": dur, "segments": len(fnames)})
             return
 
@@ -2938,6 +3040,68 @@ def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         return s.connect_ex((host, port)) == 0
 
 
+def _status_snapshot() -> dict:
+    """运维快照：引擎、任务、队列、数据文件健康度，一次给全。
+
+    以前这些信息散在各处（引擎在 7860 的 /v1/model、任务在 script_routes
+    的内存字典里、数据文件健康只在写失败时才知道），排障时只能靠猜。
+    """
+    snap: dict = {"panel_port": PANEL_PORT, "engine": {}, "jobs": [],
+                  "queue": 0, "data_files": {}, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    # 引擎（7860）
+    try:
+        with urlopen(API_BASE + "/v1/model", timeout=5) as resp:
+            snap["engine"] = json.loads(resp.read())
+            snap["engine"]["reachable"] = True
+    except Exception as e:
+        snap["engine"] = {"reachable": False, "error": str(e)[:200]}
+    # 任务与队列（内存态，面板重启即失）
+    try:
+        from script_routes import _JOBS, _JOB_QUEUE, _JOBS_LOCK, _job_view
+        with _JOBS_LOCK:
+            snap["jobs"] = [
+                {k: v for k, v in _job_view(j).items() if k != "rows"}
+                for j in _JOBS.values()
+            ]
+            snap["queue"] = len(_JOB_QUEUE)
+    except Exception as e:
+        snap["jobs_error"] = str(e)[:200]
+    # 数据文件健康
+    for name in ("scripts.json", "roles.json", "voices.json",
+                 "history.json", "assets.json"):
+        p = DATA / name
+        info = {"exists": p.is_file()}
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                info["count"] = len(data) if isinstance(data, list) else -1
+                info["ok"] = True
+            except Exception as e:
+                info["ok"] = False
+                info["error"] = str(e)[:120]
+        info["corrupt"] = name in _DATA_CORRUPT
+        snap["data_files"][name] = info
+    return snap
+
+
+def _startup_selfcheck() -> None:
+    """启动时校验状态文件：坏了就从 .bak 恢复，实在不行明确报出来。
+
+    不校验的话，一个损坏的 scripts.json 会让面板「正常启动但空空如也」，
+    用户以为剧本没了，实际是文件坏了——而旧逻辑下一次写入还会把空数据盖回去。
+    """
+    for name in ("scripts.json", "roles.json", "voices.json",
+                 "history.json", "assets.json"):
+        p = DATA / name
+        if not p.is_file():
+            continue
+        try:
+            json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _log(f"[data] 启动自愈：{name} 损坏（{exc}）")
+            _load(name)   # _load 会尝试从 .bak 恢复，并标记写保护
+
+
 def main() -> None:
     if _port_in_use(PANEL_PORT):
         # 已有实例在服务就别再起一个：端口是本工作区的唯一口径，
@@ -2945,6 +3109,7 @@ def main() -> None:
         print(f"BreezeTTS Studio panel: 端口 {PANEL_PORT} 已被占用，"
               "已有实例在服务，本次不重复启动", flush=True)
         raise SystemExit(0)
+    _startup_selfcheck()
     server = ThreadingHTTPServer(("0.0.0.0", PANEL_PORT), Handler)
     print(f"BreezeTTS Studio panel: http://127.0.0.1:{PANEL_PORT}  (proxy -> {API_BASE}, port locked)", flush=True)
     server.serve_forever()

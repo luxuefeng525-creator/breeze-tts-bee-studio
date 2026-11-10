@@ -2644,6 +2644,8 @@
             renderSceneMoods();
           }
         }
+        if (d.cast_error) toast(d.cast_error, true);
+        if (d.concat_error) toast(d.concat_error, true);
         if (!quiet) toast("已保存");
         refreshScripts();
         return true;
@@ -2907,9 +2909,12 @@
         S.lines = d.lines || S.lines;
         renderLines(d);
       }
+      if (d.cast_error) toast(d.cast_error, true);
+      if (d.concat_error) toast(d.concat_error, true);
       if (!next) toast("已取消抢话");
       else if (idx === 0) toast("第一行本来就是从 0 秒开始，抢话对它不生效", true);
       else if (!d.full_wav) toast(`下一句会提前 ${next} 秒开始（合成整轨时生效）`);
+      else if (d.concat_error) toast("提前量已保存，但整轨重拼失败：时间轴与音频暂时对不上，请重新合成", true);
       else toast(`这一句提前 ${next} 秒开始，整轨已重拼`);
     } catch (e) { toast(e.message, true); }
   }

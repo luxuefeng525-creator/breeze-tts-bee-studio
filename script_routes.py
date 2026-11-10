@@ -14,6 +14,7 @@ import csv
 import hashlib
 import io
 import json
+import sys
 import threading
 import time
 import uuid
@@ -38,6 +39,22 @@ MAX_LINES = 100          # 一批合成多少行（8 GB 卡约 20-30 分钟一�
 HARD_MAX_LINES = 300     # 剧本总行数上限：再大就先分剧，别把一张卡跑满
 MAX_TAKES = 8            # 单行最多留几版；超出后覆盖最旧一版（不删文件、不无限涨盘）
 DEFAULT_GAP = 0.35
+
+
+def _log(tag: str, msg: str) -> None:
+    """写一行带时间戳的日志到 stderr。
+
+    stderr 会被 `ops/run-panel.bat` 重定向进 `ops/logs/panel-api.log`，
+    这样「刚才那次为什么失败」事后能 grep 到。写 stdout 会被 HTTP 响应
+    污染（面板的响应体是 JSON），不能用。
+    """
+    try:
+        sys.stderr.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                         f"[{tag}] {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
 DEFAULT_CFG = 4.0
 DEFAULT_SCENE_GAIN = 0.35   # 场次铺底默认音量（线性幅度，0–1）
 DUCK_DB = -12.0             # 人声段铺底压低的分贝数
@@ -154,7 +171,10 @@ def _sync_cast(script: dict, roles: dict | None = None, parsed=None) -> dict:
     roles = _roles_for(script) if roles is None else roles
     try:
         parsed = parsed if parsed is not None else parse_for(script, roles)
-    except Exception:
+    except Exception as exc:
+        # 解析失败就静默不认领 cast 的话，用户只会看到「未知角色」，
+        # 却不知道自己写错了什么。至少把原因记下来。
+        _log("sync_cast", f"script={script.get('id')} 解析失败：{exc}")
         return script
 
     ids: list[str] = []
@@ -665,13 +685,27 @@ def _job_view(job: dict) -> dict:
 
 
 def _prune_jobs() -> None:
-    """清掉结束超过 10 分钟的任务。_JOBS 只增不删会随使用时间单调涨内存。"""
+    """清掉结束超过 10 分钟的任务。_JOBS 只增不删会随使用时间单调涨内存。
+
+    **只清真正结束过的任务**：排队中的任务还没有 finished_at，用
+    `v.get("finished_at", 0) < cutoff` 会把它当成「1970 年就结束了」直接删掉——
+    而它的 id 还留在 _JOB_QUEUE 里，于是它永远不会被执行，前端只能拿到
+    404「任务不存在」。这是真实踩过的坑：单槽设计下「A 在跑、B 排队、
+    再提交 C 触发清理」就会把 B 吞掉。
+    """
     cutoff = time.time() - 600
     with _JOBS_LOCK:
-        for jid in [k for k, v in _JOBS.items()
-                    if v["state"] != "running"
-                    and v.get("finished_at", 0) < cutoff]:
+        dead = [k for k, v in _JOBS.items()
+                if v["state"] != "running"
+                and v.get("finished_at")
+                and v["finished_at"] < cutoff]
+        for jid in dead:
             _JOBS.pop(jid, None)
+        # 队列里指向已消失任务的悬空 id 一并清掉，避免 _pump_queue 空转
+        if _JOB_QUEUE:
+            for jid in list(_JOB_QUEUE):
+                if jid not in _JOBS:
+                    _JOB_QUEUE.remove(jid)
 
 
 def _batches(rows: list[dict], size: int):
@@ -711,14 +745,16 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
                     job["state"] = "stopped"
                     return
                 idx = row["idx"]
-                job["current"] = idx
-                job["rows"][idx]["state"] = "running"
+                with _JOBS_LOCK:
+                    job["current"] = idx
+                    job["rows"][idx]["state"] = "running"
 
                 role = roles.get(row["role_name"])
                 if role is None:
                     # 未知角色在启动前已被拦下，这里是兜底：按行失败，不影响其他行
-                    job["rows"][idx].update(state="failed", error="未知角色")
-                    job["failed"] += 1
+                    with _JOBS_LOCK:
+                        job["rows"][idx].update(state="failed", error="未知角色")
+                        job["failed"] += 1
                     continue
 
                 name = f"line_{idx:03d}.wav"
@@ -737,15 +773,20 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
                     dur, err, note = 0.0, f"{type(exc).__name__}: {exc}"[:200], ""
 
                 job.setdefault("durs", []).append(time.time() - t_line)
-                if err:
-                    job["rows"][idx].update(state="failed", error=err)
-                    job["failed"] += 1
-                else:
-                    rel = f"audio/scripts/{script_id}/{name}"
-                    job["rows"][idx].update(state="done", wav=rel,
-                                            duration=round(dur, 3), error="",
-                                            engine_note=note)
-                    job["done"] += 1
+                # 状态改动一律在锁内做：`job["done"] += 1` 是读-改-写，
+                # 不加锁时前端轮询可能正好读到中间值，进度条偶尔差一行。
+                # 临界区里绝不放 IO（_persist_take 在锁外）。
+                with _JOBS_LOCK:
+                    if err:
+                        job["rows"][idx].update(state="failed", error=err)
+                        job["failed"] += 1
+                    else:
+                        rel = f"audio/scripts/{script_id}/{name}"
+                        job["rows"][idx].update(state="done", wav=rel,
+                                                duration=round(dur, 3), error="",
+                                                engine_note=note)
+                        job["done"] += 1
+                if not err:
                     # 整剧合成落的是「新内容的第 1 版」：顺手清掉旧内容的版本，
                     # 不然换完台词还能切回上一版的音频，文不对音
                     _persist_take(script_id, idx, row, 1, dur, rel, reset=True)
@@ -767,8 +808,11 @@ def _run_job(job: dict, script_id: str, rows: list[dict], gap: float) -> None:
         try:
             job["mix_error"] = "" if job.get("concat_error") else str(
                 (_find(script_id) or {}).get("mix_error") or "")
-        except Exception:
-            job["mix_error"] = ""
+        except Exception as exc:
+            # 这里原来把混音错误清空：用户拿到一个没有混音的成片，
+            # 界面上却什么都看不到。宁可显示「读不到混音状态」。
+            job["mix_error"] = f"读取混音状态失败：{type(exc).__name__}"
+            _log("mix", f"script={script_id} 读取混音状态失败：{exc}")
         # 拼接（与混音）都落盘之后才报完成：前端看到 done 就能直接下载
         if job["state"] == "running":
             job["state"] = "done"
@@ -1492,12 +1536,15 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
     # ---- 任务状态 ----
     if method == "GET" and path.startswith("/api/scripts/jobs/"):
         job_id = path.rsplit("/", 1)[-1]
+        # 快照必须在锁内取：worker 正在改 done/failed/rows，
+        # 锁外读会拿到读-改-写中间态，进度条偶尔差一行
         with _JOBS_LOCK:
             job = _JOBS.get(job_id)
-        if not job:
+            view = _job_view(job) if job else None
+        if not job or view is None:
             h._err("任务不存在或已结束", 404)
             return True
-        h._json(_job_view(job))
+        h._json(view)
         return True
 
     if method == "POST" and path.startswith("/api/scripts/jobs/") and path.endswith("/stop"):
@@ -1880,16 +1927,23 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
             "updated_at": now,
         }
         P._update_json("scripts.json", lambda it: it.append(script))
+        cast_error = ""
         if script["auto_cast"]:
             # 自动配角失败不该让「新建剧本」失败：原文已经落盘，
-            # 用户还能点界面上的补齐按钮兜底
+            # 用户还能点界面上的补齐按钮兜底。
+            # 但不能一声不响：否则用户拿到一个「没角色、没音色」的剧本，
+            # 界面显示「未知角色」，却不知道自己触发了什么错。
             try:
                 _apply_cast(script["id"])
-            except Exception:
-                pass
+            except Exception as exc:
+                cast_error = f"自动配角失败：{type(exc).__name__}: {exc}"[:200]
+                _log("cast", f"script={script['id']} 新建剧本自动配角失败：{exc}")
         # 回读一次再返回：auto_cast 刚写进去的 cast 与角色要能被调用方看到，
         # 否则 201 里永远是空的 cast，前端只能再发一次 GET
-        h._json(_find(script["id"]) or script, 201)
+        payload = _find(script["id"]) or script
+        if cast_error:
+            payload = {**payload, "cast_error": cast_error}
+        h._json(payload, 201)
         return True
 
     if method == "PUT" and path.startswith("/api/scripts/") and path.count("/") == 3:
@@ -1975,21 +2029,34 @@ def handle(h, method: str, path: str, body: bytes, ctype: str) -> bool:
         P._update_json("scripts.json", _mut)
         # 台词变了就顺手把新出现的角色配好：作者不需要再点任何按钮，
         # 返回的 lines/errors 直接就是配完后的状态。
+        cast_error = ""
         if "raw" in d and script.get("auto_cast", True):
             try:
                 _apply_cast(sid)
-            except Exception:
-                pass
+            except Exception as exc:
+                # 用户刚存的台词对应的角色没建出来，却收到 200，
+                # 界面只显示「角色没配好」红字，没人知道原因。
+                cast_error = f"自动配角失败：{type(exc).__name__}: {exc}"[:200]
+                _log("cast", f"script={sid} 保存后自动配角失败：{exc}")
         # 提前量只改时间轴，不用重新合成：直接重拼整轨与混音。
         # 不重拼的话界面上的时间轴和实际整轨会对不上。
+        concat_error = ""
         if _lead_map(script) != before_lead and (script.get("full_wav") or ""):
             try:
                 _concat(sid, float(script.get("gap") or 0.35))
-            except Exception:
-                pass
+            except Exception as exc:
+                # 静默吞掉会让 line_lead 与磁盘上的整轨对不上，
+                # 前端还在 toast「整轨已重拼」——界面在撒谎。
+                concat_error = f"整轨重拼失败：{type(exc).__name__}: {exc}"[:200]
+                _log("concat", f"script={sid} 抢话后重拼整轨失败：{exc}")
         fresh = _find(sid) or script
         parsed = parse_for(fresh)
-        h._json({**fresh, "lines": _enriched(fresh, parsed), "errors": parsed.errors})
+        out = {**fresh, "lines": _enriched(fresh, parsed), "errors": parsed.errors}
+        if cast_error:
+            out["cast_error"] = cast_error
+        if concat_error:
+            out["concat_error"] = concat_error
+        h._json(out)
         return True
 
     if method == "DELETE" and path.startswith("/api/scripts/") and path.count("/") == 3:
