@@ -9,6 +9,9 @@
    写好之后模板从没输出 `data-type`，克隆音色的高亮就这么静默失效了几个月。
 3. JS 里 `$("id")` / `getElementById("id")` 取的 id 必须在 index.html 里存在——
    拼错一个字母的表现是「点了没反应」，很难从代码里看出来。
+4. 两份 CSS（styles.css / app.css）之间不能有「同名选择器 + 同名属性 + 不同值」的
+   冲突——谁生效取决于 `<link>` 的加载顺序，历史上 `.voice-card{height:200px}`
+   就是这样被 app.css 悄悄盖掉的。
 """
 from __future__ import annotations
 
@@ -61,3 +64,10 @@ def test_referenced_ids_exist() -> None:
     used |= set(re.findall(r'getElementById\("([A-Za-z0-9_-]+)"\)', js))
     missing = sorted(used - ids)
     assert not missing, f"JS 里取了 index.html 中不存在的 id：{', '.join(missing)}"
+
+
+def test_two_css_files_have_no_conflicting_rules() -> None:
+    """两份 CSS 之间的冲突体检：谁生效取决于加载顺序，不能留。"""
+    res = subprocess.run([sys.executable, str(ROOT / "tools" / "css_conflict.py")],
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, f"CSS 冲突体检不通过：\n{res.stdout}{res.stderr}"
