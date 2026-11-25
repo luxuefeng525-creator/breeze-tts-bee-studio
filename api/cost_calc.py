@@ -137,13 +137,16 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
     if provider == "comfyui":
         # 本地推理不产生 API 费用。RTX 5060 8GB 实测（4 步 SMD 蒸馏 + cfg1）：
         # 热态 5 秒片端到端 34.5s（ComfyUI 内部 27.6s，其中采样 9s）；
-        # 采样随帧数近似线性，其余是固定开销，故 eta = 30 + duration * 2。
-        # 冷态（服务重启后第一单）还要多约 150s 加载 6.4GB 文本编码器。
-        return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, duration,
-                         0.0, 0.0, "", eta_sec=30.0 + duration * 2.0,
-                         supports_image_input=False,
-                         notes="本地显卡推理，零单价；4 步蒸馏档热态约 35 秒出片，"
-                               "服务刚启动的第一单需额外约 2~3 分钟加载模型")
+        # 采样随帧数近似线性，其余是固定开销，故 eta = 30 + 实际秒 * 2。
+        # 单条上限 121 帧（16fps ≈ 7.56 秒），超出部分不会生成 —— 必须如实
+        # 回报实际秒数，否则客户按 28 秒下单只拿到 7.5 秒，属于货不对板。
+        from .providers.comfyui import ComfyUIProvider
+        real_dur = round(ComfyUIProvider._length_for(duration) / 16.0, 2)
+        note = ("本地显卡推理，零单价；4 步蒸馏档热态约 35 秒出片，单条最长约 7.5 秒；"
+                "服务刚启动的第一单需额外约 2~3 分钟加载模型")
+        return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, real_dur,
+                         0.0, 0.0, "", eta_sec=30.0 + real_dur * 2.0,
+                         supports_image_input=False, notes=note)
 
     raise ValueError(f"未知 provider: {provider}")
 

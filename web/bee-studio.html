@@ -2208,7 +2208,13 @@ async function updateCost() {
     $('#costYuan').textContent = `¥${data.total_cost.toFixed(2)}`;
     let adj = data.adjustment_label ? ` · ${data.adjustment_label}` : '';
     // 用后端返回的实际档位：本地 ComfyUI 只有 480p，前端下拉选 1080p 也得显示真值
-    $('#costRate').textContent = `${data.label} · ${data.resolution || res} · ${dur}s${adj}`;
+    const realDur = data.duration_real || dur;
+    // 本地模型单条上限 7.5 秒：输入 28 秒只会出 7.5 秒，必须把两者都摆出来。
+    // 4n+1 帧离散化带来的零点几秒误差（5s -> 4.81s）不值得打扰用户。
+    const durText = Math.abs(realDur - dur) < 0.5
+      ? `${dur}s`
+      : `实出 ${realDur}s（输入 ${dur}s）`;
+    $('#costRate').textContent = `${data.label} · ${data.resolution || res} · ${durText}${adj}`;
     const noteEl = $('#costNote');
     noteEl.hidden = !data.notes;
     noteEl.textContent = data.notes || '';
