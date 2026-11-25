@@ -246,9 +246,27 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 /* 窄屏才单栏 — 960px 对 Bee Studio 来说还是够三栏的，改小 */
 @media (max-width: 768px) {
-  .app { grid-template-columns: 1fr !important; grid-template-rows: auto auto auto 128px !important; grid-template-areas: "left" "center" "right" "bottom" !important; overflow:auto !important; height:auto !important; min-height:100vh !important; }
+  /* 单栏后内容高度远超视口，必须让文档自己滚，否则 body overflow:hidden 会把镜头列表以下全裁掉 */
+  html, body { height: auto !important; overflow-y: auto !important; overflow-x: hidden !important; }
+  .app {
+    grid-template-columns: 1fr !important;
+    grid-template-rows: auto auto auto 128px !important;
+    grid-template-areas: "left" "center" "right" "bottom" !important;
+    overflow: visible !important; height: auto !important; min-height: 100vh !important;
+  }
   .sidebar-left, .sidebar-right { border: none; border-bottom:1px solid var(--border); max-height:none; }
+  /* 单栏下三块都要按内容撑高，不能再 overflow:hidden 截断 */
+  .sidebar-left, .sidebar-right, .main-center { overflow: visible !important; }
   .main-center { min-height: 60vh; }
+  /* 时间轴排最后一行：原来 .timeline-bar 的 grid-row:2 会把它插到项目列表和镜头之间 */
+  .timeline-bar { grid-area: bottom !important; }
+  /* 顶栏：窄屏允许横向滚动，品牌文字与状态徽章让位给 6 个导航 Tab */
+  .topbar { overflow-x: auto; overflow-y: hidden; padding: 0 var(--space-3); }
+  .topbar-logo { padding-right: var(--space-3); margin-right: var(--space-2); }
+  .topbar-logo .brand { display: none; }
+  .topbar-status { display: none; }
+  /* 时间轴左侧控件收窄，把宽度让给 4 条轨道 */
+  .tl-global { min-width: 104px; padding: var(--space-2); }
 }
 
 /* ============================================================
@@ -466,11 +484,12 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .shot-char { font-size: var(--font-sm); color: var(--text-muted); display:flex; align-items:center; gap: var(--space-1); }
 .shot-char .char-dot { width: var(--space-2); height: 8px; border-radius: 50%; background: var(--primary); }
 
-/* G4-P1: prompt 显示 + inline 编辑 */
-.shot-prompt { margin: 8px 0; }
-.shot-prompt .sp-text { font-size: var(--font-xs); color: var(--text-muted); line-height: 1.5; cursor: text; padding: 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
-.shot-prompt .sp-text:hover { background: var(--panel-3, #333); color: var(--text); }
-.shot-prompt .sp-edit { font-size: var(--font-xs); color: var(--text); line-height: 1.5; width: 100%; padding: 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
+/* G4-P1: prompt 显示 + inline 编辑 —— 内边距放父层，line-clamp 元素不能有 padding，否则 overflow 会从 padding 区露出第 3 行 */
+.shot-prompt { margin: 8px 0; padding: 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; cursor: text; transition: background .15s; }
+.shot-prompt:hover { background: var(--panel-3, #333); }
+.shot-prompt .sp-text { font-size: var(--font-xs); color: var(--text-muted); line-height: 1.5; cursor: text; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; transition: color .15s; }
+.shot-prompt .sp-text:hover { color: var(--text); }
+.shot-prompt .sp-edit { font-size: var(--font-xs); color: var(--text); line-height: 1.5; width: calc(100% + 16px); margin: -8px; padding: 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
 .shot-prompt .sp-save-hint { font-size: var(--font-xs); color: var(--primary); margin-top: 2px; }
 
 .shot-preview {
@@ -1139,6 +1158,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 /* D4-fix: 合并为单一定义 —— 布局 + G9 zoom 横向滚动 + 自定义 scrollbar */
 .tl-tracks-wrap {
   position: relative; flex: 1; display:flex; flex-direction:column; gap: 2px;
+  min-width: 0;   /* flex item 默认 min-width:auto 会被内容撑宽，导致轨道溢出被裁而不是横向滚动 */
   overflow-x: auto !important; overflow-y: auto; scroll-behavior: smooth;
 }
 .tl-tracks-wrap::-webkit-scrollbar { height: 8px; }
