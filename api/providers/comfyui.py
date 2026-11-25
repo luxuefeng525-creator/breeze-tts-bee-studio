@@ -141,6 +141,13 @@ class ComfyUIProvider(BaseProvider):
         data = resp.json() or {}
         entry = data.get(job_id)
         if not entry:
+            # ComfyUI 的任务队列在内存里：服务一重启（守护自愈、手动重启、崩溃），
+            # 我们提交的 prompt 就彻底没了，/history 永远为空。
+            # 不识别这种情况的话，前端会傻等满 30 分钟才报超时——用户以为卡死。
+            if self._lost(result, job_id):
+                return GenResult(job_id=job_id, status="failed",
+                                 error="本地出片服务中途重启过，这次任务已经丢失（不会自动续跑）。"
+                                       "请重新点生成。")
             return GenResult(job_id=job_id, status="running")
 
         status = entry.get("status") or {}
@@ -165,6 +172,41 @@ class ComfyUIProvider(BaseProvider):
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+    def _lost(self, result, job_id: str) -> bool:
+        """任务是不是已经丢了（ComfyUI 重启导致）。
+
+        判定：给了足够宽限（刚提交时队列可能还没来得及排进去）之后，
+        /history 没有它 **且** /queue 里也没有它，才算丢。
+        /queue 查不到（服务正在重启/网络抖动）时不下结论，继续等。
+        """
+        t0 = getattr(result, "_bee_first_poll", None)
+        if t0 is None:
+            t0 = time.time()
+            try:
+                result._bee_first_poll = t0
+            except AttributeError:
+                pass
+        if time.time() - t0 < 90:
+            return False
+        in_queue = self._queue_has(job_id)
+        return in_queue is False
+
+    def _queue_has(self, job_id: str) -> bool | None:
+        """ComfyUI 队列里是否有这个 prompt。查不到返回 None（不参与判定）。"""
+        try:
+            r = requests.get(f"{self.base_url}/queue", timeout=10)
+            if r.status_code != 200:
+                return None
+            data = r.json() or {}
+        except (requests.RequestException, ValueError):
+            return None
+        for key in ("queue_running", "queue_pending"):
+            for item in data.get(key) or []:
+                # 队列项格式：[number, prompt_id, prompt, extra_data, outputs_to_execute]
+                if isinstance(item, (list, tuple)) and len(item) > 1 and str(item[1]) == job_id:
+                    return True
+        return False
+
     def _require_online(self) -> None:
         try:
             r = requests.get(f"{self.base_url}/system_stats", timeout=5)
