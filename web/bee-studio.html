@@ -50,43 +50,46 @@
   --h-topbar: 48px;
 
   /* LIGHT THEME (default) — 对比度 ≥ 4.5:1 @ #FFFBF0 */
-  --bg: #FFFBF0;
+  --bg: #F6F6F7;
   --panel: #FFFFFF;
-  --panel-2: #FFF9E8;
-  --panel-3: #F5EDD8;              /* 悬浮态（hover/sp-text:hover），比 panel-2 深一档 */
-  --text: #1a1a1a;
-  --text-muted: #5E5848;          /* 原 #6B6455 → 加深到对比度 ≥ 5:1 */
-  --text-faint: #7B7264;           /* 原 #9E9788 → 加深到对比度 ≥ 5:1 */
-  --primary: #BF360C;              /* 原 #E65100 → 琥珀深橙 900，对比度 ≥ 5.5:1 @ #FFFBF0 */
-  --primary-soft: rgba(191,54,12,.12);
-  --primary-deep: #8D260A;
-  --border: #D8D09F;
-  --border-subtle: rgba(191,54,12,.18);
-  --success: #1B5E20;              /* 原 #2E7D32 → 深绿 900，对比度 ≥ 5:1 */
-  --accent: #BF360C;
-  --accent-rgb: 191, 54, 12;       /* 供 rgba(var(--accent-rgb), .35) 组合 */
-  --glow: 0 0 0 1px rgba(191,54,12,.35), 0 4px 16px rgba(191,54,12,.15);
+  --panel-2: #F1F1F3;
+  --panel-3: #E8E8EC;              /* 悬浮态（hover/sp-text:hover），比 panel-2 深一档 */
+  --text: #17171B;
+  --text-muted: #55555F;          /* 原 #6B6455 → 加深到对比度 ≥ 5:1 */
+  --text-faint: #6E6E78;           /* 原 #9E9788 → 加深到对比度 ≥ 5:1 */
+  --primary: #A05A00;              /* 原 #E65100 → 琥珀深橙 900，对比度 ≥ 5.5:1 @ #FFFBF0 */
+  --primary-soft: rgba(160,90,0,.10);
+  --primary-deep: #7A4300;
+  --on-primary: #FFFFFF;             /* 主色底上的前景色 */
+  --ink-on-badge: #1A1A1A;           /* 浅色品牌底（如即梦橙）上的深墨字 */
+  --border: #E3E3E7;
+  --border-subtle: rgba(160,90,0,.18);
+  --success: #1B6E4B;              /* 原 #2E7D32 → 深绿 900，对比度 ≥ 5:1 */
+  --accent: #A05A00;
+  --accent-rgb: 160, 90, 0;       /* 供 rgba(var(--accent-rgb), .35) 组合 */
+  --glow: 0 0 0 1px rgba(160,90,0,.32), 0 4px 16px rgba(160,90,0,.12);
   --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06);
 }
 
 [data-theme="dark"] {
-  --bg: #1A1410;
-  --panel: #231C16;
-  --panel-2: #2A231D;
-  --panel-3: #352C25;              /* 悬浮态 hover，比 panel-2 深一档 */
-  --text: #F5EFE6;
-  --text-muted: #C4BBA8;          /* 原 #B8AFA2 → 加深 */
-  --text-faint: #9D9588;           /* 原 #7A7266 → 加深 */
-  --primary: #FFB300;              /* 原 #BF360C → 深金（深底对比度更高） */
-  --primary-soft: rgba(255,179,0,.18);
-  --primary-deep: #FFD54F;
-  --border: #2A2420;
-  --border-subtle: rgba(255,179,0,.25);
-  --success: #81C784;
-  --accent: #FF6F00;
-  --accent-rgb: 255, 179, 0;       /* 供 rgba(var(--accent-rgb), .35) 组合 */
-  --glow: 0 0 0 1px rgba(255,179,0,.35), 0 4px 18px rgba(255,179,0,.12);
-  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.35);
+  --bg: #0F1013;
+  --panel: #17181C;
+  --panel-2: #1E2025;
+  --panel-3: #262931;              /* 悬浮态 hover，比 panel-2 深一档 */
+  --text: #F2F3F5;
+  --text-muted: #A9AEB8;          /* 原 #B8AFA2 → 加深 */
+  --text-faint: #868C97;           /* 原 #7A7266 → 加深 */
+  --primary: #FFC24B;              /* 原 #BF360C → 深金（深底对比度更高） */
+  --primary-soft: rgba(255,194,75,.14);
+  --primary-deep: #FFD480;
+  --on-primary: #0F1013;             /* 亮金底上的深色前景 */
+  --border: #262931;
+  --border-subtle: rgba(255,194,75,.18);
+  --success: #4FD1A5;
+  --accent: #FFC24B;
+  --accent-rgb: 255, 194, 75;       /* 供 rgba(var(--accent-rgb), .35) 组合 */
+  --glow: 0 0 0 1px rgba(255,194,75,.28), 0 6px 24px rgba(255,194,75,.10);
+  --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 26px rgba(0,0,0,.45);
 }
 
 /* Dark mode: primary = #FFB300 (bright gold, great for foreground),
@@ -95,13 +98,13 @@
 [data-theme="dark"] .btn-primary,
 [data-theme="dark"] .km-btn.km-primary,
 [data-theme="dark"] .voice-card .vc-play,
-[data-theme="dark"] .history-item .hi-play { color: #1A1410; }
+[data-theme="dark"] .history-item .hi-play { color: #0F1013; }
 /* Dark mode accent hover: need dark text on bright gold */
-[data-theme="dark"] .btn-xs.accent:hover { color: #1A1410; }
+[data-theme="dark"] .btn-xs.accent:hover { color: #0F1013; }
 /* Dark mode vc-tags: use lighter tints on dark bg (#1A1410) */
-[data-theme="dark"] .voice-card .vc-tag.clone    { background: rgba(100,181,246,.18); color: #90CAF9; }
-[data-theme="dark"] .voice-card .vc-tag.design   { background: rgba(206,147,216,.18); color: #CE93D8; }
-[data-theme="dark"] .voice-card .vc-tag.direction{ background: rgba(255,179,0,.18); color: #FFD54F; }
+[data-theme="dark"] .voice-card .vc-tag.clone    { background: rgba(90,160,255,.16); color: #7FB8FF; }
+[data-theme="dark"] .voice-card .vc-tag.design   { background: rgba(198,140,255,.16); color: #C89BFF; }
+[data-theme="dark"] .voice-card .vc-tag.direction{ background: rgba(255,194,75,.16); color: #FFD480; }
 
 html, body {
   height: 100%;
@@ -157,14 +160,16 @@ input:focus, textarea:focus, select:focus {
   font-weight: 700; font-size: var(--font-lg);
   color: var(--text);
   text-decoration: none;
-  padding: var(--space-6);
+  padding: 0 var(--space-5) 0 0;
   border-right: 1px solid var(--border);
-  margin: var(--space-4);
+  margin: 0 var(--space-4) 0 0;
+  height: 100%;
+  white-space: nowrap;
 }
 .topbar-logo .emoji { font-size: var(--font-xl); }
 .topbar-logo .brand { color: var(--primary); }
 .topbar-nav {
-  display: flex; align-items: center; gap: var(--space-1); flex: 1;
+  display: flex; align-items: center; gap: var(--space-1); flex: 0 1 auto;
 }
 .topbar-tab {
   display: inline-flex; align-items: center; gap: var(--space-1);
@@ -172,6 +177,7 @@ input:focus, textarea:focus, select:focus {
   font-size: var(--font-base); font-weight: 500;
   color: var(--text-faint);
   text-decoration: none;
+  white-space: nowrap; flex-shrink: 0;
   transition: background .18s, color .15s, border-color .18s, box-shadow .2s;
   border: 1px solid transparent;
   background: transparent;
@@ -210,7 +216,7 @@ input:focus, textarea:focus, select:focus {
   display: flex; align-items: center; justify-content: center;
   transition: background .15s, border-color .15s, color .15s;
 }
-.tb-undo-btn:hover:not(:disabled) { background: var(--panel-3); border-color: var(--primary); color: var(--primary); }
+.tb-undo-btn:hover:not(:disabled) { background: var(--panel-3); border-color: var(--primary); color: var(--primary-deep); }
 .tb-undo-btn:active:not(:disabled) { transform: scale(.94); }
 .tb-undo-btn:disabled { opacity: .3; cursor: not-allowed; }
 
@@ -340,7 +346,12 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .project-card .pc-title {
   font-weight: 600; font-size: var(--font-base); margin: var(--space-1);
-  display:flex; align-items:center; justify-content:space-between; gap: var(--space-2);
+  display:flex; align-items:flex-start; justify-content:space-between; gap: var(--space-2);
+}
+.project-card .pc-title > span:first-child {
+  flex: 1; min-width: 0;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.35;
 }
 .project-card .pc-meta {
   font-size: var(--font-xs); color: var(--text-faint);
@@ -349,8 +360,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .project-card .pc-meta span { display:flex; align-items:center; gap: var(--space-1); }
 
 .badge {
-  font-size: var(--font-xs); padding: var(--space-1) var(--space-1); border-radius: var(--radius-pill);
+  font-size: var(--font-xs); padding: var(--space-1) var(--space-2); border-radius: var(--radius-pill);
   font-weight: 600; letter-spacing: .3px;
+  white-space: nowrap; flex-shrink: 0;
 }
 .badge-draft    { background: rgba(158,151,136,.2); color: var(--text-muted); }
 .badge-voicing  { background: var(--primary-soft); color: var(--primary-deep); }
@@ -360,7 +372,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   margin: var(--space-2);
   padding: var(--space-2);
   background: linear-gradient(135deg, var(--primary), var(--accent));
-  color: #1a1a1a;
+  color: var(--on-primary);
   font-weight: 600;
   border-radius: var(--radius);
   display:flex; align-items:center; justify-content:center; gap: var(--space-2);
@@ -403,10 +415,10 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .tb-btn:hover { border-color: var(--primary); color: var(--primary-deep); box-shadow: 0 1px 4px rgba(var(--accent-rgb),.15); }
 .tb-btn.primary {
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  color: #1a1a1a; border-color: transparent;
+  background: var(--primary);
+  color: var(--on-primary); border-color: transparent;
 }
-.tb-btn.primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(var(--accent-rgb),.4); color:#1a1a1a; }
+.tb-btn.primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(var(--accent-rgb),.35); color: var(--on-primary); }
 .tb-btn.ghost { background: transparent; border-color: var(--border); }
 
 /* ============================================================
@@ -882,7 +894,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   width: 28px; height: 28px; border-radius: 7px;
   display: flex; align-items: center; justify-content: center;
   font-size: var(--font-md); font-weight: 700;
-  color: #1a1a1a; flex-shrink: 0;
+  color: var(--ink-on-badge); flex-shrink: 0;
 }
 .km-logo.jimeng { background: linear-gradient(135deg,#FFE082,#FFB74D); }
 .km-logo.kling  { background: linear-gradient(135deg,#B39DDB,#7E57C2); color:#fff; }
@@ -1001,7 +1013,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .emotion-tag:hover { color: var(--text); border-color: var(--primary); }
 .emotion-tag.active {
   background: var(--primary);
-  color: #1a1a1a;
+  color: var(--on-primary);
   border-color: var(--primary);
 }
 
@@ -1022,7 +1034,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .tl-play-btn {
   width: 34px; height: 34px; border-radius: 50%;
   background: linear-gradient(135deg, var(--primary), var(--accent));
-  color:#1a1a1a;
+  color: var(--on-primary);
   display:grid; place-items:center; font-size: var(--font-md); font-weight:700;
   box-shadow: 0 2px 8px rgba(var(--accent-rgb),.35);
   transition: transform var(--transition);
@@ -1231,6 +1243,94 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   border-radius: var(--radius-sm);
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-rgb),.4); }
+/* ==== Phase-1 导航合并 / 右栏分段 / 深色工作台补充 ==== */
+.logo-sub { color: var(--text-faint); font-size: var(--font-sm); font-weight: 500; }
+.topbar-tools-label {
+  font-size: var(--font-xs); color: var(--text-faint); text-transform: uppercase;
+  letter-spacing: .8px; margin-right: var(--space-1);
+}
+.topbar-divider { width: 1px; height: 20px; background: var(--border); margin: 0 var(--space-2); }
+@media (max-width: 1280px) { .topbar-tools-label { display: none; } }
+@media (max-width: 1080px) {
+  .topbar-right .topbar-tab.external { padding: var(--space-1) var(--space-2); font-size: var(--font-xs); }
+}
+
+.projects-header { gap: var(--space-2); }
+.projects-header h4 { margin-right: auto; }
+.np-btn {
+  width: 24px; height: 24px; border-radius: var(--radius-sm);
+  background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--primary); font-size: var(--font-base); font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+}
+.np-btn:hover { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+
+.insp-seg {
+  display: flex; gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--panel); z-index: 5;
+}
+.seg-btn {
+  flex: 1; padding: var(--space-1) var(--space-1);
+  font-size: var(--font-xs); font-weight: 600;
+  color: var(--text-faint); border-radius: var(--radius-sm);
+  border: 1px solid transparent; white-space: nowrap;
+  transition: all var(--transition);
+}
+.seg-btn:hover { background: var(--panel-2); color: var(--text); }
+.seg-btn.active {
+  background: var(--primary-soft); color: var(--primary-deep);
+  border-color: var(--border-subtle);
+}
+.insp-pane { display: none; }
+.insp-pane.active { display: block; }
+
+/* ==== Phase-2 流水线 + 诚实空状态 ==== */
+.pipeline {
+  display: flex; align-items: stretch; gap: var(--space-1);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  overflow-x: auto;
+}
+.pipe-step {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent; background: transparent;
+  text-align: left; white-space: nowrap;
+  transition: all var(--transition);
+}
+.pipe-step:hover { background: var(--panel); border-color: var(--border); }
+.pipe-idx {
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--font-xs); font-weight: 700;
+  background: var(--primary-soft); color: var(--primary-deep);
+  flex-shrink: 0;
+}
+.pipe-body { display: flex; flex-direction: column; line-height: 1.25; }
+.pipe-name { font-size: var(--font-sm); font-weight: 600; color: var(--text); }
+.pipe-sub  { font-size: var(--font-xs); color: var(--text-faint); }
+.pipe-arrow { display: flex; align-items: center; color: var(--text-faint); font-size: var(--font-lg); padding: 0 2px; }
+
+.badge-sample { background: rgba(158,151,136,.22); color: var(--text-muted); }
+
+.pv-empty {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  color: var(--text-muted); text-align: center; line-height: 1.45;
+}
+.pv-empty strong { font-size: var(--font-sm); color: var(--text); font-weight: 600; }
+.pv-empty span { font-size: var(--font-xs); color: var(--text-faint); }
+
+.shot-preview.preview-mock { border: 1px dashed var(--border); background: var(--panel-2); }
+.shot-audio-empty {
+  font-size: var(--font-xs); color: var(--text-faint);
+  padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
+  background: var(--panel-2); border: 1px dashed var(--border);
+}
 </style>
 </head>
 <body>
@@ -1240,23 +1340,25 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   <a class="topbar-logo" href="/bee-studio.html">
     <span class="emoji">🐝</span>
     <span class="brand">小蜜蜂</span>
-    <span style="color:var(--text-faint);font-size: var(--font-sm)">Bee Studio</span>
+    <span class="logo-sub">Bee Studio</span>
   </a>
   <div class="topbar-nav">
-    <a class="topbar-tab active"   href="/bee-studio.html">🎬 视频工作台</a>
-    <a class="topbar-tab external" href="/?screen=workbench">🎙️ 合成台</a>
-    <a class="topbar-tab external" href="/?screen=clone">🎤 克隆</a>
-    <a class="topbar-tab external" href="/?screen=script">📖 剧本台</a>
-    <a class="topbar-tab external" href="/?screen=library">🔊 音色库</a>
+    <a class="topbar-tab active" href="/bee-studio.html">🎬 视频工作台</a>
+    <a class="topbar-tab" href="/">🏠 首页</a>
   </div>
   <div class="topbar-right">
+    <span class="topbar-tools-label">关联工具</span>
+    <a class="topbar-tab external" href="/?screen=workbench">合成台</a>
+    <a class="topbar-tab external" href="/?screen=clone">克隆</a>
+    <a class="topbar-tab external" href="/?screen=script">剧本台</a>
+    <a class="topbar-tab external" href="/?screen=library">音色库</a>
+    <span class="topbar-divider"></span>
     <div class="tb-undo-group" style="display:flex;gap:2px;margin-right:4px">
       <button id="btnUndo" class="tb-undo-btn" title="撤销 Ctrl+Z" disabled>↶</button>
       <button id="btnRedo" class="tb-undo-btn" title="重做 Ctrl+Y / Ctrl+Shift+Z" disabled>↷</button>
     </div>
     <span class="topbar-status" id="beeEngineStatus">✓ 双引擎就绪</span>
     <span class="topbar-save" id="beeSaveHint" style="display:none">💾 自动保存 · 刚刚</span>
-    <a href="/" class="topbar-tab external" style="padding:6px 10px;font-size: var(--font-xs)">BreezeTTS 首页</a>
   </div>
 </nav>
 
@@ -1277,21 +1379,13 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
       <div class="switch" id="themeSwitch" role="switch" aria-checked="false"></div>
     </div>
 
-    <nav class="section-tabs">
-      <div class="tab active" data-tab="projects"><span class="ico">📁</span>项目</div>
-      <div class="tab" data-tab="voices"><span class="ico">🎙️</span>音色</div>
-      <div class="tab" data-tab="roles"><span class="ico">🎭</span>角色</div>
-      <div class="tab" data-tab="assets"><span class="ico">🖼️</span>素材</div>
-    </nav>
-
     <div class="projects-header">
       <h4>我的项目</h4>
       <span class="projects-count" id="projectsCount">2</span>
+      <button class="np-btn" id="newProjectBtn" title="新建项目" aria-label="新建项目">＋</button>
     </div>
 
     <div class="projects-list" id="projectsList"></div>
-
-    <button class="new-project-btn" id="newProjectBtn">+ 新建项目</button>
   </aside>
 
   <!-- MAIN CENTER -->
@@ -1299,15 +1393,31 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
     <div class="toolbar">
       <input class="project-title-input" id="projectTitleInput" value="雨夜的抉择" />
       <span class="badge badge-voicing">配音中</span>
-
       <div class="toolbar-spacer"></div>
-
-      <button class="tb-btn primary" id="aiScriptBtn">✨ AI生成剧本</button>
-      <button class="tb-btn" id="fromScriptBtn">📜 从剧本生成分镜</button>
-      <button class="tb-btn" id="voiceAllBtn">🎙️ 批量配音</button>
-      <button class="tb-btn" id="videoAllBtn">🎬 批量生成视频</button>
-      <button class="tb-btn ghost" id="exportAllBtn">⬇️ 导出</button>
+      <button class="tb-btn ghost" id="exportAllBtn">⬇️ 导出成片</button>
     </div>
+
+    <nav class="pipeline" aria-label="制作流程">
+      <button class="pipe-step" id="aiScriptBtn">
+        <span class="pipe-idx">1</span>
+        <span class="pipe-body"><span class="pipe-name">写剧本</span><span class="pipe-sub">AI 生成剧本与分镜</span></span>
+      </button>
+      <span class="pipe-arrow">›</span>
+      <button class="pipe-step" id="fromScriptBtn">
+        <span class="pipe-idx">2</span>
+        <span class="pipe-body"><span class="pipe-name">导入剧本</span><span class="pipe-sub">从 BreezeTTS 取分镜</span></span>
+      </button>
+      <span class="pipe-arrow">›</span>
+      <button class="pipe-step" id="voiceAllBtn">
+        <span class="pipe-idx">3</span>
+        <span class="pipe-body"><span class="pipe-name">配音</span><span class="pipe-sub">为每个镜头合成旁白</span></span>
+      </button>
+      <span class="pipe-arrow">›</span>
+      <button class="pipe-step" id="videoAllBtn">
+        <span class="pipe-idx">4</span>
+        <span class="pipe-body"><span class="pipe-name">生成视频</span><span class="pipe-sub">逐镜头出画面</span></span>
+      </button>
+    </nav>
 
     <div class="storyboard-wall" id="storyboardWall"></div>
   </main>
@@ -1344,6 +1454,14 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
         </div>
       </section>
 
+      <div class="insp-seg" id="inspSeg">
+        <button class="seg-btn active" data-pane="shot">🎯 镜头</button>
+        <button class="seg-btn" data-pane="asset">🎙️ 素材</button>
+        <button class="seg-btn" data-pane="history">📜 历史</button>
+        <button class="seg-btn" data-pane="settings">🔑 设置</button>
+      </div>
+
+      <div class="insp-pane" data-pane="settings">
       <!-- Provider API Key Manager -->
       <section class="inspector-section">
         <h3>🔑 API 密钥管理 <span class="hint" id="keyStatusHint">0 / 4 已配置</span></h3>
@@ -1367,7 +1485,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
           <a href="#" class="km-security-link" id="kmHowTo">怎么申请？</a>
         </div>
       </section>
+      </div><!-- /pane settings -->
 
+      <div class="insp-pane" data-pane="asset">
       <!-- 音色库（原产品 /api/voices） -->
       <section class="inspector-section">
         <h3>🎙️ 音色库 <span class="hint" id="voiceCount">加载中...</span></h3>
@@ -1383,7 +1503,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
           <!-- 动态渲染 -->
         </div>
       </section>
+      </div><!-- /pane asset -->
 
+      <div class="insp-pane" data-pane="history">
       <!-- 合成历史（原产品 /api/history） -->
       <section class="inspector-section">
         <h3>📜 合成历史 <span class="hint" id="historyCount">加载中...</span></h3>
@@ -1399,7 +1521,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
           <!-- 动态渲染 -->
         </div>
       </section>
+      </div><!-- /pane history -->
 
+      <div class="insp-pane active" data-pane="shot">
       <!-- Shot Detail -->
       <section class="inspector-section">
         <h3>🎯 当前镜头 <span class="hint" id="activeShotHint">#1</span></h3>
@@ -1426,6 +1550,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
           </div>
         </div>
       </section>
+      </div><!-- /pane shot -->
 
     </div>
   </aside>
@@ -1736,7 +1861,7 @@ function calcCost(model, res, duration) {
 (function initTheme() {
   const saved = localStorage.getItem('bee-theme');
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const isDark = saved ? saved === 'dark' : prefersDark;
+  const isDark = saved ? saved === 'dark' : true;  // 默认深色工作台
   document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
   document.getElementById('themeSwitch').setAttribute('aria-checked', isDark);
 })();
@@ -1748,12 +1873,13 @@ $('#themeSwitch').addEventListener('click', () => {
   localStorage.setItem('bee-theme', isDark ? 'dark' : 'light');
 });
 
-// -------------------------- Tabs ---------------------------
-$$('.section-tabs .tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    $$('.section-tabs .tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    showToast(`已切换到 "${tab.textContent.trim()}"（占位 · 功能待开发）`);
+// -------------------------- Inspector 分段 ---------------------------
+$$('#inspSeg .seg-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $$('#inspSeg .seg-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const pane = btn.dataset.pane;
+    $$('.insp-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === pane));
   });
 });
 
@@ -1814,7 +1940,8 @@ function renderStoryboard() {
     card.dataset.shotId = shot.id;
     card.draggable = true;
     const costTag = shot.cost ? `<span class="cost-tag">¥${shot.cost.toFixed(2)}</span>` : '';
-    const providerName = PRICING[shot.provider]?.name || shot.provider;
+    const isSample = /（mock）|\(mock\)/i.test(shot.prompt || '');
+    const cleanPrompt = (shot.prompt || '').replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim();
 
     card.innerHTML = `
       <div class="shot-header">
@@ -1822,19 +1949,24 @@ function renderStoryboard() {
         <span class="shot-duration">⏱ ${shot.duration}s</span>
       </div>
       <div class="shot-title">${shot.title}</div>
-      <div class="shot-char"><span class="char-dot"></span>${shot.char}</div>
+      <div class="shot-char">
+        <span class="char-dot"></span>${shot.char}
+        ${isSample ? '<span class="badge badge-sample">示例内容</span>' : ''}
+      </div>
 
       <!-- G4-P1: prompt 显示 + inline 编辑（点击展开 textarea） -->
       <div class="shot-prompt" data-shot-id="${shot.id}">
-        <div class="sp-text" data-role="prompt-display" title="点击编辑提示词">${escapeHtml(shot.prompt || '点击添加提示词…')}</div>
-        <textarea class="sp-edit" data-role="prompt-edit" rows="3" style="display:none" placeholder="描述这个镜头的画面...">${escapeHtml(shot.prompt || '')}</textarea>
+        <div class="sp-text" data-role="prompt-display" title="点击编辑提示词">${escapeHtml(cleanPrompt || '点击添加画面描述…')}</div>
+        <textarea class="sp-edit" data-role="prompt-edit" rows="3" style="display:none" placeholder="描述这个镜头的画面...">${escapeHtml(cleanPrompt)}</textarea>
         <span class="sp-save-hint" data-role="save-hint" style="display:none">💾 已保存</span>
       </div>
 
-      <div class="shot-preview ${shot.videoReady ? 'preview-ready' : ''}" data-state="${shot.videoReady ? 'ready' : 'empty'}">
+      <div class="shot-preview ${shot.videoReady ? 'preview-ready' : (shot.videoMock ? 'preview-mock' : '')}" data-state="${shot.videoReady ? 'ready' : (shot.videoMock ? 'mock' : 'empty')}">
         ${shot.videoReady
           ? `<div><div class="play-ico">▶</div>视频已生成</div>`
-          : `<div><div class="sc-emoji">🎬</div>视频占位 · 点击"视频生成"</div>`}
+          : shot.videoMock
+            ? `<div class="pv-empty"><div class="sc-emoji">🎞️</div><strong>示例预览</strong><span>未接真实视频模型 · 配置 API Key 后可生成真片</span></div>`
+            : `<div class="pv-empty"><div class="sc-emoji">🎬</div><strong>尚未生成视频</strong><span>点下方「视频生成」开始</span></div>`}
       </div>
 
       <div class="shot-actions">
@@ -1854,7 +1986,11 @@ function renderStoryboard() {
           </div>
           ${costTag}
         </div>
-        ${shot.audioUrl ? `<div class="shot-audio"><audio controls src="${shot.audioUrl}"></audio></div>` : ''}
+        ${shot.audioUrl
+          ? `<div class="shot-audio"><audio controls src="${shot.audioUrl}"></audio></div>`
+          : shot.audioMock
+            ? `<div class="shot-audio-empty">🎙️ 音频未生成 · BreezeTTS 离线</div>`
+            : ''}
       </div>
     `;
 
@@ -1873,7 +2009,7 @@ function renderStoryboard() {
     promptEdit.addEventListener('blur', () => {
       const newVal = promptEdit.value.trim();
       commitUndo(() => { shot.prompt = newVal; }, '修改提示词');
-      promptText.textContent = shot.prompt || '点击添加提示词…';
+      promptText.textContent = newVal || '点击添加画面描述…';
       promptEdit.style.display = 'none';
       promptText.style.display = 'block';
       _debounceAutosave();
@@ -1988,7 +2124,7 @@ function renderInspector() {
   const shot = getActiveShot();
   if (!shot) return;
   $('#activeShotHint').textContent = `#${shot.num}`;
-  $('#shotPrompt').value = shot.prompt;
+  $('#shotPrompt').value = (shot.prompt || '').replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim();
   $('#shotVoice').value = shot.voice;
   $$('.emotion-tag').forEach(t => t.classList.toggle('active', t.textContent === shot.emotion));
 }
@@ -2086,18 +2222,18 @@ async function synthShot(shotId) {
         }
       } catch {}
     }
-    if (shot.audioUrl) showToast('✅ 配音完成', 'success');
+    if (shot.audioUrl) { shot.audioMock = false; showToast('✅ 配音完成', 'success'); }
     else {
-      // 离线降级：静音 WAV
-      shot.audioUrl = 'data:audio/wav;base64,UklGRjQAAAAXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-      showToast('🎙️ BreezeTTS 离线 · 已标记（真实音色需启动 panel）', 'info');
+      // 离线降级：不伪造静音 WAV，明确标记「未生成」
+      shot.audioMock = true;
+      showToast('🎙️ BreezeTTS 离线 · 音频未生成（启动 panel 后可真实配音）', 'warn');
     }
     shot.bt_script_id = sid;
     renderStoryboard();
   } catch (err) {
     console.warn('[BeeStudio] synth fallback:', err.message);
-    shot.audioUrl = 'data:audio/wav;base64,UklGRjQAAAAXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-    showToast('🎙️ BreezeTTS 离线 · 已标记（真实音色需启动 panel）', 'info');
+    shot.audioMock = true;
+    showToast('🎙️ BreezeTTS 离线 · 音频未生成（启动 panel 后可真实配音）', 'warn');
     renderStoryboard();
   }
 }
@@ -2122,10 +2258,11 @@ async function generateVideo(shotId, cardEl) {
     // Mock fallback
     preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">Mock 演示模式</div>';
     setTimeout(() => {
-      shot.videoReady = true;
+      shot.videoMock = true;
+      shot.videoReady = false;
       shot.videoUrl = '';
       renderStoryboard();
-      showToast('✅ Mock 视频生成完成（配置 API Key 后用真实生成）', 'info');
+      showToast('⚠️ 已标记「示例预览」· 未接真实视频模型（配置 API Key 后生成真片）', 'warn');
     }, 2200 + Math.random() * 1500);
     return;
   }
@@ -2174,6 +2311,7 @@ async function generateVideo(shotId, cardEl) {
 
   if (lastVideoUrl) {
     shot.videoReady = true;
+    shot.videoMock = false;
     shot.videoUrl = lastVideoUrl;
     if (lastCost > 0) shot.cost = lastCost;
     showToast(`✅ 视频完成 · 实际结算 ¥${lastCost.toFixed(2)}`, 'success');
