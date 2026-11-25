@@ -41,8 +41,26 @@ _STEPS = int(os.environ.get("BREEZE_COMFYUI_STEPS") or (4 if _TURBO else 25))
 _CFG = float(os.environ.get("BREEZE_COMFYUI_CFG") or (1.0 if _TURBO else 6.0))
 _SAMPLER = os.environ.get("BREEZE_COMFYUI_SAMPLER") or ("euler" if _TURBO else "uni_pc")
 _SHIFT = float(os.environ.get("BREEZE_COMFYUI_SHIFT") or (10.0 if _TURBO else 8.0))
+
+# ---- Wan2.2 TI2V-5B：带参考图时走这条，T2V+I2V 混合 ----
+# 官方模板参数（Comfy-Org/workflow_templates video_wan2_2_5B_ti2v.json）：
+# steps=20 / cfg=5 / uni_pc / simple / ModelSamplingSD3 shift=8 / 24fps / 121 帧 = 5 秒。
+_UNET_22 = os.environ.get("BREEZE_COMFYUI_UNET_22", "wan2.2_ti2v_5B_fp16.safetensors")
+_VAE_22 = os.environ.get("BREEZE_COMFYUI_VAE_22", "wan2.2_vae.safetensors")
+_STEPS_22 = int(os.environ.get("BREEZE_COMFYUI_STEPS_22") or 20)
+_CFG_22 = float(os.environ.get("BREEZE_COMFYUI_CFG_22") or 5.0)
+_SHIFT_22 = float(os.environ.get("BREEZE_COMFYUI_SHIFT_22") or 8.0)
+_SAMPLER_22 = os.environ.get("BREEZE_COMFYUI_SAMPLER_22") or "uni_pc"
+_FPS_22 = 24.0
+# TI2V-5B fp16 权重 10GB，8GB 卡只能按 fp8 载入
+_MAX_FRAMES_22 = 121
 # 低于这个空闲显存就别开跑：模型 1.4GB + 激活，剩太少会一路换页，跑 30 分钟还不一定出得来
 _MIN_FREE_VRAM_MB = 3500
+# 5B 带图出片：fp8 UNET 4768MB + Wan2.2 VAE 1344MB，加上激活值约 6.5GB。
+# 实测（2026-11-26）：出片前空闲 5742MB 时每步 4~8 秒（可用）；
+# 空闲只有 824MB 时每步 87~134 秒（桌面应用占满显存，每步都在换页）。
+# 门槛取 5200MB —— 低于它会慢到不可用，高于它没必要拦。
+_MIN_FREE_VRAM_MB_22 = 5200
 # 语音合成服务（7860）的「卸下模型」接口：8GB 卡上 TTS 常驻约 5.9GB，
 # 出片前先让它卸卡，出完片用户的下一句合成会自动重载。
 _TTS_UNLOAD_URL = (os.environ.get("BREEZE_TTS_UNLOAD_URL")
@@ -82,7 +100,7 @@ def _gpu_free_mb() -> int | None:
         return None
 
 
-def _free_tts_vram() -> str:
+def _free_tts_vram(need_mb: int = _MIN_FREE_VRAM_MB) -> str:
     """请语音合成服务卸下模型，把显存让出来。
 
     返回一句人话说明（用于拼进错误文案），成功与否都返回，不抛异常：
@@ -100,14 +118,14 @@ def _free_tts_vram() -> str:
     for _ in range(20):
         time.sleep(0.5)
         free = _gpu_free_mb()
-        if free is None or free >= _MIN_FREE_VRAM_MB:
+        if free is None or free >= need_mb:
             return "已自动暂停语音模型并让出显存"
     return "已请求语音模型卸载，但显存仍未释放"
 
 
 class ComfyUIProvider(BaseProvider):
     name = "comfyui"
-    label = "本地 ComfyUI（免费 / Wan2.1）"
+    label = "本地 ComfyUI（免费 / Wan2.1 + Wan2.2）"
     max_concurrency = 1          # 单卡串行，避免显存互抢
 
     def __init__(self, api_key: str = "", base_url: str = "", **_kw):
@@ -121,9 +139,27 @@ class ComfyUIProvider(BaseProvider):
     def generate(self, req: GenRequest) -> GenResult:
         if not req.prompt.strip():
             raise ProviderError("提示词不能为空")
-        self._require_online()
 
-        wf = self._build_workflow(req)
+        raw_img = str(getattr(req, "image_url", "") or "").strip()
+        is_i2v = raw_img.startswith("file:")
+        # 带图走 5B（fp8 UNET 5GB + VAE 1.4GB），显存门槛比 1.3B 高得多
+        self._require_online(_MIN_FREE_VRAM_MB_22 if is_i2v else _MIN_FREE_VRAM_MB)
+
+        if is_i2v:
+            # 带参考图：Wan2.2 TI2V-5B 真图生视频。慢但脸固定。
+            src = Path(raw_img[5:])
+            if not src.is_file():
+                raise ProviderError(f"参考图文件不存在：{src}")
+            w, h = self._size_for_22(req.resolution)
+            prepared = self._prepare_image(src, w, h)
+            image_name = self._upload_image(prepared)
+            wf = self._build_workflow_22(req, image_name)
+        elif raw_img:
+            raise ProviderError(
+                "本地出片只接受本机参考图（file: 路径）；外链图片请先下载并上传到角色库")
+        else:
+            # 无参考图：继续用 1.3B 4 步蒸馏档，35 秒出片
+            wf = self._build_workflow(req)
         try:
             resp = requests.post(f"{self.base_url}/prompt",
                                  json={"prompt": wf, "client_id": uuid.uuid4().hex},
@@ -175,7 +211,27 @@ class ComfyUIProvider(BaseProvider):
                              error=f"任务完成但没有视频产物：{str(outputs)[:200]}")
 
         local_url = self._download(job_id, info)
+        self._release_if_idle()
         return GenResult(job_id=job_id, status="succeeded", video_url=local_url, actual_cost=0.0)
+
+    def _release_if_idle(self) -> None:
+        """出片完就把 ComfyUI 的模型请出显存。
+
+        实测（2026-11-26）：5B 出片后 ComfyUI 常驻 4.7GB 显存，语音合成被迫
+        换页，`test_panel.py` 从 111 秒涨到 500 秒。队列里还有任务时不释放
+        （否则下一单要重新加载，批量反而更慢）。
+        """
+        try:
+            q = requests.get(f"{self.base_url}/queue", timeout=10).json() or {}
+        except (requests.RequestException, ValueError):
+            return
+        if (q.get("queue_running") or []) or (q.get("queue_pending") or []):
+            return
+        try:
+            requests.post(f"{self.base_url}/free",
+                          json={"unload_models": True, "free_memory": True}, timeout=30)
+        except requests.RequestException:
+            pass
 
     # ------------------------------------------------------------------
     # 内部
@@ -215,7 +271,7 @@ class ComfyUIProvider(BaseProvider):
                     return True
         return False
 
-    def _require_online(self) -> None:
+    def _require_online(self, need_mb: int = _MIN_FREE_VRAM_MB) -> None:
         try:
             r = requests.get(f"{self.base_url}/system_stats", timeout=5)
             if r.status_code != 200:
@@ -226,15 +282,15 @@ class ComfyUIProvider(BaseProvider):
                 f"或改用云端 provider。原始错误：{e}"
             ) from e
         free = _gpu_free_mb()
-        if free is not None and free < _MIN_FREE_VRAM_MB:
+        if free is not None and free < need_mb:
             # 8GB 卡上语音常驻 ~5.9GB，视频模型放不下：先请语音卸卡再验一次
-            note = _free_tts_vram()
+            note = _free_tts_vram(need_mb)
             free = _gpu_free_mb()
-            if free is not None and free < _MIN_FREE_VRAM_MB:
+            if free is not None and free < need_mb:
                 raise ProviderError(
-                    f"显存不足：显卡当前只剩 {free} MB 空闲，本地出片至少需要 "
-                    f"{_MIN_FREE_VRAM_MB} MB（{note}）。请关掉其它占显卡的程序"
-                    "（如游戏、剪辑软件），或改用云端 provider。"
+                    f"显存不足：显卡当前只剩 {free} MB 空闲，这次出片至少需要 "
+                    f"{need_mb} MB（{note}）。请关掉其它占显卡的程序"
+                    "（如游戏、剪辑软件），或改用纯文本出片（不带参考图只要 3.5GB）。"
                 )
 
     @staticmethod
@@ -296,6 +352,119 @@ class ComfyUIProvider(BaseProvider):
         wf["6"] = {"class_type": "ModelSamplingSD3",
                    "inputs": {"model": model_src, "shift": _SHIFT}}
         return wf
+
+    # ------------------------------------------------------------------
+    # Wan2.2 TI2V-5B（带参考图时走这条）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _size_for_22(resolution: str) -> tuple[int, int]:
+        """5B 官方档，宽高都要是 32 的倍数：480p=832x480，720p=1280x704。"""
+        return (1280, 704) if str(resolution).lower().startswith("720") else (832, 480)
+
+    @staticmethod
+    def _length_for_22(duration: float) -> int:
+        """秒 -> 帧数。Wan2.2 是 24fps、4n+1，5 秒上限 121 帧。
+
+        向上取整（不是向下）：5 秒要正好落到官方模板的 121 帧，
+        向下会得到 117 帧，比用户要的 5 秒少 0.17 秒。
+        """
+        frames = int(round(float(duration or 5.0) * _FPS_22))
+        frames = max(9, min(frames, _MAX_FRAMES_22))
+        n = -((1 - frames) // 4)          # ceil((frames-1)/4)
+        return min(n * 4 + 1, _MAX_FRAMES_22)
+
+    @staticmethod
+    def _prepare_image(src: Path, w: int, h: int) -> Path:
+        """中心裁剪到目标比例并缩放到目标尺寸再交给 ComfyUI。
+
+        Wan22ImageToVideoLatent 内部只把 start_image bilinear 拉伸到
+        width×height，不裁比例 —— 竖图会被压扁。这里先裁成目标比例；
+        再显式缩放到 w×h，避免 Wan 内部用低质量缩放放大参考图。
+        """
+        import tempfile
+        from PIL import Image
+
+        with Image.open(src) as raw:
+            im = raw.convert("RGB")
+        target = w / h
+        iw, ih = im.size
+        if iw / ih > target:
+            nw = max(1, int(round(ih * target)))
+            left = (iw - nw) // 2
+            im = im.crop((left, 0, left + nw, ih))
+        elif iw / ih < target:
+            nh = max(1, int(round(iw / target)))
+            top = (ih - nh) // 2
+            im = im.crop((0, top, iw, top + nh))
+        if im.size != (w, h):
+            im = im.resize((w, h), Image.LANCZOS)
+        out = Path(tempfile.gettempdir()) / f"bee-ref-{uuid.uuid4().hex[:10]}.png"
+        im.save(out, "PNG")
+        return out
+
+    def _upload_image(self, path: Path) -> str:
+        """把参考图塞进 ComfyUI 的 input 目录，返回 LoadImage 能用的名字。"""
+        try:
+            with open(path, "rb") as fh:
+                resp = requests.post(
+                    f"{self.base_url}/upload/image",
+                    files={"image": (path.name, fh, "image/png")},
+                    data={"overwrite": "true"},
+                    timeout=60,
+                )
+        except requests.RequestException as e:
+            raise ProviderError(f"参考图上传失败：{e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"参考图上传失败（{resp.status_code}）：{resp.text[:200]}")
+        try:
+            info = resp.json()
+        except Exception:
+            raise ProviderError(f"参考图上传返回异常：{resp.text[:200]}")
+        name = str(info.get("name") or "")
+        sub = str(info.get("subfolder") or "")
+        if not name:
+            raise ProviderError(f"参考图上传返回没有 name：{info}")
+        return f"{sub}/{name}" if sub else name
+
+    def _build_workflow_22(self, req: GenRequest, image_name: str) -> dict:
+        """按 ComfyUI 官方 5B 模板拼工作流。
+
+        参数来自官方模板 video_wan2_2_5B_ti2v.json：
+        steps=20 / cfg=5 / uni_pc / simple / shift=8 / 24fps。
+        """
+        w, h = self._size_for_22(req.resolution)
+        length = self._length_for_22(req.duration)
+        seed = int(req.seed if req.seed is not None else time.time()) % (2 ** 31)
+        return {
+            "1": {"class_type": "UNETLoader",
+                  # fp16 权重 10GB，8GB 卡必须按 fp8 载入
+                  "inputs": {"unet_name": _UNET_22, "weight_dtype": "fp8_e4m3fn"}},
+            "2": {"class_type": "CLIPLoader",
+                  "inputs": {"clip_name": _TEXT_ENCODER, "type": "wan", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": _VAE_22}},
+            "4": {"class_type": "CLIPTextEncode",
+                  "inputs": {"text": req.prompt, "clip": ["2", 0]}},
+            "5": {"class_type": "CLIPTextEncode",
+                  "inputs": {"text": _NEGATIVE, "clip": ["2", 0]}},
+            "12": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+            "7": {"class_type": "Wan22ImageToVideoLatent",
+                  "inputs": {"vae": ["3", 0], "width": w, "height": h,
+                             "length": length, "batch_size": 1,
+                             "start_image": ["12", 0]}},
+            "6": {"class_type": "ModelSamplingSD3",
+                  "inputs": {"model": ["1", 0], "shift": _SHIFT_22}},
+            "8": {"class_type": "KSampler",
+                  "inputs": {"model": ["6", 0], "seed": seed, "steps": _STEPS_22,
+                             "cfg": _CFG_22, "sampler_name": _SAMPLER_22,
+                             "scheduler": "simple",
+                             "positive": ["4", 0], "negative": ["5", 0],
+                             "latent_image": ["7", 0], "denoise": 1.0}},
+            "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+            "10": {"class_type": "CreateVideo", "inputs": {"images": ["9", 0], "fps": _FPS_22}},
+            "11": {"class_type": "SaveVideo",
+                   "inputs": {"video": ["10", 0], "filename_prefix": "bee-studio-5b",
+                              "format": "mp4", "codec": "h264"}},
+        }
 
     @staticmethod
     def _pick_video(outputs: dict) -> dict | None:

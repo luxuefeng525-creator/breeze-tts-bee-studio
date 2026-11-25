@@ -2,8 +2,8 @@
 
 路由表：
   GET  /api/providers                       —— 四家 provider 列表（含定价元数据）
-  GET  /api/cost/estimate                   —— 单家估算（query: provider, resolution, duration, prompt_len）
-  GET  /api/cost/compare                    —— 四家对比（query: resolution, duration, prompt_len）
+  GET  /api/cost/estimate                   —— 单家估算（query: provider, resolution, duration, prompt_len, is_image）
+  GET  /api/cost/compare                    —— 四家对比（query: resolution, duration, prompt_len, is_image）
   POST /api/video/generate                  —— 发起视频生成（body: {provider, resolution, duration, prompt, image_url}）
   GET  /api/video/poll/{job_id}             —— 轮询一次
   POST /api/video/providers/{provider}/keys —— 暂不实现 Key 存储（前端暂时硬塞，后续加密落盘）
@@ -145,6 +145,73 @@ def _make_provider(provider: str):
     cls = getattr(mod, cls_name)
     api_key = "" if provider == "comfyui" else _get_key(provider)
     return cls(api_key=api_key)
+
+
+def _role_by_id(role_id: str) -> dict | None:
+    """从 roles.json 读角色。
+
+    角色库是 TTS 面板与 Bee Studio 共用的唯一主键（roles.json / role.id）：
+    一个角色同时挂音色（voice_id）、原型（archetype）与视频参考图（ref_image），
+    不再为视频单独建一份角色表。
+    """
+    data_dir = Path(os.environ.get("BREEZE_DATA") or (_ROOT / "data"))
+    f = data_dir / "roles.json"
+    try:
+        roles = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return next((r for r in roles if r.get("id") == role_id), None)
+
+
+def _ref_image_for_cloud(role: dict) -> str:
+    """把角色的 ref_image 变成云端能拉取的绝对 URL。
+
+    四家云端 provider 都把 image_url 原样发给第三方 API，本机 127.0.0.1
+    或局域网地址它拉不到。所以要么角色里存的就是公网 URL，要么配
+    BEE_PUBLIC_BASE（内网穿透/图床域名）把 /api/refs/... 拼成公网地址。
+    """
+    from api.providers import ProviderError
+    raw = str(role.get("ref_image") or "").strip()
+    if not raw:
+        raise ProviderError(f"角色「{role.get('name')}」还没有参考图，请先在角色库里上传")
+    if raw.startswith(("http://", "https://")):
+        return raw
+    base = os.environ.get("BEE_PUBLIC_BASE", "").strip().rstrip("/")
+    if not base:
+        raise ProviderError(
+            "参考图现在是本机文件，云端模型拉不到。请设置环境变量 BEE_PUBLIC_BASE"
+            "（例如 https://你的域名）把 /api/refs/ 暴露到公网，"
+            "或给这个角色填公网图片 URL 后再出片")
+    return base + raw
+
+
+def _ref_image_local(role: dict) -> str:
+    """本地 provider 用：把 /api/refs/... 映射成本机绝对路径，返回 file: 引用。
+
+    ComfyUI 在同一台机器上，读不到 URL，只能读文件；provider 会负责
+    裁剪与上传到 ComfyUI 的 input 目录。
+    """
+    from api.providers import ProviderError
+    raw = str(role.get("ref_image") or "").strip()
+    if not raw:
+        raise ProviderError(f"角色「{role.get('name')}」还没有参考图，请先在角色库里上传")
+    data_dir = Path(os.environ.get("BREEZE_DATA") or (_ROOT / "data"))
+    if raw.startswith("/api/refs/"):
+        p = (data_dir / "refs" / raw[len("/api/refs/"):]).resolve()
+    else:
+        p = Path(raw).resolve()
+    if not p.is_file():
+        raise ProviderError("参考图文件不存在，请重新上传")
+    return "file:" + str(p)
+
+
+def _require_ref_consent(role: dict) -> None:
+    """肖像授权是硬门槛：没有授权记录就不许把图送到第三方。"""
+    from api.providers import ProviderError
+    if not str(role.get("ref_consent_at") or "").strip():
+        raise ProviderError(
+            f"角色「{role.get('name')}」的参考图缺少肖像授权记录，"
+            "请重新上传并在弹窗里勾选授权确认")
 
 
 def _poll_video_job(prov, job_id: str, result, budget: float) -> None:
@@ -639,9 +706,12 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         duration = float(qs.get("duration", ["5"])[0])
         prompt = qs.get("prompt", [""])[0]
         prompt_len = int(qs.get("prompt_len", [len(prompt)] or [0])[0] or 0)
+        # 带不带参考图是两条完全不同的路：本地 comfyui 带图走 Wan2.2 5B（约 5 分钟），
+        # 不带图走 1.3B（约 35 秒）。不解析这个参数就会把 5 分钟的活报成 35 秒。
+        is_image = str(qs.get("is_image", ["0"])[0]).lower() in ("1", "true", "yes", "on")
         try:
             q = estimate(provider, resolution, duration,
-                         prompt=prompt, prompt_len=prompt_len)
+                         prompt=prompt, prompt_len=prompt_len, is_image=is_image)
             _h_json(h, {
                 "provider": q.provider, "label": q.provider_label,
                 "resolution": q.resolution,
@@ -652,6 +722,7 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
                 "adjustment_label": q.adjustment_label,
                 "total_cost": q.total_cost,
                 "eta_sec": q.eta_sec,
+                "supports_image_input": q.supports_image_input,
                 "notes": q.notes,
             })
         except Exception as e:
@@ -664,8 +735,10 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         resolution = qs.get("resolution", ["720p"])[0]
         duration = float(qs.get("duration", ["5"])[0])
         prompt = qs.get("prompt", [""])[0]
+        # 与 /api/cost/estimate 同一口径：带图时本地 comfyui 是 5B 档，不是 1.3B
+        is_image = str(qs.get("is_image", ["0"])[0]).lower() in ("1", "true", "yes", "on")
         try:
-            quotes = compare(resolution, duration, prompt=prompt)
+            quotes = compare(resolution, duration, prompt=prompt, is_image=is_image)
             _h_json(h, [
                 {"provider": q.provider, "label": q.provider_label,
                  "total_cost": q.total_cost, "eta_sec": q.eta_sec,
@@ -873,6 +946,25 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         duration = float(body.get("duration", 5))
         prompt = str(body.get("prompt", ""))
         image_url = str(body.get("image_url", ""))
+        role_id = str(body.get("role_id") or "").strip()
+        from api.providers import GenRequest, ProviderError
+        # 角色参考图：传 role_id 即可，服务端从 roles.json 解析，
+        # 前端不必自己拼 URL，也避免绕开授权校验。
+        if role_id:
+            role = _role_by_id(role_id)
+            if not role:
+                _h_json(h, {"error": "角色不存在，请刷新后重试"}, 404)
+                return True
+            try:
+                _require_ref_consent(role)
+                # 本地走 file:（ComfyUI 读本机文件），云端走公网 URL
+                if provider == "comfyui":
+                    image_url = _ref_image_local(role)
+                else:
+                    image_url = _ref_image_for_cloud(role)
+            except ProviderError as e:
+                _h_json(h, {"error": str(e)}, 400)
+                return True
 
         # 1. Key 检查（comfyui 是本机服务，不需要 Key）
         api_key = "" if provider == "comfyui" else _get_key(provider)
@@ -888,7 +980,6 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             return True
 
         # 3. 发起任务
-        from api.providers import GenRequest, ProviderError
         try:
             result = prov.generate(GenRequest(
                 prompt=prompt, image_url=image_url,
@@ -1281,21 +1372,32 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         if not isinstance(shot_list, list) or not shot_list:
             _h_json(h, {"error": "shots 列表不能为空"}, 400)
             return True
-        if not _get_key(provider):
+        if provider != "comfyui" and not _get_key(provider):
             _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
             return True
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from api.providers import load_provider, GenRequest, ProviderError
+        from api.providers import GenRequest, ProviderError
 
-        prov = load_provider(provider)
+        # 原先这里 import 了不存在的 load_provider，批量出片一调就 ImportError。
+        # 统一走 _make_provider，comfyui 无 Key 也能建。
+        prov = _make_provider(provider)
         batch_results = []  # [{shot_index, job_id, status, error}]
 
         def _one(idx: int, shot: dict) -> dict:
             try:
+                img = str(shot.get("image_url") or "")
+                rid = str(shot.get("role_id") or "").strip()
+                if rid:
+                    role = _role_by_id(rid)
+                    if not role:
+                        return {"shot_index": idx, "status": "failed", "error": "角色不存在"}
+                    _require_ref_consent(role)
+                    img = (_ref_image_local(role) if provider == "comfyui"
+                           else _ref_image_for_cloud(role))
                 req = GenRequest(
                     prompt=str(shot.get("prompt") or ""),
-                    image_url=str(shot.get("image_url") or ""),
+                    image_url=img,
                     duration=float(shot.get("duration") or shot.get("duration_sec") or 5),
                     resolution=str(shot.get("resolution") or "720p"),
                 )
@@ -1311,32 +1413,10 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "shot_index": idx,
                 }
                 _video_job_write(initial)
-                # 启动轮询线程（复用单镜头逻辑）
-                def _poll():
-                    deadline = time.time() + 300
-                    while time.time() < deadline:
-                        time.sleep(5)
-                        try:
-                            r = prov.poll(result, jid)
-                            j = _video_job_read(jid) or {}
-                            j.update({
-                                "status": r.status, "video_url": r.video_url,
-                                "actual_cost": r.actual_cost, "error": r.error,
-                                "poll_count": int(j.get("poll_count") or 0) + 1,
-                            })
-                            _video_job_write(j)
-                            if r.status in ("succeeded", "failed"):
-                                return
-                        except Exception as e:
-                            j = _video_job_read(jid) or {}
-                            j["error"] = str(e)[:200]
-                            _video_job_write(j)
-                    j = _video_job_read(jid) or {}
-                    if j.get("status") not in ("succeeded", "failed"):
-                        j["status"] = "failed"
-                        j["error"] = "轮询超时（300s）"
-                        _video_job_write(j)
-                threading.Thread(target=_poll, daemon=True).start()
+                # 复用单镜头轮询：本地给 30 分钟，云端 300 秒
+                budget = 1800 if provider == "comfyui" else 300
+                threading.Thread(target=_poll_video_job,
+                                 args=(prov, jid, result, budget), daemon=True).start()
                 return {"shot_index": idx, "job_id": jid, "status": "queued"}
             except ProviderError as e:
                 return {"shot_index": idx, "status": "failed", "error": str(e)}

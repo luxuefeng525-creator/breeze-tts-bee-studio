@@ -655,6 +655,17 @@
     </select>
     <label class="field-label" for="roleVoice">绑定音色</label>
     <select class="input input-select" id="roleVoice" aria-label="绑定音色"></select>
+    <label class="field-label">视频参考图（可选，绑定到本角色）</label>
+    <div style="display:flex;gap:10px;align-items:center">
+      <img id="roleRefThumb" alt="" style="display:none;width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+      <input class="input" id="roleRefFile" type="file" accept="image/png,image/jpeg,image/webp" style="padding:6px">
+      <button class="btn" type="button" id="uploadRoleRefBtn">上传</button>
+    </div>
+    <label class="field-label" style="display:flex;gap:8px;align-items:flex-start;font-weight:400;cursor:pointer">
+      <input id="roleRefConsent" type="checkbox" style="margin-top:3px">
+      <span>我确认拥有这张肖像的使用授权；云端出片时会把它上传给第三方模型服务</span>
+    </label>
+    <div id="roleRefErr" style="display:none;color:var(--danger);font-size:12px"></div>
     <div class="dlg-actions">
       <button class="btn" type="button" data-close="roleDlg">取消</button>
       <button class="btn-primary" type="button" id="saveRoleBtn">保存</button>

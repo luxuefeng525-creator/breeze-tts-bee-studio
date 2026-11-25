@@ -1808,7 +1808,7 @@ async function syncProjectsFromDB() {
           prompt: sh.prompt || '',
           voice: sh.voice_prompt || '',
           emotion: sh.emotion || '中性',
-          provider: sh.provider || 'kling',
+          provider: sh.provider || 'comfyui',
           res: sh.res || '1080p',
           cost: 0,
           // 后端 shots_json 原样存取；不读回就等于每次刷新丢配音/视频/剧本绑定
@@ -1878,7 +1878,7 @@ async function autosaveProject() {
     audio_mock: !!s.audioMock,
     video_url: s.videoUrl || null,
     video_mock: !!s.videoMock,
-    provider: s.provider || 'kling',
+    provider: s.provider || 'comfyui',
     res: s.res || '1080p',
   }));
   try {
@@ -2201,8 +2201,21 @@ async function updateCost() {
   const model = $('#costModel').value;
   const res   = $('#costRes').value;
   const dur   = parseInt($('#costDuration').value) || 1;
+  // 首屏时 loadVideoModels() 还没把下拉填好，model 是空串。
+  // 这时发请求必然 400，catch 里会显示「离线 · 模型未配置」，看着像坏了。
+  if (!model) { $('#costYuan').textContent = '¥0.00'; $('#costRate').textContent = '加载中…'; return; }
+  // 本地档要看当前镜头绑没绑带参考图的角色：绑了就走 Wan2.2 5B（约 5 分钟），
+  // 不传 is_image 后端会按 1.3B 纯文本报「35 秒」，属于严重低估的报价。
+  let img = 0;
   try {
-    const r = await fetch(`${BT}/api/cost/estimate?provider=${model}&resolution=${res}&duration=${dur}`);
+    if (model === 'comfyui') {
+      const shot = getActiveShot();
+      const role = shot && (allRoles || []).find(r => r.name === shot.char);
+      if (role && role.ref_image) img = 1;
+    }
+  } catch {}
+  try {
+    const r = await fetch(`${BT}/api/cost/estimate?provider=${model}&resolution=${res}&duration=${dur}&is_image=${img}`);
     if (!r.ok) throw new Error(r.status);
     const data = await r.json();
     $('#costYuan').textContent = `¥${data.total_cost.toFixed(2)}`;
@@ -2255,6 +2268,18 @@ function _toAudioUrl(rel) {
 async function synthShot(shotId) {
   const shot = getActiveProject().shots.find(s => s.id === shotId);
   if (!shot) return;
+  // 连点两次会各建一份「[BeeStudio] xxx」剧本 + 一份同名角色副本，剧本库越用越乱
+  // （实测验收时就多出两条重复剧本）。合成期间直接挡住，等它跑完再点。
+  if (shot._synthBusy) { showToast('这条正在合成，请等它跑完再点', 'info'); return; }
+  shot._synthBusy = true;
+  try {
+    await _synthShot(shot);
+  } finally {
+    shot._synthBusy = false;
+  }
+}
+
+async function _synthShot(shot) {
   const cleanPrompt = (shot.prompt || '').replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim();
   showToast(`🎙️ 合成：${shot.title}...`, 'info');
   try {
@@ -2268,6 +2293,9 @@ async function synthShot(shotId) {
         title: `[BeeStudio] ${shot.title}`, raw, cast: []
       })});
       sid = created.id;
+      // 建完立刻落库：晚了若页面刷新或用户再点，又会新建一份重复剧本
+      shot.bt_script_id = sid;
+      _debounceAutosave();
     } else {
       // 复用旧剧本时必须刷新 raw：后端按 raw 解析情绪/台词，不更新就永远用第一次的内容，
       // 改台词或改情绪都「看起来没生效」（行状态按 _line_hash 判定，raw 不变不会误重做）。
@@ -2371,6 +2399,17 @@ async function generateVideo(shotId, cardEl) {
   const genDur = ALLOWED_DUR.reduce((a, b) => Math.abs(b - shot.duration) < Math.abs(a - shot.duration) ? b : a);
   if (genDur !== shot.duration) showToast(`⏱ 时长 ${shot.duration}s 不在模型档位，按 ${genDur}s 生成`, 'info');
   let jobId;
+  // 角色一致性：按镜头 char 找同名角色，传 role_id 由服务端解析参考图。
+  // 本地带图走 Wan2.2 TI2V-5B 真图生视频；没图则降级为 1.3B 纯文本。
+  const roleObj = (allRoles || []).find(r => r.name === shot.char);
+  let useRoleId;
+  if (roleObj && roleObj.ref_image) {
+    useRoleId = roleObj.id;
+    // 实测：1 秒片和 5 秒片都是约 5 分钟，耗时跟片长无关，别让用户以为缩短能更快
+    if (isLocal) showToast('🎭 本地走 Wan2.2 图生视频：约 5 分钟，且与片长无关（1 秒和 5 秒一样久）；期间请勿合成语音', 'info');
+  } else if (roleObj) {
+    showToast(`🎭 角色「${roleObj.name}」还没绑定参考图，本次按纯文本出片（脸不会固定）`, 'warn');
+  }
   try {
     const resp = await fetch(BT + '/api/video/generate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2380,6 +2419,7 @@ async function generateVideo(shotId, cardEl) {
         duration: genDur,
         prompt: (shot.prompt || shot.title).replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim(),
         image_url: '',
+        role_id: useRoleId,
       })
     });
     if (!resp.ok) {
@@ -3141,8 +3181,8 @@ async function _mockGenerate(topic, numShots, totalDur, audience, style) {
       prompt: (s.prompt || '') + (styleHints[style] ? ` · ${styleHints[style]}` : ''),
       voice: s.voice_prompt || '男声 · 沉稳',
       emotion: s.emotion || '中性',
-      provider: 'kling', res: '1080p',
-      cost: calcCost('kling','1080p', s.duration_sec || 5),
+      provider: 'comfyui', res: '1080p',
+      cost: calcCost('comfyui','480p', s.duration_sec || 5),
       audioUrl: null, videoReady: false,
     }));
     return { title: r.title || topic, shots, project_id: r.project_id, usedBackendMock: true };
@@ -3162,8 +3202,8 @@ async function _mockGenerate(topic, numShots, totalDur, audience, style) {
         prompt: `${topic} · ${charPool[i % charPool.length]}在${locPool[i % locPool.length]}${actionPool[i % actionPool.length]}`,
         voice: '男声 · 沉稳 · 晓峰',
         emotion: EMOTIONS[i % EMOTIONS.length],
-        provider: 'kling', res: '1080p',
-        cost: calcCost('kling','1080p',dur),
+        provider: 'comfyui', res: '1080p',
+        cost: calcCost('comfyui','480p',dur),
         audioUrl: null, videoReady: false
       });
     }
@@ -3189,8 +3229,8 @@ async function _llmGenerate(topic, numShots, totalDur, audience, style, provider
     prompt: (s.prompt || `${topic} · 镜头 ${i+1}`) + ` · ${styleHints[style] || ''}`,
     voice: s.voice_prompt || '自然配音',
     emotion: s.emotion || EMOTIONS[i % EMOTIONS.length],
-    provider: 'kling', res: '1080p',
-    cost: calcCost('kling','1080p', Math.round(totalDur / numShots)),
+    provider: 'comfyui', res: '1080p',
+    cost: calcCost('comfyui','480p', Math.round(totalDur / numShots)),
     audioUrl: null, videoReady: false
   }));
   return { title: r.title || topic, shots };
@@ -3266,8 +3306,8 @@ $('#fromScriptBtn').addEventListener('click', async () => {
         prompt: line.text || sceneTitle,
         voice: (line.role_gender === 'female' ? '女声 · 温柔' : '男声 · 沉稳'),
         emotion: line.emotion || '平静',
-        provider: 'jimeng', res: '720p',
-        cost: calcCost('jimeng','720p',Math.max(2,Math.round((line.text||'').length/5))),
+        provider: 'comfyui', res: '720p',
+        cost: calcCost('comfyui','480p',Math.max(2,Math.round((line.text||'').length/5))),
         audioUrl: line.wav ? BT + '/api/audio/' + line.wav : null,
         videoReady: false, bt_script_id: latest.id
       });
@@ -3279,7 +3319,7 @@ $('#fromScriptBtn').addEventListener('click', async () => {
           id: 'bs-' + i, num: i + 1, title: s.title || `场次 ${i+1}`,
           char: '旁白', duration: 4, prompt: s.title || '',
           voice: '男声 · 沉稳', emotion: '平静',
-          provider: 'jimeng', res: '720p', cost: calcCost('jimeng','720p',4),
+          provider: 'comfyui', res: '720p', cost: calcCost('comfyui','480p',4),
           audioUrl: null, videoReady: false, bt_script_id: latest.id
         });
       });
@@ -3581,6 +3621,12 @@ let allVoices = [];   // 缓存
 let allRoles  = [];
 let allHistory = [];
 let selectedVoiceId = null;
+// 角色原型：和 TTS 侧 ARCHETYPES 同一套键，男女老少就在这里
+const BT_ARCH_LABEL = {
+  narrator:'旁白', neutral:'通用人声',
+  elder_m:'老年男', elder_f:'老年女', teen_m:'少年男', teen_f:'少年女',
+  adult_m:'成年男', adult_f:'成年女', custom:'',
+};
 
 async function loadVoices() {
   const grid = $('#voiceGrid');
@@ -3652,14 +3698,21 @@ async function loadRoles() {
     box.innerHTML = `<div class="role-item empty">暂无角色<br>角色 = 名字 + 音色 + 默认参数</div>`;
   } else {
     const voiceMap = Object.fromEntries(allVoices.map(v => [v.id, v.name]));
-    box.innerHTML = allRoles.map(r => `
+    box.innerHTML = allRoles.map(r => {
+      const arch = BT_ARCH_LABEL[r.archetype] || '';
+      // 有参考图就显示脸，没有就用名字首字占位
+      const face = r.ref_image
+        ? `<img src="${BT}${escapeHtml(r.ref_image)}" alt="" style="width:28px;height:28px;object-fit:cover;border-radius:50%;flex-shrink:0">`
+        : `<div class="ri-avatar">${escapeHtml(r.name.charAt(0))}</div>`;
+      return `
       <div class="role-item" data-rid="${r.id}">
-        <div class="ri-avatar">${escapeHtml(r.name.charAt(0))}</div>
+        ${face}
         <div class="ri-body">
-          <div class="ri-name">${renderBold(r.name)} ${voiceMap[r.voice_id] ? `<span style="color:var(--text-faint);font-weight:400">· ${escapeHtml(voiceMap[r.voice_id])}</span>` : ''}</div>
+          <div class="ri-name">${renderBold(r.name)} ${arch ? `<span style="color:var(--text-faint);font-weight:400">· ${escapeHtml(arch)}</span>` : ''} ${voiceMap[r.voice_id] ? `<span style="color:var(--text-faint);font-weight:400">· ${escapeHtml(voiceMap[r.voice_id])}</span>` : ''}</div>
           <div class="ri-desc">${escapeHtml((r.description || '').slice(0, 40))}</div>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 }
 
@@ -3925,10 +3978,16 @@ async function loadVideoModels() {
   try {
     const provs = await apiBT('/api/providers');
     const videoProvs = provs.filter(p => p.type === 'video');
-    sel.innerHTML = videoProvs.map(p =>
-      `<option value="${p.name}">${escapeHtml(p.label)}${p.api_key_configured ? ' ✓' : ''}</option>`
-    ).join('');
-    if (sel.innerHTML === '') sel.innerHTML = '<option value="kling">Kling 3.0 Standard</option>';
+    // 本地优先、云端后排并标注未配置：不充云端时不至于一点就弹 402
+    videoProvs.sort((a, b) => (a.name === 'comfyui' ? -1 : b.name === 'comfyui' ? 1 : 0));
+    sel.innerHTML = videoProvs.map(p => {
+      const tag = p.name === 'comfyui'
+        ? ''
+        : (p.api_key_configured ? ' ✓' : ' · 未配置');
+      return `<option value="${p.name}">${escapeHtml(p.label)}${tag}</option>`;
+    }).join('');
+    if (videoProvs.some(p => p.name === 'comfyui')) sel.value = 'comfyui';
+    if (sel.innerHTML === '') sel.innerHTML = '<option value="comfyui">本地 ComfyUI（免费）</option>';
   } catch {
     sel.innerHTML = '<option value="kling">Kling 3.0 Standard</option><option value="jimeng">即梦 Jimeng Seedance 2.5</option>';
   }

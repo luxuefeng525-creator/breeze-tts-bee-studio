@@ -72,7 +72,7 @@ _LABELS: dict[Provider, str] = {
     "kling": "Kling 3.0 Standard",
     "vidu": "Vidu Q3-turbo",
     "wanx": "阿里云 wan3.0-video",
-    "comfyui": "本地 ComfyUI（免费 / Wan2.1）",
+    "comfyui": "本地 ComfyUI（免费 / Wan2.1 + Wan2.2）",
 }
 
 
@@ -135,18 +135,35 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
                          notes="输入秒 + 输出秒双重计费")
 
     if provider == "comfyui":
-        # 本地推理不产生 API 费用。RTX 5060 8GB 实测（4 步 SMD 蒸馏 + cfg1）：
-        # 热态 5 秒片端到端 34.5s（ComfyUI 内部 27.6s，其中采样 9s）；
-        # 采样随帧数近似线性，其余是固定开销，故 eta = 30 + 实际秒 * 2。
-        # 单条上限 121 帧（16fps ≈ 7.56 秒），超出部分不会生成 —— 必须如实
-        # 回报实际秒数，否则客户按 28 秒下单只拿到 7.5 秒，属于货不对板。
+        # 本地推理不产生 API 费用。两条路：
+        #   无参考图 → Wan2.1 T2V 1.3B + 4 步 SMD 蒸馏，16fps，热态约 35 秒；
+        #   带参考图 → Wan2.2 TI2V-5B，24fps，官方 20 步 / cfg5 / uni_pc。
+        # 8GB 卡上本地只跑 480p（832x480），前端已把本地档强制成 480p。
         from .providers.comfyui import ComfyUIProvider
+        if is_image:
+            real_dur = round(ComfyUIProvider._length_for_22(duration) / 24.0, 2)
+            # 实测（2026-11-26，桌面上开着浏览器/开发工具）：
+            #   25 帧 / 8 步 = 307.1 秒；121 帧 / 20 步 = 305.5 秒。
+            # 两者只差 1.6 秒 —— 耗时跟片长几乎无关，卡在「三件套 12531MB
+            # 装不进 8151MB 显存」的反复换页上，其中光文本编码器就要加载 6419MB。
+            # 所以别在文案里承诺「短一点就快一点」，那会货不对板。
+            note = ("本地显卡推理，零单价；带参考图走 Wan2.2 TI2V-5B，"
+                    "8GB 卡实测约 5 分钟，且与片长基本无关（1 秒片和 5 秒片都是 5 分钟，"
+                    "瓶颈是 10GB 权重装不进 8GB 显存的反复换页）；"
+                    "本地带图单条最长 5.04 秒（121 帧）；"
+                    "显存越充裕采样越快，但省下的被固定加载成本吃掉，端到端变化不大")
+            return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, real_dur,
+                             0.0, 0.0, "", eta_sec=300.0,
+                             supports_image_input=True, notes=note)
+        # 单条上限 121 帧（16fps ≈ 7.56 秒），超出部分不会生成 ——
+        # 必须如实回报实际秒数，否则客户按 28 秒下单只拿到 7.5 秒，属于货不对板。
         real_dur = round(ComfyUIProvider._length_for(duration) / 16.0, 2)
-        note = ("本地显卡推理，零单价；4 步蒸馏档热态约 35 秒出片，单条最长约 7.5 秒；"
+        note = ("本地显卡推理，零单价；纯文本 4 步蒸馏档热态约 35 秒出片，"
+                "单条最长约 7.5 秒；带参考图会切到 Wan2.2 TI2V-5B（约 5 分钟，与片长无关）；"
                 "服务刚启动的第一单需额外约 2~3 分钟加载模型")
         return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, real_dur,
                          0.0, 0.0, "", eta_sec=30.0 + real_dur * 2.0,
-                         supports_image_input=False, notes=note)
+                         supports_image_input=True, notes=note)
 
     raise ValueError(f"未知 provider: {provider}")
 

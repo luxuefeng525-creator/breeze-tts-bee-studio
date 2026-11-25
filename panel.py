@@ -703,6 +703,17 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.\-]+", "_", name)[:80]
 
 
+def _sniff_image_ext(data: bytes) -> str:
+    """按文件头认图片类型，不信前端给的扩展名。认不出返回空串。"""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
 # ---------- 面板 HTML ----------
 PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1179,6 +1190,29 @@ PAGE = r"""<!DOCTYPE html>
   <input id="roleName" placeholder="如：故事旁白-小雅">
   <label for="roleDesc">角色简介</label>
   <input id="roleDesc" placeholder="这个人设负责什么场景">
+  <label for="roleArch">原型（男女老少）</label>
+  <select id="roleArch">
+    <option value="custom">自定义</option>
+    <option value="narrator">旁白</option>
+    <option value="neutral">通用人声</option>
+    <option value="elder_m">老年男</option>
+    <option value="elder_f">老年女</option>
+    <option value="teen_m">少年男</option>
+    <option value="teen_f">少年女</option>
+    <option value="adult_m">成年男</option>
+    <option value="adult_f">成年女</option>
+  </select>
+  <label>视频参考图（可选，绑定到本角色）</label>
+  <div class="ref-row" style="display:flex;gap:10px;align-items:center">
+    <img id="roleRefThumb" alt="" style="display:none;width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+    <input id="roleRefFile" type="file" accept="image/png,image/jpeg,image/webp">
+  </div>
+  <label class="consent-line" style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--muted)"><input id="roleRefConsent" type="checkbox" style="margin-top:2px">
+    我确认拥有这张肖像的使用授权；云端出片时会把它上传给第三方模型服务</label>
+  <div style="margin-top:6px">
+    <button class="btn" type="button" onclick="uploadRoleRef()">上传参考图</button>
+  </div>
+  <div class="status err" id="roleRefErr" style="display:none"></div>
   <label for="roleVoice">绑定音色</label>
   <select id="roleVoice"></select>
   <div class="row">
@@ -1206,6 +1240,11 @@ const state = {
 };
 
 const TYPE_LABEL = { design:"设计", clone:"克隆", direction:"导向" };
+const ARCH_LABEL = {
+  narrator:"旁白", neutral:"通用人声", custom:"",
+  elder_m:"老年男", elder_f:"老年女", teen_m:"少年男", teen_f:"少年女",
+  adult_m:"成年男", adult_f:"成年女",
+};
 
 function api(path, opts) {
   return fetch(path, opts).then(async (r) => {
@@ -1499,9 +1538,15 @@ async function refreshRoles() {
   if (!state.roles.length) {
     box.innerHTML = '<div class="empty">暂无角色<br>角色 = 名字 + 音色 + 默认参数</div>'; return;
   }
-  box.innerHTML = state.roles.map((r) => `
+  box.innerHTML = state.roles.map((r) => {
+    const arch = ARCH_LABEL[r.archetype] || "";
+    const face = r.ref_image
+      ? `<img src="${escapeHtml(r.ref_image)}" alt="" style="width:34px;height:34px;object-fit:cover;border-radius:8px;margin-right:9px;flex:none">`
+      : "";
+    return `
     <div class="item ${state.roleId===r.id?"active":""}" onclick="pickRole('${r.id}')" role="button" tabindex="0">
-      <div class="grow"><div class="name">${escapeHtml(r.name)}</div>
+      ${face}
+      <div class="grow"><div class="name">${escapeHtml(r.name)}${arch ? ` <span style="color:var(--primary);font-weight:400;font-size:11px">${escapeHtml(arch)}</span>` : ""}</div>
       <div class="meta">${escapeHtml(r.description||voiceNameOf(r.voice_id))}</div></div>
       <button class="iconbtn" title="编辑角色" onclick="event.stopPropagation();openRoleDlg('${r.id}')">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
@@ -1509,7 +1554,8 @@ async function refreshRoles() {
       <button class="iconbtn del" title="删除角色" onclick="event.stopPropagation();deleteRole('${r.id}')">
         <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
       </button>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 function voiceNameOf(id) {
@@ -1540,6 +1586,13 @@ function openRoleDlg(id) {
   $("roleDlgTitle").textContent = r ? "编辑角色" : "新建角色";
   $("roleName").value = r ? r.name : "";
   $("roleDesc").value = r ? (r.description || "") : "";
+  $("roleArch").value = (r && r.archetype) || "custom";
+  const thumb = $("roleRefThumb");
+  if (r && r.ref_image) { thumb.src = r.ref_image + "?t=" + Date.now(); thumb.style.display = ""; }
+  else { thumb.removeAttribute("src"); thumb.style.display = "none"; }
+  $("roleRefFile").value = "";
+  $("roleRefConsent").checked = false;
+  $("roleRefErr").style.display = "none";
   $("roleCfg").value = r?.defaults?.cfg_scale ?? 4;
   $("roleSeed").value = r?.defaults?.seed ?? 42;
   $("roleVoice").innerHTML = state.voices.map((v) =>
@@ -1558,6 +1611,7 @@ async function saveRole() {
   const body = {
     name,
     description: $("roleDesc").value.trim(),
+    archetype: $("roleArch").value || "custom",
     voice_id: $("roleVoice").value || null,
     defaults: {
       cfg_scale: parseFloat($("roleCfg").value) || 4,
@@ -1574,6 +1628,32 @@ async function saveRole() {
     setStatus("角色已保存：" + name, "ok");
     await refreshRoles(); renderChips();
   } catch (e) { err.textContent = "保存失败：" + friendlyErr(e.message); err.style.display = ""; }
+}
+
+async function uploadRoleRef() {
+  const id = $("roleId").value;
+  const err = $("roleRefErr");
+  err.style.display = "none";
+  if (!id) { err.textContent = "请先保存角色，再上传参考图"; err.style.display = ""; return; }
+  const f = $("roleRefFile").files[0];
+  if (!f) { err.textContent = "请选择一张图片"; err.style.display = ""; return; }
+  if (!$("roleRefConsent").checked) { err.textContent = "请先勾选肖像授权确认"; err.style.display = ""; return; }
+  const fd = new FormData();
+  fd.append("role_id", id);
+  fd.append("consent", "true");
+  fd.append("file", f);
+  try {
+    const r = await fetch("/api/refs/upload", { method: "POST", body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || j.error || String(r.status));
+    const thumb = $("roleRefThumb");
+    thumb.src = j.ref_image + "?t=" + Date.now();
+    thumb.style.display = "";
+    $("roleRefFile").value = "";
+    $("roleRefConsent").checked = false;
+    setStatus("参考图已上传", "ok");
+    await refreshRoles();
+  } catch (e) { err.textContent = "上传失败：" + friendlyErr(e.message); err.style.display = ""; }
 }
 
 async function deleteRole(id) {
@@ -2273,7 +2353,21 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file(target, "audio/wav")
             return
         if path.startswith("/api/refs/"):
-            self._serve_file(REFS / _safe_name(path.rsplit("/", 1)[-1]), "audio/wav")
+            # 参考图挂在 data/refs/characters/<role_id>/<hash>.png，
+            # 音色参考仍是 data/refs/<file>.wav：必须支持子路径。
+            # 只允许在 REFS 目录内，挡掉 .. 与绝对路径穿越。
+            import mimetypes
+            rel = unquote(path[len("/api/refs/"):])
+            base = REFS.resolve()
+            target = (base / rel).resolve()
+            if target != base and base not in target.parents:
+                self._err("路径不合法", 400)
+                return
+            if not target.is_file():
+                self._err("not found", 404)
+                return
+            self._serve_file(target, mimetypes.guess_type(str(target))[0]
+                             or "application/octet-stream")
             return
         if path.startswith("/api/videos/"):
             self._serve_video(path[len("/api/videos/"):])
@@ -2303,6 +2397,63 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+
+        # ---- 角色参考图上传（R-01 存储 + R-04 肖像授权）----
+        if path == "/api/refs/upload":
+            fields, files = parse_multipart(body, ctype)
+            rid = str(fields.get("role_id") or "").strip()
+            consent = str(fields.get("consent") or "").strip().lower()
+            if not re.fullmatch(r"r_[A-Za-z0-9_-]{1,40}", rid):
+                self._err("role_id 不合法", 400)
+                return
+            # 法务边界：没有明确授权不落盘。前端勾选框不是装饰，
+            # 这里必须再校验一次，否则直接打接口就能绕过。
+            if consent not in ("1", "true", "yes", "on"):
+                self._err("请先勾选确认：你拥有该肖像的使用授权", 400)
+                return
+            up = files.get("file")
+            if not up:
+                self._err("缺少参考图文件", 400)
+                return
+            _fname, data = up
+            if len(data) > 10 * 1024 * 1024:
+                self._err("参考图不能超过 10MB", 400)
+                return
+            ext = _sniff_image_ext(data)
+            if not ext:
+                self._err("只接受 PNG / JPEG / WebP 图片", 400)
+                return
+            role = next((r for r in _load("roles.json") if r.get("id") == rid), None)
+            if not role:
+                self._err("角色不存在，请刷新后重试", 404)
+                return
+            import hashlib
+            digest = hashlib.sha1(data).hexdigest()[:16]
+            folder = REFS / "characters" / rid
+            folder.mkdir(parents=True, exist_ok=True)
+            # 覆盖语义：同一角色只留一张参考图，先清旧图再落新图
+            for old in folder.iterdir():
+                if old.is_file():
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+            fname = f"{digest}.{ext}"
+            (folder / fname).write_bytes(data)
+            ref_url = f"/api/refs/characters/{rid}/{fname}"
+
+            def _apply(items, _rid=rid, _url=ref_url):
+                for r in items:
+                    if r.get("id") == _rid:
+                        r["ref_image"] = _url
+                        r["ref_consent_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        r["ref_consent_ver"] = "v1"
+                        return {"found": r}
+                return {"found": None}
+
+            _update_json("roles.json", _apply)
+            self._json({"ok": True, "ref_image": ref_url})
+            return
 
         # ---- W2-3c: 朗读预览 ----
         if path == "/api/norm/preview":
@@ -2559,13 +2710,19 @@ class Handler(BaseHTTPRequestHandler):
                 speed = float(d.get("speed") or 1.0)
             except (TypeError, ValueError):
                 speed = 1.0
+            # 原型必须是白名单里的键：拼错会建出一个「没有原型」的空壳角色，
+            # 用户以为选了老年女，实际卡片什么都不显示。
+            arch = str(d.get("archetype") or "custom").strip()
+            from tts_pipeline.script import ARCHETYPES as _ARCH
+            if arch not in _ARCH:
+                return self._err(f"不认识的原型「{arch}」")
             role = {
                 "id": _new_id("r"),
                 "name": wanted,
                 "description": d.get("description", ""),
                 "voice_id": d.get("voice_id"),
                 # 剧本台依赖这两个字段：原型决定音色描述，默认情绪决定该角色的基调
-                "archetype": d.get("archetype") or "custom",
+                "archetype": arch,
                 # 空串 = 未设置：剧本台据此走「自动推断」。
                 # 若在这里填「中性」，会让所有无标签行都恒为中性，
                 # 标点与关键词推断永远不触发。
@@ -3045,7 +3202,17 @@ class Handler(BaseHTTPRequestHandler):
                         for k in ("description", "voice_id", "defaults",
                                   "archetype", "default_emotion", "accent"):
                             if k in d:
+                                if k == "archetype":
+                                    from tts_pipeline.script import ARCHETYPES as _ARCH
+                                    if str(d[k] or "custom") not in _ARCH:
+                                        raise _ValidationError(f"不认识的原型「{d[k]}」")
                                 r[k] = d[k]
+                        # 参考图只允许清空：非空路径只能由 /api/refs/upload 写，
+                        # 否则 PUT 能绕过肖像授权校验直接指向任意图片。
+                        if "ref_image" in d and not str(d.get("ref_image") or "").strip():
+                            r["ref_image"] = ""
+                            r["ref_consent_at"] = ""
+                            r["ref_consent_ver"] = ""
                         if _name:
                             r["name"] = _name
                         if "speed" in d:

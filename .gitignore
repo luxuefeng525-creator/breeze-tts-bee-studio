@@ -19,6 +19,7 @@ htmlcov/
 
 # local runtime artifacts
 *.log
+*.log.err
 check_*.bin
 *.bak-depthgraph
 .wheels/

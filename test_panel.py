@@ -127,11 +127,19 @@ def _req(url, method="GET", body=None, ctype=None, timeout=30):
 
 
 def test_index_page(base_url):
+    # 首页 302 到 Bee Studio（方案 A 多 Tab 共存），旧面板在 /index.html。
+    # 原断言固定 "/" 返回 BreezeTTS Studio，与现行跳转冲突，属过期用例。
     with urllib.request.urlopen(base_url + "/", timeout=10) as r:
         html = r.read().decode("utf-8")
+        final_url = r.geturl()
     assert r.status == 200
-    assert "BreezeTTS Studio" in html
+    assert final_url.endswith("/bee-studio.html")
     assert "音色库" in html and "角色库" in html and "合成历史" in html
+
+    with urllib.request.urlopen(base_url + "/index.html", timeout=10) as r2:
+        page = r2.read().decode("utf-8")
+    assert r2.status == 200
+    assert "BreezeTTS Studio" in page
 
 
 def test_voices_crud(base_url):

@@ -140,3 +140,100 @@ def test_resume_pending_restarts_poll_after_restart(tmp_path, monkeypatch):
     # 已完成的任务不该被重复挂线程
     R.resume_pending_video_jobs()
     assert R._video_job_read("zombie-1")["status"] == "succeeded"
+
+
+def test_generate_rejects_remote_image_url(monkeypatch):
+    """本地只吃 file: 路径；外链不下载、不静默忽略，明确报错。"""
+    from api.providers import GenRequest, ProviderError
+    p = _provider()
+    monkeypatch.setattr(p, "_require_online", lambda *a, **kw: None)
+    try:
+        p.generate(GenRequest(prompt="一个人站在雨里",
+                              image_url="https://example.com/face.png"))
+    except ProviderError as e:
+        assert "只接受本机参考图" in str(e)
+    else:
+        raise AssertionError("外链参考图应当被拒绝")
+
+
+def test_generate_reports_missing_local_image(monkeypatch, tmp_path):
+    """file: 指向的文件没了，要报「参考图文件不存在」而不是随便出一片。"""
+    from api.providers import GenRequest, ProviderError
+    p = _provider()
+    monkeypatch.setattr(p, "_require_online", lambda *a, **kw: None)
+    missing = tmp_path / "nope.png"
+    try:
+        p.generate(GenRequest(prompt="x", image_url="file:" + str(missing)))
+    except ProviderError as e:
+        assert "参考图文件不存在" in str(e)
+    else:
+        raise AssertionError("缺文件应当报错")
+
+
+def test_size_for_22_uses_official_multiple_of_32():
+    """5B 官方档：宽高必须 32 的倍数，720p 是 1280x704。"""
+    assert ComfyUIProvider._size_for_22("480p") == (832, 480)
+    assert ComfyUIProvider._size_for_22("720p") == (1280, 704)
+    forgot = (832, 480)
+    assert forgot[0] % 32 == 0 and forgot[1] % 32 == 0
+
+
+def test_length_for_22_is_4n_plus_1_at_24fps():
+    """24fps、4n+1、上限 121 帧（5 秒）。"""
+    assert ComfyUIProvider._length_for_22(5) == 121
+    assert ComfyUIProvider._length_for_22(10) == 121, "超长要夹到 121"
+    assert ComfyUIProvider._length_for_22(1) == 25
+    for frames in (ComfyUIProvider._length_for_22(d) for d in (0.2, 1, 2.5, 5)):
+        assert (frames - 1) % 4 == 0
+
+
+def test_prepare_image_crops_to_target_ratio(tmp_path):
+    """竖图必须裁成目标比例，否则 Wan 内部拉伸会把脸压扁。"""
+    from PIL import Image
+    src = tmp_path / "portrait.png"
+    Image.new("RGB", (480, 832), (200, 30, 30)).save(src)
+    out = ComfyUIProvider._prepare_image(src, 832, 480)
+    try:
+        with Image.open(out) as im:
+            assert abs(im.width / im.height - 832 / 480) < 0.02, im.size
+            assert im.height == 480
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_release_if_idle_frees_when_queue_empty(monkeypatch):
+    """出片完队列空 → 释放显存，别把语音合成挤到换页。"""
+    p = _provider()
+    calls = []
+
+    def fake_get(url, *a, **kw):
+        if url.endswith("/queue"):
+            return FakeResp({"queue_running": [], "queue_pending": []})
+        raise AssertionError(url)
+
+    def fake_post(url, *a, **kw):
+        calls.append(url)
+        return FakeResp({})
+
+    monkeypatch.setattr("api.providers.comfyui.requests.get", fake_get)
+    monkeypatch.setattr("api.providers.comfyui.requests.post", fake_post)
+    p._release_if_idle()
+    assert calls == [p.base_url + "/free"]
+
+
+def test_release_if_idle_skips_when_jobs_pending(monkeypatch):
+    """队列里还有任务 → 不释放，避免下一单重新加载模型。"""
+    p = _provider()
+    calls = []
+
+    def fake_get(url, *a, **kw):
+        return FakeResp({"queue_running": [], "queue_pending": [[1, "job-b", {}, {}, []]]})
+
+    def fake_post(url, *a, **kw):
+        calls.append(url)
+        return FakeResp({})
+
+    monkeypatch.setattr("api.providers.comfyui.requests.get", fake_get)
+    monkeypatch.setattr("api.providers.comfyui.requests.post", fake_post)
+    p._release_if_idle()
+    assert calls == []

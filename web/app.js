@@ -348,7 +348,9 @@
             <input type="checkbox" data-rolesel="${esc(r.id)}" ${picked ? "checked" : ""}
                    aria-label="选中角色 ${esc(r.name)}">
           </label>
-          <span class="voice-avatar">${esc((r.name || "?").slice(0, 1))}</span>
+          ${r.ref_image
+            ? `<img class="voice-avatar" src="${esc(r.ref_image)}" alt="" style="object-fit:cover">`
+            : `<span class="voice-avatar">${esc((r.name || "?").slice(0, 1))}</span>`}
           <div>
             <h3>${esc(r.name)}</h3>
             <span class="card-type">${esc(roleVoiceName(r.voice_id))}</span>
@@ -498,7 +500,56 @@
     sel.innerHTML = '<option value="">（不绑定）</option>' +
       state.voices.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join("");
     sel.value = r && r.voice_id ? r.voice_id : "";
+    // 参考图：每次打开都重置选择与授权勾选，回显已有缩略图
+    $("roleRefFile").value = "";
+    $("roleRefConsent").checked = false;
+    $("roleRefErr").style.display = "none";
+    const rthumb = $("roleRefThumb");
+    if (r && r.ref_image) {
+      rthumb.src = r.ref_image + "?t=" + Date.now();
+      rthumb.style.display = "";
+    } else {
+      rthumb.removeAttribute("src");
+      rthumb.style.display = "none";
+    }
     $("roleDlg").showModal();
+  }
+
+  async function uploadRoleRef() {
+    const err = $("roleRefErr");
+    err.style.display = "none";
+    if (!state.editRoleId) {
+      err.textContent = "请先保存角色，再回来上传参考图";
+      err.style.display = "";
+      return;
+    }
+    const f = $("roleRefFile").files[0];
+    if (!f) { err.textContent = "请选择一张图片"; err.style.display = ""; return; }
+    if (!$("roleRefConsent").checked) {
+      err.textContent = "请先勾选肖像授权确认";
+      err.style.display = "";
+      return;
+    }
+    const fd = new FormData();
+    fd.append("role_id", state.editRoleId);
+    fd.append("consent", "true");
+    fd.append("file", f);
+    try {
+      const res = await fetch("/api/refs/upload", { method: "POST", body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || data.error || String(res.status));
+      const thumb = $("roleRefThumb");
+      thumb.src = data.ref_image + "?t=" + Date.now();
+      thumb.style.display = "";
+      $("roleRefFile").value = "";
+      $("roleRefConsent").checked = false;
+      toast("参考图已上传");
+      state.roles = await api("/api/roles");
+      renderRoles();
+    } catch (e) {
+      err.textContent = "上传失败：" + e.message;
+      err.style.display = "";
+    }
   }
 
   async function saveRole() {
@@ -1643,6 +1694,7 @@
     $("newRoleBtn").addEventListener("click", () => openRoleDialog(null));
     $("roleArchetype").addEventListener("change", prefillArchetypeEmotion);
     $("saveRoleBtn").addEventListener("click", saveRole);
+    $("uploadRoleRefBtn").addEventListener("click", uploadRoleRef);
     $("roleGrid").addEventListener("click", async (e) => {
       // 勾选框要先拦：不然点勾选会连带触发「选中角色并跳到工作台」
       if (e.target.closest("[data-rolesel]")) return;
