@@ -136,7 +136,7 @@ input:focus, textarea:focus, select:focus {
 }
 .topbar-logo {
   display: flex; align-items: center; gap: var(--space-2);
-  font-weight: 700; font-size: 15px;
+  font-weight: 700; font-size: var(--font-lg);
   color: var(--text);
   text-decoration: none;
   padding: var(--space-6);
@@ -174,7 +174,7 @@ input:focus, textarea:focus, select:focus {
 }
 /* G6: 顶栏 autosave 状态 */
 .topbar-save {
-  font-size: 10px; color: var(--text-muted); padding: 4px 8px; border-radius: var(--radius-md);
+  font-size: var(--font-xs); color: var(--text-muted); padding: 4px 8px; border-radius: var(--radius-md);
   background: var(--panel-2); border: 1px solid var(--border); transition: opacity .3s;
   opacity: 0; animation: fadeInOut 2.5s ease;
 }
@@ -188,7 +188,7 @@ input:focus, textarea:focus, select:focus {
 .tb-undo-btn {
   width: 28px; height: 28px; border-radius: var(--radius-md);
   background: var(--panel-2); border: 1px solid var(--border);
-  color: var(--text); font-size: 15px; cursor: pointer;
+  color: var(--text); font-size: var(--font-lg); cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   transition: background .15s, border-color .15s, color .15s;
 }
@@ -247,7 +247,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .logo-text {
   display:flex; flex-direction:column; line-height:1.15;
 }
-.logo-text .brand { font-weight: 700; font-size: 15px; letter-spacing: .2px; }
+.logo-text .brand { font-weight: 700; font-size: var(--font-lg); letter-spacing: .2px; }
 .logo-text .sub   { var(--font-xs); color: var(--text-faint); letter-spacing: .5px; text-transform: uppercase; }
 
 .theme-toggle-row {
@@ -363,7 +363,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   flex-wrap: wrap;
 }
 .toolbar .project-title-input {
-  font-weight: 700; font-size: 15px;
+  font-weight: 700; font-size: var(--font-lg);
   border: none; background: transparent; padding: var(--space-1) var(--space-1);
   min-width: 140px max-width: 240px;
 }
@@ -438,10 +438,10 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 
 /* G4-P1: prompt 显示 + inline 编辑 */
 .shot-prompt { margin: 8px 0 6px; }
-.shot-prompt .sp-text { font-size: 11px; color: var(--text-muted); line-height: 1.5; cursor: text; padding: 6px 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
+.shot-prompt .sp-text { font-size: var(--font-xs); color: var(--text-muted); line-height: 1.5; cursor: text; padding: 6px 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
 .shot-prompt .sp-text:hover { background: var(--panel-3, #333); color: var(--text); }
-.shot-prompt .sp-edit { font-size: 11px; color: var(--text); line-height: 1.5; width: 100%; padding: 6px 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
-.shot-prompt .sp-save-hint { font-size: 10px; color: var(--primary); margin-top: 2px; }
+.shot-prompt .sp-edit { font-size: var(--font-xs); color: var(--text); line-height: 1.5; width: 100%; padding: 6px 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
+.shot-prompt .sp-save-hint { font-size: var(--font-xs); color: var(--primary); margin-top: 2px; }
 
 .shot-preview {
   position: relative;
@@ -603,7 +603,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .voice-card .vc-name strong { font-weight: 700; color: var(--primary-deep); }
 .voice-card .vc-meta { var(--font-xs); color: var(--text-faint); display: flex; gap: var(--space-1) align-items: center; }
 .voice-card .vc-tag {
-  font-size: 9px; padding: var(--space-1) var(--space-1) border-radius: var(--radius-md) font-weight: 600;
+  font-size: var(--font-xs); padding: var(--space-1) var(--space-1) border-radius: var(--radius-md) font-weight: 600;
   text-transform: uppercase; letter-spacing: .5px;
 }
 .voice-card .vc-tag.clone    { background: rgba(33,150,243,.12); color: #2196F3; }
@@ -721,7 +721,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   border-bottom: var(--space-1) solid var(--border);
   display: flex; align-items: center; justify-content: space-between;
 }
-.modal-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.modal-title { font-size: var(--font-lg); font-weight: 700; color: var(--text); }
 .modal-shot-label { color: var(--primary-deep); margin-left: var(--space-1); }
 .modal-footer {
   padding: var(--space-3) var(--space-5);
@@ -732,7 +732,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   background: transparent; border: 1px solid var(--border);
   color: var(--text-muted); padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm); cursor: pointer;
-  font-size: 13px; font-weight: 500;
+  font-size: var(--font-base); font-weight: 500;
   transition: background .12s, color .12s;
 }
 .btn-ghost:hover { background: var(--panel-2); color: var(--text); }
@@ -740,7 +740,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   background: var(--primary); border: 1px solid var(--primary);
   color: #1a1410; padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm); cursor: pointer;
-  font-size: 13px; font-weight: 600;
+  font-size: var(--font-base); font-weight: 600;
   transition: background .12s, box-shadow .12s;
 }
 .btn-primary:hover:not(:disabled) { background: var(--primary-deep); color: #fff; }
@@ -753,19 +753,19 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   padding: var(--space-3) var(--space-4);
   display: flex; flex-direction: column; gap: var(--space-1);
 }
-.sem-preview-title { font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text-faint); }
-.sem-shot { font-size: 13px; font-weight: 600; color: var(--text); }
-.sem-prompt-preview { font-size: 12px; color: var(--text-muted); line-height: 1.5; max-height: 48px; overflow: hidden; }
+.sem-preview-title { font-size: var(--font-xs); font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text-faint); }
+.sem-shot { font-size: var(--font-base); font-weight: 600; color: var(--text); }
+.sem-prompt-preview { font-size: var(--font-sm); color: var(--text-muted); line-height: 1.5; max-height: 48px; overflow: hidden; }
 .sem-instruction { display: flex; flex-direction: column; gap: var(--space-1); }
-.sem-instruction label { font-size: 12px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: var(--space-1); }
-.sem-hint { font-size: 11px; font-weight: 400; color: var(--text-faint); }
+.sem-instruction label { font-size: var(--font-sm); font-weight: 600; color: var(--text); display: flex; align-items: center; gap: var(--space-1); }
+.sem-hint { font-size: var(--font-xs); font-weight: 400; color: var(--text-faint); }
 .sem-instruction textarea {
   width: 100%; resize: vertical;
   padding: var(--space-2) var(--space-3);
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text); font-size: 13px; line-height: 1.5;
+  color: var(--text); font-size: var(--font-base); line-height: 1.5;
   font-family: inherit;
   transition: border-color .12s, box-shadow .12s;
   box-sizing: border-box;
@@ -1016,8 +1016,12 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   flex: 1;
   display:flex; flex-direction: column; gap: var(--space-1);
   min-width: 0;
-  overflow: hidden;
 }
+/* G9: zoom 时横向滚动由 tracks-wrap 统一管理 */
+.tl-tracks-wrap { overflow-x: auto !important; overflow-y: hidden; scroll-behavior: smooth; }
+.tl-tracks-wrap::-webkit-scrollbar { height: 8px; }
+.tl-tracks-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.tl-tracks-wrap::-webkit-scrollbar-track { background: transparent; }
 .tl-track-row {
   display:flex; align-items:center; gap: var(--space-2);
   flex: 1;
@@ -1044,7 +1048,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   position: absolute; top: 0; bottom: 0;
   border-radius: var(--radius-sm);
   display:flex; align-items:center; justify-content:center;
-  font-size: 9px; font-weight: 700; color: rgba(0,0,0,.6);
+  font-size: var(--font-xs); font-weight: 700; color: rgba(0,0,0,.6);
   overflow:hidden;
   white-space: nowrap; text-overflow: ellipsis; padding: 0 var(--space-1);
 }
@@ -1103,13 +1107,13 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .tl-clip-resizing { opacity: .6; }
 .tl-tracks-wrap { position: relative; flex: 1; display:flex; flex-direction:column; gap: var(--space-1) }
 .tl-time-ruler {
-  position: absolute; top: -14px; left: 0; right: 0;
+  position: absolute; top: -14px; left: 0;
   height: 12px;
   display:flex;
   pointer-events: none;
 }
 .tl-time-ruler span {
-  font-size: 9px; color: var(--text-faint);
+  font-size: var(--font-xs); color: var(--text-faint);
   position: absolute;
   transform: translateX(-50%);
 }
@@ -1147,7 +1151,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   border-bottom: var(--space-1) solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
 }
-.modal-head h2 { font-size: 15px; font-weight: 700; }
+.modal-head h2 { font-size: var(--font-lg); font-weight: 700; }
 .modal-close { var(--font-lg); color: var(--text-muted); padding: var(--space-1) var(--space-2) border-radius: var(--radius-sm) }
 .modal-close:hover { background: var(--panel-2); color: var(--text); }
 .modal-body { padding: var(--space-5) display:flex; flex-direction:column; gap: var(--space-3) }
@@ -1213,7 +1217,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   <a class="topbar-logo" href="/bee-studio.html">
     <span class="emoji">🐝</span>
     <span class="brand">小蜜蜂</span>
-    <span style="color:var(--text-faint);font-size:12px">Bee Studio</span>
+    <span style="color:var(--text-faint);font-size: var(--font-sm)">Bee Studio</span>
   </a>
   <div class="topbar-nav">
     <a class="topbar-tab active"   href="/bee-studio.html">🎬 视频工作台</a>
@@ -1229,7 +1233,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
     </div>
     <span class="topbar-status" id="beeEngineStatus">✓ 双引擎就绪</span>
     <span class="topbar-save" id="beeSaveHint" style="display:none">💾 自动保存 · 刚刚</span>
-    <a href="/" class="topbar-tab external" style="padding:6px 10px;font-size:11px">BreezeTTS 首页</a>
+    <a href="/" class="topbar-tab external" style="padding:6px 10px;font-size: var(--font-xs)">BreezeTTS 首页</a>
   </div>
 </nav>
 
@@ -1487,7 +1491,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
       </div>
       <!-- LLM 后端选择条（模型 registry 动态） -->
       <div class="form-group">
-        <label>🧠 AI 剧本模型 <a href="#" id="scriptLLMAdd" style="margin-left:auto;font-size:11px;color:var(--primary);font-weight:600">+ 添加自定义</a></label>
+        <label>🧠 AI 剧本模型 <a href="#" id="scriptLLMAdd" style="margin-left:auto;font-size: var(--font-xs);color:var(--primary);font-weight:600">+ 添加自定义</a></label>
         <div class="llm-row">
           <select id="scriptLLM">
             <!-- 动态从 /api/models?type=llm 加载 -->
@@ -1576,7 +1580,8 @@ const EMOTIONS = ['平静','忧郁','紧张','愤怒','温柔','悬疑','兴奋'
 let state = {
   activeProjectId: null,
   activeShotId: null,
-  projects: []
+  projects: [],
+  tlZoom: 100    // G9: 时间轴缩放（%），100=满宽显示全部；>100=横向滚动看细节
 };
 
 // G4-P0: 从 /api/bee/scripts + /api/bee/script/{pid} 同步所有项目到 state
@@ -2089,7 +2094,7 @@ async function generateVideo(shotId, cardEl) {
   if (!keyConfigured) {
     showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} 未配置 API Key — 用 Mock 演示`, 'warn');
     // Mock fallback
-    preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size:11px">Mock 演示模式</div>';
+    preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">Mock 演示模式</div>';
     setTimeout(() => {
       shot.videoReady = true;
       shot.videoUrl = '';
@@ -2099,7 +2104,7 @@ async function generateVideo(shotId, cardEl) {
     return;
   }
 
-  preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size:11px">AI 生成中... 预计 90-180s</div>';
+  preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">AI 生成中... 预计 90-180s</div>';
   showToast(`🎬 调用 ${PROV_LABEL[shot.provider] || shot.provider} 生成视频（${shot.res} · ${shot.duration}s）...`, 'info');
 
   // 2. 发起任务
@@ -2137,7 +2142,7 @@ async function generateVideo(shotId, cardEl) {
         showToast('❌ 生成失败: ' + (poll.error || '未知原因'), 'error');
         return;
       }
-      preview.querySelector('.shot-preview') || (preview.innerHTML = `<div class="spinner"></div><div style="margin-top:6px;font-size:10px">轮询中 #${poll.poll_count||0} · ${poll.status}</div>`);
+      preview.querySelector('.shot-preview') || (preview.innerHTML = `<div class="spinner"></div><div style="margin-top:6px;font-size: var(--font-xs)">轮询中 #${poll.poll_count||0} · ${poll.status}</div>`);
     } catch { /* 网络抖动就多等一次 */ }
   }
 
@@ -2207,37 +2212,48 @@ function renderTimeline() {
   const total = project.totalDuration;
   const shots = project.shots;
 
-  // Ruler
+  // G9: zoom 缩放 —— track base width（px），clip 用绝对 px 定位
+  const zoomScale = state.tlZoom / 100;
+  const trackWrap = $('.tl-tracks-wrap');
+  const containerW = trackWrap.clientWidth; // 可视宽度
+  const trackBaseW = Math.max(containerW, 200) * zoomScale; // 缩放后实际轨道宽度
+
+  // Ruler —— 宽度 = trackBaseW，ticks 用 px
   const ruler = $('#tlRuler');
   ruler.innerHTML = '';
-  const ticks = 6;
+  ruler.style.width = trackBaseW + 'px';
+  const ticks = 8;
   for (let i = 0; i <= ticks; i++) {
-    const pct = (i / ticks) * 100;
+    const xPx = (i / ticks) * trackBaseW;
     const s = document.createElement('span');
-    s.style.left = pct + '%';
+    s.style.left = xPx + 'px';
     s.textContent = fmtTime((i / ticks) * total);
     ruler.appendChild(s);
   }
 
-  // Video clips — all shots sequential
+  // Video clips — all shots sequential，用 px 定位（G9 zoom）
   let offset = 0;
   const videoTrack = $('#tlTrackVideo');
   const voiceTrack = $('#tlTrackVoice');
   const subTrack   = $('#tlTrackSub');
   const bgmTrack   = $('#tlTrackBGM');
-  [videoTrack, voiceTrack, subTrack].forEach(t => t.innerHTML = '');
-  bgmTrack.innerHTML = '';
+  [videoTrack, voiceTrack, subTrack, bgmTrack].forEach(t => {
+    t.innerHTML = '';
+    t.style.minWidth = trackBaseW + 'px'; // 确保轨道可横向滚动
+  });
 
   shots.forEach((s, idx) => {
-    const left = (offset / total) * 100;
-    const width = (s.duration / total) * 100;
+    // G9: px 值（而不是 %），这样 zoom 缩放后 clip 物理像素变大
+    const leftPx = (offset / total) * trackBaseW;
+    const widthPx = (s.duration / total) * trackBaseW;
 
     // Video clip（可平移 + 可 resize）
     const v = document.createElement('div');
     v.className = 'tl-clip tl-clip-video';
     v.dataset.shot = idx;
     v.dataset.track = 'video';
-    v.style.left = left + '%'; v.style.width = width + '%';
+    v.style.left = leftPx + 'px';
+    v.style.width = widthPx + 'px';
     v.textContent = `S${s.num} · ${s.title}`;
     // 右侧 resize handle
     const vh = document.createElement('div');
@@ -2246,40 +2262,81 @@ function renderTimeline() {
     v.appendChild(vh);
     videoTrack.appendChild(v);
 
-    // Voice clip（跟随 video 偏移 + 宽度）
+    // Voice clip（跟随 video 偏移 + 宽度，按比例 px）
     const vo = document.createElement('div');
     vo.className = 'tl-clip tl-clip-voice';
     vo.dataset.shot = idx;
     vo.dataset.track = 'voice';
-    vo.style.left = (left + width * 0.075) + '%';
-    vo.style.width = (width * 0.85) + '%';
+    vo.style.left = (leftPx + widthPx * 0.075) + 'px';
+    vo.style.width = (widthPx * 0.85) + 'px';
     vo.textContent = `对白 S${s.num}`;
     voiceTrack.appendChild(vo);
 
-    // Sub clip（跟随 video left/width）
+    // Sub clip（跟随 video left/width，px）
     const su = document.createElement('div');
     su.className = 'tl-clip tl-clip-sub';
     su.dataset.shot = idx;
     su.dataset.track = 'sub';
-    su.style.left = left + '%';
-    su.style.width = width + '%';
+    su.style.left = leftPx + 'px';
+    su.style.width = widthPx + 'px';
     su.textContent = `字幕 S${s.num}`;
     subTrack.appendChild(su);
 
     offset += s.duration;
   });
 
-  // BGM full width
+  // BGM full width（px 100% of track）
   const bgm = document.createElement('div');
   bgm.className = 'tl-clip tl-clip-bgm';
-  bgm.style.left = '0%'; bgm.style.width = '100%';
+  bgm.style.left = '0px';
+  bgm.style.width = trackBaseW + 'px';
   bgm.textContent = '🎵 Ambient Piano · 3:28';
   bgmTrack.appendChild(bgm);
 
-  // Playhead reset
-  $('#tlPlayhead').style.left = '0%';
-  $('#tlTime').textContent = `00:00 / ${fmtTime(total)}`;
+  // Playhead reset —— 存 trackBaseW 到 _tlState，playhead 用 px
+  _tlState.trackBaseW = trackBaseW;
+  const playheadPx = (playheadT / total) * trackBaseW;
+  $('#tlPlayhead').style.left = playheadPx + 'px';
+  $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
 }
+
+// -------------------------- G9: Timeline Zoom ---------------------------
+/**
+ * @param {number} newZoom - 新的 zoom %（20-200）
+ * 核心：renderTimeline 内部会用 state.tlZoom 重新算 trackBaseW
+ * 这里额外做 scroll 位置按比例保持，让用户 zoom 后看到的区域不跳
+ */
+function setTlZoom(newZoom) {
+  newZoom = Math.max(20, Math.min(200, Math.round(newZoom)));
+  if (newZoom === state.tlZoom) return;
+  const wrap = $('.tl-tracks-wrap');
+  const oldBaseW = _tlState.trackBaseW || wrap.clientWidth;
+  // B4-fix: 保持 scroll 位置占可滚动区域的比例（不是 clientWidth）
+  const oldScrollable = Math.max(1, oldBaseW - wrap.clientWidth);
+  const scrollPct = wrap.scrollLeft / oldScrollable;
+  state.tlZoom = newZoom;
+  // 同步 slider UI
+  const slider = $('#tlZoom');
+  if (slider) slider.value = newZoom;
+  renderTimeline();
+  // 按可滚动区域比例保持 scroll
+  const newBaseW = _tlState.trackBaseW || oldBaseW;
+  const newScrollable = Math.max(0, newBaseW - wrap.clientWidth);
+  wrap.scrollLeft = Math.min(newScrollable, scrollPct * newScrollable);
+}
+
+// slider input 事件
+document.addEventListener('DOMContentLoaded', () => {
+  $('#tlZoom')?.addEventListener('input', (e) => setTlZoom(parseInt(e.target.value)));
+});
+
+// wheel-to-zoom（Ctrl/Cmd + wheel 缩放；普通 wheel 横向滚动）
+$('#tlTracks').addEventListener('wheel', (e) => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -10 : 10; // 向下 wheel = zoom out
+  setTlZoom(state.tlZoom + delta);
+}, { passive: false });
 
 // -------------------------- G7: Undo/Redo 栈 --------------------------
 // 设计：项目级栈（每个 project 独立），before/after 完整快照保证严格对偶
@@ -2433,7 +2490,9 @@ $('#tlPlayBtn').addEventListener('click', function() {
       playheadT = 0;
       start = performance.now();
     }
-    $('#tlPlayhead').style.left = (playheadT / total) * 100 + '%';
+    // G9: playhead 用 px 定位（zoom 后 trackBaseW 已在 renderTimeline 里更新）
+    const pbPx = _tlState.trackBaseW ? (playheadT / total) * _tlState.trackBaseW : 0;
+    $('#tlPlayhead').style.left = pbPx + 'px';
     $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
     playheadRAF = requestAnimationFrame(tick);
   }
@@ -2452,6 +2511,8 @@ const _tlDrag = {
   startShotWidthPct: 0,
   trackWidthPx: 0,
 };
+// G9: zoom 共享状态 —— trackBaseW = 缩放后轨道物理宽度(px)，供 drag/render 共用
+const _tlState = { trackBaseW: 0 };
 let _tlDirtied = false, _tlRAF = null;
 
 function _tlMarkDirty() {
@@ -2463,31 +2524,35 @@ function _tlRAFLoop() {
   if (!_tlDirtied) return;
   _tlDirtied = false;
   if (_tlDrag.type === 'playhead') {
-    $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
+    // G9: playhead px 定位
+    const px = _tlState.trackBaseW ? (_tlDrag._curPct / 100) * _tlState.trackBaseW : 0;
+    $('#tlPlayhead').style.left = px + 'px';
   } else {
-    // clip / resize：重算所有 shots 的 left/width 写 DOM
+    // clip / resize：重算所有 shots 的 left/width 写 DOM（px）
     _writeClipsDOM();
   }
 }
 
-// 从 state 重算并写所有 clips DOM（left/width %）
+// 从 state 重算并写所有 clips DOM（px，G9 zoom 兼容）
 function _writeClipsDOM() {
   const project = getActiveProject();
   const total = project.totalDuration;
   const shots = project.shots;
+  // G9: 用 trackBaseW 计算 px
+  const trackBaseW = _tlState.trackBaseW || $('.tl-tracks-wrap').clientWidth * (state.tlZoom / 100);
   const videoTrack = $('#tlTrackVideo');
   const voiceTrack = $('#tlTrackVoice');
   const subTrack = $('#tlTrackSub');
   let offset = 0;
   shots.forEach((s, idx) => {
-    const left = (offset / total) * 100;
-    const width = (s.duration / total) * 100;
+    const leftPx = (offset / total) * trackBaseW;
+    const widthPx = (s.duration / total) * trackBaseW;
     const v = videoTrack.querySelector(`[data-shot="${idx}"]`);
-    if (v) { v.style.left = left + '%'; v.style.width = width + '%'; }
+    if (v) { v.style.left = leftPx + 'px'; v.style.width = widthPx + 'px'; }
     const vo = voiceTrack.querySelector(`[data-shot="${idx}"]`);
-    if (vo) { vo.style.left = (left + width * 0.075) + '%'; vo.style.width = (width * 0.85) + '%'; }
+    if (vo) { vo.style.left = (leftPx + widthPx * 0.075) + 'px'; vo.style.width = (widthPx * 0.85) + 'px'; }
     const su = subTrack.querySelector(`[data-shot="${idx}"]`);
-    if (su) { su.style.left = left + '%'; su.style.width = width + '%'; }
+    if (su) { su.style.left = leftPx + 'px'; su.style.width = widthPx + 'px'; }
     offset += s.duration;
   });
   // 更新 totalDuration（可能被 resize 改了）
@@ -2543,7 +2608,7 @@ $('#tlPlayhead').addEventListener('pointerdown', (e) => {
   _tlDrag.startPlayheadPct = (playheadT / total) * 100;
   _tlDrag._curPct = _tlDrag.startPlayheadPct;
   const wrap = $('.tl-tracks-wrap').getBoundingClientRect();
-  _tlDrag.trackWidthPx = wrap.width - 14; // playhead width
+  _tlDrag.trackWidthPx = _tlState.trackBaseW - 14; // G9: 用 zoom 后的 trackBaseW，不是可视宽度（playhead width=14）
   // 暂停正在播放
   if (playheadRAF) { cancelAnimationFrame(playheadRAF); playheadRAF = null; $('#tlPlayBtn').textContent = '▶'; }
   document.body.setPointerCapture(e.pointerId);
@@ -2568,7 +2633,7 @@ $('#tlTracks').addEventListener('pointerdown', (e) => {
   const shot = project.shots[_tlDrag.shotIndex];
   const wrap = $('.tl-tracks-wrap').getBoundingClientRect();
   _tlDrag.startX = e.clientX;
-  _tlDrag.trackWidthPx = wrap.width - 14;
+  _tlDrag.trackWidthPx = _tlState.trackBaseW; // G9: zoom 后的 trackBaseW
   // 计算起始 leftPct / widthPct
   let offset = 0;
   for (let i = 0; i < _tlDrag.shotIndex; i++) offset += project.shots[i].duration;
@@ -2637,10 +2702,12 @@ document.body.addEventListener('pointermove', (e) => {
     // 更新 DOM（每次 swap 后 shots 数组变了，_writeClipsDOM 会重新渲染 left/width）
     _tlMarkDirty();
 
-    // 画 ghost 预览：ghost 始终跟着鼠标，宽度 = shot.duration 对应的 %
+    // 画 ghost 预览：ghost 始终跟着鼠标，宽度 = shot.duration 对应的 px（G9 zoom）
     const ghostLeftPct = Math.max(0, Math.min(100, ((offsets[idx] + dx / totalPxPerSec) / total) * 100));
-    ghost.style.left = ghostLeftPct + '%';
-    ghost.style.width = (shot.duration / total) * 100 + '%';
+    const ghostLeftPx = (ghostLeftPct / 100) * _tlState.trackBaseW;
+    const ghostWidthPx = (shot.duration / total) * _tlState.trackBaseW;
+    ghost.style.left = ghostLeftPx + 'px';
+    ghost.style.width = ghostWidthPx + 'px';
 
     // 目标高亮：找到 ghost 中心落在哪个 clip 区域里，给加 'swap-target' 类
     const centerPct = ghostLeftPct + (shot.duration / total) * 100 / 2;
@@ -2695,7 +2762,9 @@ document.body.addEventListener('pointerup', () => {
   // Playhead commit
   if (_tlDrag.type === 'playhead') {
     playheadT = (_tlDrag._curPct / 100) * total;
-    $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
+    // G9: playhead 用 px 定位
+    const pbPx = _tlState.trackBaseW ? (_tlDrag._curPct / 100) * _tlState.trackBaseW : 0;
+    $('#tlPlayhead').style.left = pbPx + 'px';
     $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
     // playhead 移动不改数据，不入 undo 栈
   } else if (_tlDrag.type === 'clip') {
