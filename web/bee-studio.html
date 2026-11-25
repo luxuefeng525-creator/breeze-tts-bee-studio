@@ -227,7 +227,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .app {
   display: grid !important;
   grid-template-columns: 260px 1fr 320px !important;
-  grid-template-rows: 1fr 80px !important;
+  grid-template-rows: 1fr 128px !important;
   grid-template-areas:
     "left center right"
     "tl   bottom bottom";
@@ -246,7 +246,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 /* 窄屏才单栏 — 960px 对 Bee Studio 来说还是够三栏的，改小 */
 @media (max-width: 768px) {
-  .app { grid-template-columns: 1fr !important; grid-template-rows: auto auto auto 80px !important; grid-template-areas: "left" "center" "right" "bottom" !important; overflow:auto !important; height:auto !important; min-height:100vh !important; }
+  .app { grid-template-columns: 1fr !important; grid-template-rows: auto auto auto 128px !important; grid-template-areas: "left" "center" "right" "bottom" !important; overflow:auto !important; height:auto !important; min-height:100vh !important; }
   .sidebar-left, .sidebar-right { border: none; border-bottom:1px solid var(--border); max-height:none; }
   .main-center { min-height: 60vh; }
 }
@@ -467,10 +467,10 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .shot-char .char-dot { width: var(--space-2); height: 8px; border-radius: 50%; background: var(--primary); }
 
 /* G4-P1: prompt 显示 + inline 编辑 */
-.shot-prompt { margin: 8px 0 6px; }
-.shot-prompt .sp-text { font-size: var(--font-xs); color: var(--text-muted); line-height: 1.5; cursor: text; padding: 6px 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
+.shot-prompt { margin: 8px 0; }
+.shot-prompt .sp-text { font-size: var(--font-xs); color: var(--text-muted); line-height: 1.5; cursor: text; padding: 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
 .shot-prompt .sp-text:hover { background: var(--panel-3, #333); color: var(--text); }
-.shot-prompt .sp-edit { font-size: var(--font-xs); color: var(--text); line-height: 1.5; width: 100%; padding: 6px 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
+.shot-prompt .sp-edit { font-size: var(--font-xs); color: var(--text); line-height: 1.5; width: 100%; padding: 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
 .shot-prompt .sp-save-hint { font-size: var(--font-xs); color: var(--primary); margin-top: 2px; }
 
 .shot-preview {
@@ -543,7 +543,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 /* Dropdown */
 .dropdown-wrap { position: relative; }
 .dropdown-menu {
-  position: absolute; top: calc(100% + 6px); left: 0;
+  position: absolute; top: calc(100% + 8px); left: 0;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -599,8 +599,10 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .cost-total {
   display:flex; align-items:baseline; justify-content:space-between;
+  flex-wrap: wrap; gap: var(--space-1) var(--space-3);
   margin: var(--space-2);
 }
+.cost-total .cost-rate { flex-basis: 100%; }
 .cost-amount { font-size: var(--font-2xl); font-weight: 800; color: var(--accent); letter-spacing: -.5px; }
 .cost-amount .unit { font-size: var(--font-base); color: var(--text-muted); font-weight: 500; margin: var(--space-1); }
 .cost-rate { font-size: var(--font-xs); color: var(--text-muted); }
@@ -1046,14 +1048,14 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 
 .tl-tracks {
   flex: 1;
-  display:flex; flex-direction: column; gap: var(--space-1);
+  display:flex; flex-direction: column; gap: 2px;
   min-width: 0;
 }
 /* G9: zoom 时横向滚动由 tracks-wrap 统一管理（scrollbar 样式见下方 .tl-tracks-wrap 合并规则） */
 .tl-track-row {
   display:flex; align-items:center; gap: var(--space-2);
-  flex: 1;
-  min-height: 16px;
+  flex: 0 0 auto;
+  height: 22px; min-height: 22px;
 }
 .tl-track-label {
   font-size: var(--font-xs); font-weight: 700;
@@ -1062,7 +1064,8 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   text-transform: uppercase;
   width: 56px; flex-shrink: 0;
   text-align: right;
-  padding: var(--space-1);
+  padding: 0 var(--space-1);
+  line-height: 1;
 }
 .tl-track {
   flex: 1;
@@ -1135,8 +1138,8 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .tl-clip-resizing { opacity: .6; }
 /* D4-fix: 合并为单一定义 —— 布局 + G9 zoom 横向滚动 + 自定义 scrollbar */
 .tl-tracks-wrap {
-  position: relative; flex: 1; display:flex; flex-direction:column; gap: var(--space-1);
-  overflow-x: auto !important; overflow-y: hidden; scroll-behavior: smooth;
+  position: relative; flex: 1; display:flex; flex-direction:column; gap: 2px;
+  overflow-x: auto !important; overflow-y: auto; scroll-behavior: smooth;
 }
 .tl-tracks-wrap::-webkit-scrollbar { height: 8px; }
 .tl-tracks-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
@@ -2262,14 +2265,16 @@ async function generateVideo(shotId, cardEl) {
   const preview = cardEl.querySelector('.shot-preview');
 
   // 1. 先检查 API Key 有没有配置（调 /api/providers）
-  let keyConfigured = false;
+  let keyConfigured = false, keyState = 'missing';
   try {
     const provs = await apiBT('/api/providers');
     const p = provs.find(x => x.name === shot.provider);
     keyConfigured = !!(p && p.api_key_configured);
+    keyState = (p && p.key_state) || (keyConfigured ? 'ok' : 'missing');
   } catch {}
   if (!keyConfigured) {
-    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} 未配置 API Key — 用 Mock 演示`, 'warn');
+    const why = keyState === 'placeholder' ? 'API Key 是测试占位，需换成真实 Key' : '未配置 API Key';
+    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why} — 用 Mock 演示`, 'warn');
     // Mock fallback
     preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">Mock 演示模式</div>';
     setTimeout(() => {
@@ -3303,7 +3308,7 @@ function renderKeyManager() {
     card.className = 'km-card' + (st.configured ? ' km-card-configured' : ' km-card-empty') + (st.testing ? ' km-card-testing' : '') + (isOpen ? ' km-open' : '');
     card.dataset.provider = p.key;
     const statusCls = st.testing ? 'km-status testing' : (st.lastResult === 'ok' || st.configured ? 'km-status ok' : (st.lastResult === 'fail' ? 'km-status fail' : 'km-status empty'));
-    const statusTxt = st.testing ? '连通中...' : (st.lastResult === 'ok' ? '✓ 连通' : (st.lastResult === 'fail' ? '✗ 超时' : (st.configured ? '已配置' : '未配置')));
+    const statusTxt = st.testing ? '连通中...' : (st.lastResult === 'ok' ? '✓ 连通' : (st.lastResult === 'fail' ? '✗ 超时' : (st.keyState === 'placeholder' ? '占位 Key' : (st.configured ? '已配置' : '未配置'))));
     card.innerHTML = `
       <div class="km-card-head" data-action="toggle">
         <div class="km-logo ${p.key}">${p.short.charAt(0)}</div>
@@ -3440,7 +3445,10 @@ async function loadKeyStates() {
   try {
     const provs = await apiBT('/api/providers');
     provs.forEach(p => {
-      if (kmState[p.name]) kmState[p.name].configured = !!p.api_key_configured;
+      if (kmState[p.name]) {
+        kmState[p.name].configured = !!p.api_key_configured;
+        kmState[p.name].keyState = p.key_state || (p.api_key_configured ? 'ok' : 'missing');
+      }
     });
   } catch {}
   renderKeyManager();
