@@ -58,6 +58,7 @@ def _db_init() -> None:
           status TEXT DEFAULT 'pending',
           output_path TEXT DEFAULT '',
           output_duration REAL DEFAULT 0,
+          zip_path TEXT DEFAULT '',
           error TEXT DEFAULT '',
           created_at TEXT,
           updated_at TEXT,
@@ -78,6 +79,11 @@ def _db_init() -> None:
         # 前端 autosave 的 catch 又把错误吞掉，表现为「镜头编辑永远存不进去」。
         try:
             conn.execute("ALTER TABLE scripts ADD COLUMN updated_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # 已经有了
+        # 迁移：导出结果要回传 ZIP 路径，早期表没有这一列
+        try:
+            conn.execute("ALTER TABLE export_jobs ADD COLUMN zip_path TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # 已经有了
         conn.commit()
@@ -123,14 +129,16 @@ def _export_job_write(job: dict) -> None:
     _db_init()
     job = dict(job)
     job.setdefault("created_at", datetime.datetime.now().isoformat())
+    job.setdefault("zip_path", "")
     job["updated_at"] = datetime.datetime.now().isoformat()
     with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
         conn.execute("""
-            INSERT INTO export_jobs(job_id,project_id,status,output_path,output_duration,error,created_at,updated_at,poll_count)
-            VALUES(:job_id,:project_id,:status,:output_path,:output_duration,:error,:created_at,:updated_at,:poll_count)
+            INSERT INTO export_jobs(job_id,project_id,status,output_path,output_duration,zip_path,error,created_at,updated_at,poll_count)
+            VALUES(:job_id,:project_id,:status,:output_path,:output_duration,:zip_path,:error,:created_at,:updated_at,:poll_count)
             ON CONFLICT(job_id) DO UPDATE SET
               status=excluded.status, output_path=excluded.output_path,
-              output_duration=excluded.output_duration, error=excluded.error,
+              output_duration=excluded.output_duration, zip_path=excluded.zip_path,
+              error=excluded.error,
               updated_at=excluded.updated_at, poll_count=excluded.poll_count
         """, job)
         conn.commit()
@@ -189,6 +197,33 @@ def _new_export_job_id() -> str:
 
 def _new_job_id() -> str:
     return f"vj_{int(time.time())}_{os.getpid()}"
+
+
+def _media_local_path(raw: str) -> str:
+    """把前端传来的媒体引用归一成本地真实文件路径。
+
+    前端存的配音是 `http://host:7861/api/audio/scripts/x/full.wav` 这种 URL，
+    而 ffmpeg_export 用 `os.path.isfile()` 判断配音在不在——URL 一律判否，
+    成片就会整条静音（用户看到"导出成功"，实际没声音）。这里把
+    `/api/audio/` `/api/refs/` 前缀映射回 data/ 下的真实文件。
+
+    认不出来的返回空串，由上层按「黑屏占位 / 静音」处理。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    data_dir = Path(os.environ.get("BREEZE_DATA") or (_ROOT / "data"))
+    if s.startswith(("http://", "https://")):
+        s = urlparse(s).path or ""
+    for prefix, sub in (("/api/audio/", "audio"), ("/api/refs/", "refs")):
+        if s.startswith(prefix):
+            cand = (data_dir / sub / s[len(prefix):]).resolve()
+            return str(cand) if cand.is_file() else ""
+    p = Path(s)
+    if p.is_absolute():
+        return str(p) if p.is_file() else ""
+    cand = (_ROOT / s).resolve()
+    return str(cand) if cand.is_file() else ""
 
 
 # ------------------------------------------------------------------
@@ -570,6 +605,10 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
             job["poll_count"] = int(job.get("poll_count") or 0) + 1
             _export_job_write(job)
         resp = dict(job) if job else {}
+        if resp:
+            # 前端读的是 mp4_path / duration_total，库里是 output_* 列名，补个别名免得两边对不上
+            resp["mp4_path"] = resp.get("output_path", "")
+            resp["duration_total"] = resp.get("output_duration", 0)
         _h_json(h, resp if resp else {"error": "job not found"}, 200 if resp else 404)
         return True
 
@@ -834,10 +873,10 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         for s in shots_raw:
             shots.append(ShotSegment(
                 shot_id=str(s.get("shot_id") or s.get("id") or ""),
-                video_path=str(s.get("video_path") or s.get("videoUrl") or ""),
+                video_path=_media_local_path(str(s.get("video_path") or s.get("videoUrl") or "")),
                 start_sec=float(s.get("start_sec", 0.0)),
                 end_sec=float(s.get("end_sec") or s.get("duration", 5.0)),
-                voice_path=str(s.get("voice_path") or s.get("audioUrl") or ""),
+                voice_path=_media_local_path(str(s.get("voice_path") or s.get("audioUrl") or "")),
                 subtitle=str(s.get("subtitle") or s.get("prompt") or ""),
                 scene_no=int(s.get("scene_no") or 1),
             ))
@@ -871,8 +910,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     j["status"] = "failed"
                     j["error"] = result["error"]
                 else:
+                    # 表里只有 output_path / output_duration / zip_path 三列，
+                    # 直接 j.update(result) 会把 mp4_path 这类键丢掉，前端拿不到产物路径。
                     j["status"] = "succeeded"
-                    j.update(result)
+                    j["output_path"] = result.get("mp4_path", "")
+                    j["output_duration"] = result.get("duration_total", 0)
+                    j["zip_path"] = result.get("zip_path", "")
                 _export_job_write(j)
             except Exception as exc:
                 j = _export_job_read(ejid) or {}
@@ -895,6 +938,34 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         api_key = str(body.get("api_key", "")).strip() or _get_key(provider)
 
         # G2-2: 提前定义，force_mock 块依赖它们（Python 闭包要求先定义后引用）
+        def _norm_emotion(raw_emo) -> str:
+            """把 LLM 的自由情绪词收敛到 TTS 引擎认的 11 个枚举之一。
+
+            LLM 习惯写「悬疑、紧绷、未知」这类复合词，后端 EMOTIONS 只认单值，
+            原样传下去会被静默丢弃、全部变成中性（用户看到的就是「情绪对不上」）。
+            """
+            from tts_pipeline.script import EMOTIONS
+            s = str(raw_emo or "").strip()
+            if s in EMOTIONS:
+                return s
+            for ch in EMOTIONS:
+                if ch != "中性" and ch in s:
+                    return ch
+            alias = {
+                "忧郁": "悲伤", "失落": "悲伤", "难过": "悲伤", "压抑": "悲伤", "沉重": "悲伤",
+                "喜悦": "开心", "愉快": "开心", "欢快": "开心",
+                "兴奋": "激动", "热血": "激动", "爆发": "激动",
+                "惊慌": "恐惧", "惊恐": "恐惧",
+                "不安": "紧张", "焦躁": "紧张", "急促": "紧张", "紧绷": "紧张",
+                "悬疑": "迟疑", "疑惑": "迟疑", "犹豫": "迟疑", "沉思": "迟疑", "未知": "迟疑",
+                "嘲讽": "讽刺", "幽默": "讽刺",
+                "疲倦": "疲惫", "虚弱": "疲惫", "释然": "温柔", "温暖": "温柔", "亲昵": "温柔",
+            }
+            for k, v in alias.items():
+                if k in s:
+                    return v
+            return "中性"
+
         def _normalize_shot(s: dict | None) -> dict:
             """兜底填空值，保证每个 shot 都有必需字段。"""
             s = s or {}
@@ -902,7 +973,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "scene_no": int(s.get("scene_no") or s.get("shot_num") or 1),
                 "title": str(s.get("title") or f"镜头{s.get('scene_no')}"),
                 "char": str(s.get("char") or s.get("character") or ""),
-                "emotion": str(s.get("emotion") or "中性"),
+                "emotion": _norm_emotion(s.get("emotion")),
                 "duration_sec": int(s.get("duration_sec") or s.get("duration") or 5),
                 "prompt": str(s.get("prompt") or s.get("description") or ""),
                 "voice_prompt": str(s.get("voice_prompt") or s.get("voice_text") or ""),
@@ -955,7 +1026,9 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
             "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
             "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
-            "4. 角色名保持一致；情绪多样化（悬疑→冲突→高潮→收尾）。\n"
+            "4. 角色名保持一致。emotion 必须从这 11 个词里选、且只能选一个："
+            "中性/温柔/开心/激动/悲伤/愤怒/紧张/迟疑/恐惧/讽刺/疲惫（这是 TTS 情绪引擎的枚举，写别的词会被丢弃）；"
+            "整体情绪要有起伏（紧张→爆发→收束）。\n"
             "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
         )
         user_prompt = (

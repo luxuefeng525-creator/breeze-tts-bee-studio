@@ -2010,12 +2010,10 @@ function renderStoryboard() {
         <span class="sp-save-hint" data-role="save-hint" style="display:none">💾 已保存</span>
       </div>
 
-      <div class="shot-preview ${shot.videoUrl ? 'preview-ready' : (shot.videoMock ? 'preview-mock' : '')}" data-state="${shot.videoUrl ? 'ready' : (shot.videoMock ? 'mock' : 'empty')}">
+      <div class="shot-preview ${shot.videoUrl ? 'preview-ready' : ''}" data-state="${shot.videoUrl ? 'ready' : 'empty'}">
         ${shot.videoUrl
           ? `<video class="shot-video" src="${shot.videoUrl}" controls preload="metadata" playsinline></video>`
-          : shot.videoMock
-            ? `<div class="pv-empty"><div class="sc-emoji">🎞️</div><strong>示例预览</strong><span>未接真实视频模型 · 配置 API Key 后可生成真片</span></div>`
-            : `<div class="pv-empty"><div class="sc-emoji">🎬</div><strong>尚未生成视频</strong><span>点下方「视频生成」开始</span></div>`}
+          : `<div class="pv-empty"><div class="sc-emoji">🎬</div><strong>尚未生成视频</strong><span>需配置视频模型 API Key（LongCat 只能写剧本）</span></div>`}
       </div>
 
       <div class="shot-actions">
@@ -2322,17 +2320,8 @@ async function generateVideo(shotId, cardEl) {
   } catch {}
   if (!keyConfigured) {
     const why = keyState === 'placeholder' ? 'API Key 是测试占位，需换成真实 Key' : '未配置 API Key';
-    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。LongCat 是文本模型写不了视频，需配 Kling / 即梦 / vidu / 万相 的 Key`, 'warn');
-    // Mock fallback
-    preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">Mock 演示模式</div>';
-    setTimeout(() => {
-      shot.videoMock = true;
-      shot.videoReady = false;
-      shot.videoUrl = '';
-      _debounceAutosave();
-      renderStoryboard();
-      showToast('⚠️ 已标记「示例预览」· 未接真实视频模型（配置 API Key 后生成真片）', 'warn');
-    }, 2200 + Math.random() * 1500);
+    // 不写 mock、不动预览：没 Key 就是没 Key，不能给人看假成功
+    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。LongCat 是文本模型写不了视频；剧本/配音/导出不受影响。要出视频需配 Kling / 即梦 / Vidu / 万相 其中一家的真实 Key`, 'warn');
     return;
   }
 

@@ -55,6 +55,16 @@ def _ffprobe_duration(path: str) -> float:
         return 0.0
 
 
+def _is_media(path: str) -> bool:
+    """可读媒体：本地真实文件，或 http(s) 直链（ffmpeg 能直接拉流）。
+
+    只判 os.path.isfile 会把网络 URL 当成"没有素材"，整段静音/黑屏。
+    """
+    if not path:
+        return False
+    return os.path.isfile(path) or path.startswith(("http://", "https://"))
+
+
 # ------------------------------------------------------------------
 # 所有内部函数都用相对路径（cwd = tmpdir）
 # ------------------------------------------------------------------
@@ -70,7 +80,7 @@ def build_concat_list(shots: list[ShotSegment], tmpdir: Path,
         dur = max(0.5, round(s.end_sec - s.start_sec, 2))
         durations.append(dur)
 
-        if not s.video_path or not os.path.isfile(s.video_path):
+        if not _is_media(s.video_path):
             # 黑屏 + 静音
             _run([FFMPEG, "-y",
                  "-f", "lavfi", "-i", f"color=c=black:s=1280x720:d={dur}",
@@ -98,7 +108,7 @@ def build_audio_mix(shots: list[ShotSegment], durations: list[float],
     for i, s in enumerate(shots):
         d = durations[i]
         seg_rel = f"voice_{i:03d}.wav"
-        if s.voice_path and os.path.isfile(s.voice_path):
+        if _is_media(s.voice_path):
             _run([FFMPEG, "-y", "-i", s.voice_path,
                  "-t", f"{d:.3f}", "-ac", "2", "-ar", "44100", seg_rel],
                  cwd=str(cwd))
