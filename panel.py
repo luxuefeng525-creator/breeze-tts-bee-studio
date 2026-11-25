@@ -1952,6 +1952,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _serve_video(self, rel: str) -> None:
+        """提供 data/videos/ 下的成片。
+
+        不能用 _serve_file：整段读进内存对几十 MB 的视频太重，而且 <video>
+        拖动进度条要靠 Range 请求，一次性 200 全量响应会让浏览器不能 seek。
+        """
+        if not rel or "\\" in rel or ":" in rel or "\x00" in rel or "/" in rel:
+            self._err("视频路径不合法", 400)
+            return
+        if rel != _safe_name(rel) or not rel.lower().endswith((".mp4", ".webm", ".mkv")):
+            self._err("视频路径不合法", 400)
+            return
+        target = (DATA / "videos" / rel).resolve()
+        base = (DATA / "videos").resolve()
+        if not target.is_file() or not target.is_relative_to(base):
+            self._err("not found", 404)
+            return
+        size = target.stat().st_size
+        ctype = "video/mp4" if rel.lower().endswith(".mp4") else "video/webm"
+        start, end = 0, size - 1
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            try:
+                a, _, b = rng[len("bytes="):].partition("-")
+                if a:
+                    start = int(a)
+                if b:
+                    end = int(b)
+            except ValueError:
+                start, end = 0, size - 1
+            start = max(0, min(start, size - 1))
+            end = max(start, min(end, size - 1))
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+        length = end - start + 1
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        with open(target, "rb") as f:
+            f.seek(start)
+            left = length
+            while left > 0:
+                chunk = f.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
     def _proxy_stream(self, api_path: str, body: bytes, content_type: str, timeout: int = 600,
                       save_as: str = ""):
         """流式透传：按块转发上游 PCM，不整段缓冲（W2-2 S1 修复）。
@@ -2189,6 +2241,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/refs/"):
             self._serve_file(REFS / _safe_name(path.rsplit("/", 1)[-1]), "audio/wav")
+            return
+        if path.startswith("/api/videos/"):
+            self._serve_video(path[len("/api/videos/"):])
             return
         self._err("not found", 404)
 

@@ -486,6 +486,17 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         from api.cost_calc import list_providers, _PRICING_TABLE
         out = []
         for p in list_providers():
+            if p["name"] == "comfyui":
+                # 本地 ComfyUI 是本机服务，没有 Key 这回事；key_state=local 让前端
+                # 不要弹"请配置 API Key"，直接当可用 provider
+                out.append({
+                    "name": p["name"], "label": p["label"],
+                    "type": "video",
+                    "pricing": _PRICING_TABLE.get(p["name"], {}),
+                    "api_key_configured": True,
+                    "key_state": "local",
+                })
+                continue
             ok, state = _key_state(p["name"])
             out.append({
                 "name": p["name"], "label": p["label"],
@@ -776,9 +787,9 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         prompt = str(body.get("prompt", ""))
         image_url = str(body.get("image_url", ""))
 
-        # 1. Key 检查
-        api_key = _get_key(provider)
-        if not api_key:
+        # 1. Key 检查（comfyui 是本机服务，不需要 Key）
+        api_key = "" if provider == "comfyui" else _get_key(provider)
+        if provider != "comfyui" and not api_key:
             _h_json(h, {"error": f"{provider} 未配置 API Key，请先在「设置 → API Keys」里填入"}, 402)
             return True
 
@@ -789,6 +800,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "kling":  ("api.providers.kling",  "KlingProvider"),
                 "vidu":   ("api.providers.vidu",   "ViduProvider"),
                 "wanx":   ("api.providers.wanx",   "WanxProvider"),
+                "comfyui": ("api.providers.comfyui", "ComfyUIProvider"),
             }
             mod_name, cls_name = _providers[provider]
             import importlib
@@ -830,9 +842,11 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             "duration": duration,
         }
         _video_job_write(initial_job)
-        # 后台线程：阻塞轮询（最多 300s，5s 间隔）
+        # 后台线程：阻塞轮询。本地 ComfyUI 单卡跑 5 秒片子要几分钟，给 30 分钟；
+        # 云端通常 1~5 分钟，维持原来的 300s。
+        _poll_budget = 1800 if provider == "comfyui" else 300
         def _run():
-            deadline = time.time() + 300
+            deadline = time.time() + _poll_budget
             while time.time() < deadline:
                 time.sleep(5)
                 try:
@@ -857,7 +871,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             j = _video_job_read(job_id)
             if j and j["status"] not in ("succeeded", "failed"):
                 j["status"] = "failed"
-                j["error"] = "轮询超时（300s）"
+                j["error"] = f"轮询超时（{int(_poll_budget)}s）"
                 _video_job_write(j)
         threading.Thread(target=_run, daemon=True).start()
         # 立刻返回

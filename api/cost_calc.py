@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Provider = Literal["jimeng", "kling", "vidu", "wanx"]
+Provider = Literal["jimeng", "kling", "vidu", "wanx", "comfyui"]
 Resolution = Literal["720p", "1080p"]
 
 
@@ -34,6 +34,10 @@ _PRICING_TABLE: dict[Provider, dict[Resolution, dict]] = {
     "wanx": {
         "720p": {"output_per_s": 0.40, "input_per_s": 0.20, "mode": "t2v/i2v", "ratio": ["16:9"], "durations": list(range(5, 31, 5))},
         "1080p": {"output_per_s": 0.60, "input_per_s": 0.30, "mode": "t2v/i2v", "ratio": ["16:9"], "durations": list(range(5, 31, 5))},
+    },
+    # ---- 本地 ComfyUI（Wan2.1 T2V 1.3B）：零单价，只花自己的电和显卡时间 ----
+    "comfyui": {
+        "480p": {"output_per_s": 0.0, "mode": "t2v", "ratio": ["16:9"], "durations": [5, 10, 15, 20]},
     },
 }
 
@@ -68,6 +72,7 @@ _LABELS: dict[Provider, str] = {
     "kling": "Kling 3.0 Standard",
     "vidu": "Vidu Q3-turbo",
     "wanx": "阿里云 wan3.0-video",
+    "comfyui": "本地 ComfyUI（免费 / Wan2.1）",
 }
 
 
@@ -128,6 +133,13 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
         return CostQuote("wanx", _LABELS["wanx"], resolution, duration, real_dur,
                          base, 0.0, "", eta_sec=150.0,
                          notes="输入秒 + 输出秒双重计费")
+
+    if provider == "comfyui":
+        # 本地推理不产生 API 费用；只提示平均耗时（单卡跑 5 秒约 3~8 分钟）
+        return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, duration,
+                         0.0, 0.0, "", eta_sec=max(180.0, duration * 60),
+                         supports_image_input=False,
+                         notes="本地显卡推理，零单价；使用期间语音合成需暂停（显存不足）")
 
     raise ValueError(f"未知 provider: {provider}")
 
