@@ -199,16 +199,18 @@ input:focus, textarea:focus, select:focus {
 /* ============================================================
    GRID LAYOUT
    ============================================================ */
+html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .app {
-  display: grid;
-  grid-template-columns: 260px 1fr 320px;
-  grid-template-rows: 1fr 80px;
+  display: grid !important;
+  grid-template-columns: 260px 1fr 320px !important;
+  grid-template-rows: 1fr 80px !important;
   grid-template-areas:
     "left center right"
     "tl   bottom bottom";
-  height: calc(100vh - 48px);
-  width: 100vw;
-  overflow: hidden;
+  height: calc(100vh - 48px) !important;
+  width: 100vw !important;
+  overflow: hidden !important;
+  box-sizing: border-box !important;
 }
 .sidebar-left   { grid-area: left;   border-right: 1px solid var(--border); background: var(--panel); display:flex; flex-direction:column; min-height:0; }
 .main-center    { grid-area: center; display:flex; flex-direction:column; min-height:0; overflow:hidden; background: var(--bg); }
@@ -216,10 +218,11 @@ input:focus, textarea:focus, select:focus {
 .timeline-bar   { grid-column: 1 / -1; grid-row: 2; border-top: 1px solid var(--border); background: var(--panel); display:flex; align-items:stretch; min-height:0; }
 
 @media (max-width: 1200px) {
-  .app { grid-template-columns: 220px 1fr 280px; }
+  .app { grid-template-columns: 220px 1fr 280px !important; }
 }
-@media (max-width: 960px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto auto auto 80px; grid-template-areas: "left" "center" "right" "bottom"; overflow:auto; height:auto; min-height:100vh; }
+/* 窄屏才单栏 — 960px 对 Bee Studio 来说还是够三栏的，改小 */
+@media (max-width: 768px) {
+  .app { grid-template-columns: 1fr !important; grid-template-rows: auto auto auto 80px !important; grid-template-areas: "left" "center" "right" "bottom" !important; overflow:auto !important; height:auto !important; min-height:100vh !important; }
   .sidebar-left, .sidebar-right { border: none; border-bottom:1px solid var(--border); max-height:none; }
   .main-center { min-height: 60vh; }
 }
@@ -2315,6 +2318,7 @@ function undoDragCommit(label) {
 }
 
 // --- 非拖拽模式 ---
+const _undoMerge = { timer: null, label: null, before: null };
 function commitUndo(fn, label = '修改') {
   const before = _snapshot();
   fn();
@@ -2323,14 +2327,32 @@ function commitUndo(fn, label = '修改') {
   if (JSON.stringify(before) === JSON.stringify(after)) return;
   const stack = _getUndoStack(before.id);
   if (!stack) return;
-  stack.undo.push({ before, after, label });
-  if (stack.undo.length > _UNDO_LIMIT) stack.undo.shift();
-  stack.redo.length = 0;
-  updateUndoRedoUI();
+  // G8: 批量合并 — 1s 内同 label 只保留最早的 before 和最新的 after
+  if (_undoMerge.timer && _undoMerge.label === label) {
+    _undoMerge.before = _undoMerge.before; // 保持最早的 before
+  } else {
+    _undoMerge.before = before;
+    _undoMerge.label = label;
+  }
+  _undoMerge.pendingAfter = after;
+  clearTimeout(_undoMerge.timer);
+  _undoMerge.timer = setTimeout(() => {
+    const mergedBefore = _undoMerge.before;
+    const mergedAfter = _undoMerge.pendingAfter;
+    const mergedLabel = _undoMerge.label;
+    _undoMerge.timer = null; _undoMerge.label = null; _undoMerge.before = null;
+    if (!mergedBefore || !mergedAfter) return;
+    stack.undo.push({ before: mergedBefore, after: mergedAfter, label: mergedLabel });
+    if (stack.undo.length > _UNDO_LIMIT) stack.undo.shift();
+    stack.redo.length = 0;
+    updateUndoRedoUI();
+  }, 1000);
 }
 
 // --- Undo/Redo 动作 ---
 function undo() {
+  // G8: 先清掉 pending 的 merge（undo 应该回到 merge 之前）
+  if (_undoMerge.timer) { clearTimeout(_undoMerge.timer); _undoMerge.timer = null; _undoMerge.label = null; _undoMerge.before = null; }
   const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
   if (!stack || !stack.undo.length) return;
   const entry = stack.undo.pop();
@@ -2338,9 +2360,11 @@ function undo() {
   stack.redo.push({ before: JSON.parse(JSON.stringify(entry.before)), after: JSON.parse(JSON.stringify(entry.after)), label: entry.label });
   _writeClipsDOM(); renderStoryboard(); renderInspector();
   _debounceAutosave(); updateUndoRedoUI();
-  showToast(`↶ 撤销：${entry.label}`, 'info', 1200);
+  // G8: 撤销 toast 优化 — 用顶栏小字而非 showToast 叠层
+  _flashUndoState('↶ 撤销：' + entry.label);
 }
 function redo() {
+  if (_undoMerge.timer) { clearTimeout(_undoMerge.timer); _undoMerge.timer = null; _undoMerge.label = null; _undoMerge.before = null; }
   const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
   if (!stack || !stack.redo.length) return;
   const entry = stack.redo.pop();
@@ -2348,7 +2372,26 @@ function redo() {
   stack.undo.push({ before: JSON.parse(JSON.stringify(entry.before)), after: JSON.parse(JSON.stringify(entry.after)), label: entry.label });
   _writeClipsDOM(); renderStoryboard(); renderInspector();
   _debounceAutosave(); updateUndoRedoUI();
-  showToast(`↷ 重做：${entry.label}`, 'info', 1200);
+  _flashUndoState('↷ 重做：' + entry.label);
+}
+// G8: 顶栏撤销/重做状态（2s 淡出，不和 autosave 冲突——用独立元素）
+let _undoToastTimer = null;
+function _flashUndoState(text) {
+  const b = $('#beeUndoHint') || (() => {
+    const el = document.createElement('span');
+    el.id = 'beeUndoHint';
+    el.className = 'topbar-save';
+    el.style.background = 'rgba(255,193,7,.12)';
+    el.style.borderColor = 'rgba(255,193,7,.4)';
+    el.style.color = 'var(--primary)';
+    const right = document.querySelector('.topbar-right');
+    if (right) right.insertBefore(el, right.firstChild);
+    return el;
+  })();
+  b.style.display = 'inline-block'; b.textContent = text;
+  b.style.animation = 'none'; void b.offsetWidth; b.style.animation = '';
+  clearTimeout(_undoToastTimer);
+  _undoToastTimer = setTimeout(() => { b.style.display = 'none'; }, 2000);
 }
 function updateUndoRedoUI() {
   const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
@@ -3629,17 +3672,20 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // -------------------------- Init ---------------------------
-// G4-P0: 不再用硬编码 state，从 DB 拉所有项目；但先 render 空壳让页面不白屏
-renderProjects();
-renderStoryboard();
-renderInspector();
-renderTimeline();
+// G4-P0: 从 DB 拉项目列表。空壳只渲染 sidebar / timeline 骨架；数据回来后 syncProjectsFromDB 内部补 renderStoryboard/renderInspector
 renderKeyManager();
 loadKeyStates();
+renderProjects();  // 空壳（列表区域）
+renderTimeline();  // 空壳（时间轴骨架）
 loadAllModels().then(async () => {
   await Promise.all([loadVoices(), loadRoles(), loadVideoModels(), loadLLMModels()]);
   await syncProjectsFromDB();
-  updateUndoRedoUI();  // G7: 初始化撤销按钮禁用态
+  // syncProjectsFromDB 内部已调 renderProjects + renderStoryboard，补 renderInspector + timeline
+  if (getActiveProject()) {
+    renderInspector();
+    renderTimeline();
+    updateUndoRedoUI();
+  }
 });
 </script>
 
