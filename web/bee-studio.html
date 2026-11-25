@@ -1803,8 +1803,11 @@ function getActiveProject() {
 // -------------------------- Render Storyboard ---------------------------
 function renderStoryboard() {
   const wall = $('#storyboardWall');
-  wall.innerHTML = '';
+  // P0-root-fix: 先保护再清空 —— state 未就绪时不动 DOM（保留旧内容直到数据回来）
+  if (!state.activeProjectId || !state.projects.length) return;
   const project = getActiveProject();
+  if (!project || !project.shots || !project.shots.length) return;
+  wall.innerHTML = '';
   project.shots.forEach((shot, idx) => {
     const card = document.createElement('div');
     card.className = 'shot-card';
