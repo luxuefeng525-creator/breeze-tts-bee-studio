@@ -834,38 +834,10 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         audience = str(body.get("audience", "")).strip()
         style = str(body.get("style", "")).strip()
         provider = str(body.get("provider", "longcat")).strip()
+        force_mock = bool(body.get("force_mock"))   # G2-2: 跳过 LLM 直接 Mock 并写 DB
         api_key = str(body.get("api_key", "")).strip() or _get_key(provider)
 
-        if not topic:
-            _h_json(h, {"error": "topic 必填"}, 400)
-            return True
-        if shots_count < 1 or shots_count > 30:
-            _h_json(h, {"error": "shots_count 应在 1~30 之间"}, 400)
-            return True
-
-        if not api_key:
-            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
-            return True
-
-        # 构造 system + user prompt，要求输出结构化 JSON
-        system_prompt = (
-            "你是资深短视频导演兼编剧。根据用户给的主题生成一段分镜剧本（JSON 格式）。\n"
-            "严格遵守以下约束：\n"
-            "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
-            "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
-            "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
-            "4. 角色名保持一致；情绪多样化（悬疑→冲突→高潮→收尾）。\n"
-            "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
-        )
-        user_prompt = (
-            f"主题：{topic}\n"
-            f"镜头数：{shots_count}\n"
-            f"目标受众：{audience or '通用'}\n"
-            f"风格/色调：{style or '电影感，冷暖对比'}\n\n"
-            "请输出完整 JSON。"
-        )
-
-        # A5：schema validation + retry
+        # G2-2: 提前定义，force_mock 块依赖它们（Python 闭包要求先定义后引用）
         def _normalize_shot(s: dict | None) -> dict:
             """兜底填空值，保证每个 shot 都有必需字段。"""
             s = s or {}
@@ -893,6 +865,51 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "voice_prompt": f"（mock）旁白，第 {i + 1} 句台词",
                 })
             return {"title": topic or "mock 剧本", "shots": mock_shots}
+
+        if not topic:
+            _h_json(h, {"error": "topic 必填"}, 400)
+            return True
+        if shots_count < 1 or shots_count > 30:
+            _h_json(h, {"error": "shots_count 应在 1~30 之间"}, 400)
+            return True
+
+        if force_mock:
+            # G2-2: 前端要求 Mock 模式（无 LLM Key 也要持久化剧本）
+            mock = _build_mock_script()
+            pid = body.get("project_id") or f"proj-{int(time.time())}"
+            _script_write(pid, mock["title"], "",
+                          json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
+                          topic, "mock")
+            _h_json(h, {
+                "project_id": pid, "title": mock["title"], "shots": mock["shots"],
+                "generated_by": "mock", "shots_count": len(mock["shots"]),
+                "used_mock": True, "mock_reason": "force_mock",
+            })
+            return True
+
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
+            return True
+
+        # 构造 system + user prompt，要求输出结构化 JSON
+        system_prompt = (
+            "你是资深短视频导演兼编剧。根据用户给的主题生成一段分镜剧本（JSON 格式）。\n"
+            "严格遵守以下约束：\n"
+            "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
+            "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
+            "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
+            "4. 角色名保持一致；情绪多样化（悬疑→冲突→高潮→收尾）。\n"
+            "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
+        )
+        user_prompt = (
+            f"主题：{topic}\n"
+            f"镜头数：{shots_count}\n"
+            f"目标受众：{audience or '通用'}\n"
+            f"风格/色调：{style or '电影感，冷暖对比'}\n\n"
+            "请输出完整 JSON。"
+        )
+
+        # A5：schema validation + retry （_normalize_shot / _build_mock_script 已提前到 force_mock 之前定义）
 
         try:
             from api.llm_client import call_chat

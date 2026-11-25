@@ -2186,28 +2186,53 @@ $('#scriptLLM').addEventListener('change', async () => {
 });
 
 // ========== AI 剧本生成（LLM + Mock 降级） ==========
+// G2-2: _mockGenerate 现在走后端 force_mock 端点，确保 Mock 项目也持久化到 SQLite
 async function _mockGenerate(topic, numShots, totalDur, audience, style) {
-  const charPool = ['主角','女主角','神秘人','路人A','老人','孩子','旁白'];
-  const locPool  = ['街角','地铁','天台','公园','办公室','咖啡厅','楼顶','雨夜街头'];
-  const actionPool = ['缓缓走入画面中心','抬起头看向远方','停下脚步','伸手触碰','转身回望','沉默站立','加快步伐','微微一笑','紧握拳头','深吸一口气','闭上眼睛','回眸一笑'];
-  const styleHints = {'电影感 · Cinematic':'广角镜头，浅景深，4K','赛博朋克 · Cyberpunk':'霓虹色彩，雨夜里的全息广告','日系动画 · Anime':'柔和色调，精致侧脸特写','写实纪录片 · Doc':'手持摄影，真实质感'};
-  const shots = []; const per = totalDur / numShots;
-  for (let i = 0; i < numShots; i++) {
-    const dur = Math.round(per + (Math.random()*2-1));
-    shots.push({
-      id: 's-gen-' + i, num: i + 1,
-      title: `镜头 ${i+1} · ${locPool[i % locPool.length]}`,
-      char: charPool[i % charPool.length],
-      duration: dur,
-      prompt: `${topic} — ${styleHints[style] || ''} ${charPool[i % charPool.length]}在${locPool[i % locPool.length]}${actionPool[i % actionPool.length]}。受众定位：${audience}。`,
-      voice: '男声 · 沉稳 · 晓峰',
-      emotion: EMOTIONS[i % EMOTIONS.length],
-      provider: 'kling', res: '1080p',
-      cost: calcCost('kling','1080p',dur),
-      audioUrl: null, videoReady: false
+  try {
+    const body = { topic, shots_count: numShots, audience, style, force_mock: true };
+    const r = await apiBT('/api/llm/script-gen', {
+      method: 'POST', body: JSON.stringify(body)
     });
+    if (r.error) throw new Error(r.error);
+    // 复用 _llmGenerate 里的 ShotSegment 映射
+    const styleHints = {'电影感 · Cinematic':'广角镜头，浅景深，4K','赛博朋克 · Cyberpunk':'霓虹色彩，雨夜里的全息广告','日系动画 · Anime':'柔和色调','写实纪录片 · Doc':'手持摄影，真实质感'};
+    const shots = (r.shots || []).map((s, i) => ({
+      id: 's-mock-' + i, num: i + 1,
+      title: s.title || `镜头 ${i+1}`,
+      char: s.char || '主角',
+      duration: s.duration_sec || 5,
+      prompt: (s.prompt || '') + (styleHints[style] ? ` · ${styleHints[style]}` : ''),
+      voice: s.voice_prompt || '男声 · 沉稳',
+      emotion: s.emotion || '中性',
+      provider: 'kling', res: '1080p',
+      cost: calcCost('kling','1080p', s.duration_sec || 5),
+      audioUrl: null, videoReady: false,
+    }));
+    return { title: r.title || topic, shots, project_id: r.project_id, usedBackendMock: true };
+  } catch (err) {
+    // 最终兜底：后端 force_mock 也挂了，用纯前端规则模板（不持久化）
+    const charPool = ['主角','女主角','神秘人','路人A','老人','孩子','旁白'];
+    const locPool  = ['街角','地铁','天台','公园','办公室','咖啡厅','楼顶','雨夜街头'];
+    const actionPool = ['缓缓走入画面中心','抬起头看向远方','停下脚步','伸手触碰','转身回望','沉默站立','加快步伐','微微一笑','紧握拳头','深吸一口气','闭上眼睛','回眸一笑'];
+    const shots = []; const per = totalDur / numShots;
+    for (let i = 0; i < numShots; i++) {
+      const dur = Math.round(per + (Math.random()*2-1));
+      shots.push({
+        id: 's-gen-' + i, num: i + 1,
+        title: `镜头 ${i+1} · ${locPool[i % locPool.length]}`,
+        char: charPool[i % charPool.length],
+        duration: dur,
+        prompt: `${topic} · ${charPool[i % charPool.length]}在${locPool[i % locPool.length]}${actionPool[i % actionPool.length]}`,
+        voice: '男声 · 沉稳 · 晓峰',
+        emotion: EMOTIONS[i % EMOTIONS.length],
+        provider: 'kling', res: '1080p',
+        cost: calcCost('kling','1080p',dur),
+        audioUrl: null, videoReady: false
+      });
+    }
+    showToast('⚠️ 后端也不可用 · 纯前端 Mock（刷新后丢失）', 'warn');
+    return { title: topic, shots };
   }
-  return { title: topic, shots };
 }
 
 async function _llmGenerate(topic, numShots, totalDur, audience, style, provider) {
@@ -2352,7 +2377,14 @@ $('#videoAllBtn').addEventListener('click', () => showToast('🎬 批量视频�
 $('#exportAllBtn').addEventListener('click', () => showToast('⬇️ 批量导出（占位 · 将导出 ZIP + 成片）', 'info'));
 $('#exportBtn').addEventListener('click', exportProject);
 
-$('#newProjectBtn').addEventListener('click', () => showToast('+ 新建项目（占位 · 将弹出项目创建向导）', 'info'));
+// G2-1: 新建项目 → 复用 AI 剧本生成 modal（后端自动持久化到 SQLite scripts 表）
+$('#newProjectBtn').addEventListener('click', () => {
+  $('#scriptTopic').value = '';
+  $('#scriptShots').value = '5';
+  $('#scriptDuration').value = '30';
+  $('#scriptModal').classList.add('open');
+  showToast('🎬 新建项目 · 主题 → 自动生成剧本+分镜', 'info');
+});
 
 // -------------------------- API KEY MANAGER ---------------------------
 const KEY_PROVIDERS = [
