@@ -469,7 +469,7 @@
       <div class="page-head">
         <div>
           <h1>剧本台</h1>
-          <p id="scriptDesc">按「角色：台词」写对白，按角色分音色、按情绪分语气，一次出整轨与时间轴。</p>
+          <p id="scriptDesc">把对白粘进来就能开工，按角色分音色、按情绪分语气，一次出整轨与时间轴。</p>
         </div>
         <div class="head-actions">
           <button class="btn" type="button" id="newScriptBtn">新建剧本</button>
@@ -488,13 +488,18 @@
           <div class="script-list" id="scriptList"></div>
         </aside>
 
-        <section class="panel script-col-edit">
+        <section class="panel script-col-edit" id="scriptEditPane">
           <div class="panel-head">
             <h2 id="scriptTitle">未选择剧本</h2>
             <span class="panel-note" id="scriptMeta">新建一个，或从左栏选一个</span>
           </div>
           <input class="input script-title-input" id="scriptTitleInput" placeholder="剧本标题" aria-label="剧本标题">
-          <textarea class="input script-raw" id="scriptRaw" spellcheck="false" aria-label="剧本文本"
+          <div class="script-mode-switch" role="tablist" aria-label="剧本编辑视图">
+            <button class="seg-btn is-on" type="button" id="scriptModeBlocks" role="tab" aria-selected="true">块编辑</button>
+            <button class="seg-btn" type="button" id="scriptModeSource" role="tab" aria-selected="false">源码</button>
+          </div>
+          <div class="script-blocks" id="scriptBlocks"></div>
+          <textarea class="input script-raw" id="scriptRaw" spellcheck="false" aria-label="剧本文本" hidden
             placeholder="## 场景一&#10;旁白：那天雨很大。&#10;雪峰[愤怒]：你再说一遍？&#10;小满（迟疑）：我不敢……"></textarea>
           <div class="script-toolbar">
             <label class="script-field">行间停顿
@@ -505,7 +510,7 @@
               <input type="checkbox" id="emotionCarry">
               <span>情绪跨行延续</span>
             </label>
-            <span class="script-hint" id="scriptHint">用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气</span>
+            <span class="script-hint" id="scriptHint">直接改角色和台词；切到「源码」可用 ## 分场与 [情绪] 标注</span>
           </div>
           <div class="scene-moods" id="sceneMoods" hidden>
             <div class="scene-moods-head">

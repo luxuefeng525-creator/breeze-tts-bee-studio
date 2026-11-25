@@ -348,7 +348,8 @@ def _seed_for(script: dict, role: dict | None) -> int:
 
 
 def plan_cast(errors: list[dict], role_names: set[str],
-              voices: dict[str, dict]) -> list[dict]:
+              voices: dict[str, dict],
+              gender_hints: dict[str, str] | None = None) -> list[dict]:
     """从解析错误里列出「还缺谁」，并给出每个角色该用什么声音。
 
     名字跟已有音色有公共前缀时复用那个音色（作者写「小蜜蜂」，库里叫
@@ -360,15 +361,20 @@ def plan_cast(errors: list[dict], role_names: set[str],
     自然语言指令，一旦自动把角色绑上去，这个角色的情绪、场次氛围、原型
     口音就全被上游静默丢掉——界面看着「智能配好了」，实际一句都没生效。
     作者真要用某个克隆音色，去角色卡里手动选，那是他自己的明确意图。
+
+    gender_hints：从人设行提取的角色性别（name → "male"/"female"），
+    名字不带性别特征时（"林队"/"苏娜"/"老陈"）用来补原型性别，不然
+    guess_archetype 会全部返回 neutral。
     """
     out: list[dict] = []
     seen: set[str] = set()
+    gender_hints = gender_hints or {}
     for err in errors or []:
         name = str(err.get("role_name") or "").strip()
         if not name or name in role_names or name in seen:
             continue
         seen.add(name)
-        arch = guess_archetype(name)
+        arch = guess_archetype(name, gender_hint=gender_hints.get(name))
         hit = None
         best = 0
         skipped_clone = ""
@@ -1234,7 +1240,8 @@ def _apply_cast(sid: str, forced: str = "") -> tuple[int, dict]:
         # 回退命中的角色先固化进 cast，再决定缺谁去新建——否则保存一次就把
         # 临时回退的角色换成新建的专属副本，role_id 一变已合成行全变 pending
         script = _sync_cast(script, roles_ctx, parsed)
-        plan = plan_cast(parsed.errors, set(roles_ctx), _voices_by_id())
+        plan = plan_cast(parsed.errors, set(roles_ctx), _voices_by_id(),
+                         gender_hints=parsed.role_genders)
         if not plan:
             return 200, {"created": [], "count": 0,
                          "remaining": len(parsed.errors)}

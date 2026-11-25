@@ -1,0 +1,41 @@
+name: route-lint
+
+on:
+  pull_request:
+    paths:
+      - 'api/router.py'
+      - 'tools/route-lint.py'
+      - 'tools/tokenify.py'
+  push:
+    branches: [main]
+    paths:
+      - 'api/router.py'
+      - 'tools/route-lint.py'
+      - 'tools/tokenify.py'
+
+jobs:
+  route-lint:
+    name: lint api/router.py routes
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: run route-lint
+        run: |
+          python tools/route-lint.py api/router.py
+          exit_code=$?
+          echo "route-lint exit: $exit_code"
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ PASS — no route bugs detected"
+          elif [ $exit_code -eq 1 ]; then
+            echo "❌ BLOCKED — ERRORs found (method mismatch / parts[N] out-of-bounds)"
+            exit 1
+          elif [ $exit_code -eq 2 ]; then
+            echo "⚠️  WARN — Warnings found (continue)"
+          fi

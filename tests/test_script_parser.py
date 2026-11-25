@@ -47,6 +47,35 @@ def test_fullwidth_colon_and_brackets_are_accepted():
     assert p.lines[0].emotion == "愤怒"
 
 
+# 讯飞智作 / 魔音工坊的常用写法：【角色名】台词，冒号可省略。
+def test_bracket_role_syntax_without_colon():
+    p = parse_script("【雪峰】你再说一遍？", ROLE_DEFAULTS, ROLE_INSTR)
+    assert p.ok
+    assert p.lines[0].role_name == "雪峰"
+    assert p.lines[0].text == "你再说一遍？"
+    assert p.lines[0].emotion == NEUTRAL     # 没有行内标注时走角色默认/推断
+
+
+def test_bracket_role_with_emotion_and_optional_colon():
+    raw = "【雪峰】[愤怒]：走开！\n【小满】（迟疑）我不敢……"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR)
+    assert p.ok
+    assert [l.role_name for l in p.lines] == ["雪峰", "小满"]
+    assert p.lines[0].emotion == "愤怒"
+    assert p.lines[0].emotion_source == "explicit"
+    assert p.lines[1].emotion == "迟疑"
+    assert p.lines[1].text == "我不敢……"
+
+
+def test_bracket_role_mixes_with_plain_colon_syntax():
+    raw = "## 雨夜\n【雪峰】你来了。\n小满：嗯。"
+    p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR)
+    assert p.ok
+    assert p.scenes == ["雨夜"]
+    assert [l.role_name for l in p.lines] == ["雪峰", "小满"]
+    assert all(l.scene == "雨夜" for l in p.lines)
+
+
 def test_scene_headers_are_collected_and_attached():
     raw = "## 深夜书店\n旁白：灯还亮着。\n## 医院走廊\n雪峰：人呢？"
     p = parse_script(raw, ROLE_DEFAULTS, ROLE_INSTR)
@@ -61,9 +90,14 @@ def test_blank_lines_are_ignored():
 
 
 def test_line_without_colon_is_reported_not_dropped():
+    # 无角色无冒号的行自动归到旁白——粘进来直接能用，不是报错卡住。
+    # 但仍给一条 soft_warning 让用户知道发生了什么。
     p = parse_script("旁白：好。\n这句忘了写角色", ROLE_DEFAULTS, ROLE_INSTR)
-    assert len(p.lines) == 1
-    assert p.errors and "认不出这一行" in p.errors[0]["reason"]
+    assert len(p.lines) == 2
+    assert p.ok                                       # soft_warning 不算失败
+    assert p.lines[-1].role_name == "旁白"
+    soft = [e for e in p.errors if e.get("soft")]
+    assert soft and "自动归到旁白" in soft[0]["reason"]
 
 
 def test_unknown_role_is_flagged_but_line_survives():

@@ -5,6 +5,7 @@
     ## 场景名                 ← 场次（可选）
     角色名：台词              ← 用角色默认情绪
     角色名[情绪]：台词        ← 显式情绪（也认全角括号「角色名（情绪）：」）
+    【角色名】台词            ← 结构化脚本写法（讯飞 / 魔音常见），：可省略
     旁白：描述                ← 旁白是一个普通角色
 
 情绪按 行内标签 > 角色默认 > 自动推断 > 中性 的优先级决定，
@@ -154,15 +155,14 @@ GESTURE_PHRASES: dict[str, str] = {
 }
 
 
-def guess_archetype(role_name: str) -> str:
-    """按角色名猜原型：整名钉死 → 最长命中词 → 通用人声。
+def guess_archetype(role_name: str, gender_hint: str | None = None) -> str:
+    """按角色名猜原型：整名钉死 → 最长命中词 → 性别线索修正 → 通用人声。
 
-    「外孙女」同时命中「外孙」和「外孙女」，按词表顺序会判成少年男，
-    必须让更长的那个赢。同长时保留**先命中**的词（词表已按具体度排序）。
-
-    「爸爸妈妈」「大哥大嫂」这类两性同名的组合，靠长度和顺序都裁不出来
-    ——选任何单一性别都会把另一半演错，所以整名走 ARCHETYPE_EXACT 的
-    neutral，而不是让词表顺序决定性别。
+    「林队」「苏娜」「老陈」这类名字没带任何关键词，词表猜出来是 neutral，
+    所有人配同一个音色。如果人设里写了性别（gender_hint），就用它纠正：
+    neutral + male → adult_m，neutral + female → adult_f。
+    性别线索**只补中性**，不覆盖词表已经命中的性别（比如词表说"奶奶"是 elder_f，
+    人设里写了（男）大概率是作者写错，不该硬改）。
     """
     name = (role_name or "").strip().lower()
     if name in ARCHETYPE_EXACT:
@@ -172,6 +172,9 @@ def guess_archetype(role_name: str) -> str:
         for word in words:
             if word in name and len(word) > best_len:
                 best_key, best_len = key, len(word)
+    # 没命中特征词（=neutral）且有人设性别：按性别猜成年男/女（最常见）
+    if best_key == "neutral" and gender_hint in ("male", "female"):
+        return "adult_m" if gender_hint == "male" else "adult_f"
     return best_key
 
 
@@ -266,6 +269,245 @@ _LINE_RE = re.compile(
     rf"[：:]\s*(?P<text>.+)$"
 )
 _SCENE_RE = re.compile(r"^#{1,3}\s*(?P<name>.+?)\s*$")
+# 时间标记：AI 生成剧本里的场次常用 "【0:00 - 0:15】 标题" 这种形式，
+# 必须在「【角色名】」正则之前识别它，否则会被误当成一个叫 "0:00 - 0:15" 的角色。
+_TIME_SCENE_RE = re.compile(r"^【\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}】\s*(?P<name>.+?)\s*$")
+# 结构化脚本写法：【角色名】台词 / 【角色名】[情绪]：台词 / 【角色名】（情绪）台词。
+# 冒号可省略——同行（讯飞智作、魔音工坊）都让用户直接写「【角色】台词」，
+# 没有冒号也要能认出来，否则粘贴别人的剧本第一行就报错。
+_BRACKET_ROLE_RE = re.compile(
+    r"^【(?P<name>[^】]{1,20})】\s*"
+    r"(?:[\[［](?P<tag>[^\]］]{1,12})[\]］]|[（(](?P<tag2>[^）)]{1,12})[）)])?\s*"
+    r"[：:]?\s*(?P<text>.+)$"
+)
+
+# 粘剧本时 AI 常会把「人设 / 环境音 / 情绪描述 / 台词」拆成不同格式：
+#   林队（男）：35-40岁...核心情绪：压抑
+#   林队：（极度疲惫，语速缓慢）           ← 情绪单独成行
+#   旁白："苏娜……这已经是你坐在这里的第六个小时了……"  ← 引号包台词
+#   旁白：(环境音提示：沉闷的雷声)          ← 括号提示不是台词
+# normalize 把这些拆干净，parse 循环继续吃它熟悉的 shape。
+_HINT_BODY = r"(?:提示|说明|描述|备注|声音|音|动作|环境)"
+_HINT_LINE_RE = re.compile(
+    r"^【?" + _NAME + r"】?\s*[：:]\s*"
+    r"[（(](?:" + _HINT_BODY + r")[提示说明描述备注声音音动作环境]*[：:]?[^）)]*[）)]\s*$"
+)
+_ROLE_SKIP_HINT_RE = re.compile(
+    r"^【?" + _NAME + r"】?\s*[：:]\s*"
+    r"(?:[（(]" + _HINT_BODY + r"[提示说明描述备注声音音动作环境]*[：:]?[^）)]*[）)]"
+    r"|[（(][^）)]+[）)])\s*$"
+)
+_QUOTED_RE = re.compile(r'^["「『](.+?)["」』]$')
+
+
+def _looks_like_hint_text(text: str) -> bool:
+    """判断一行「角色：xxx」里的 xxx 是不是括号里的提示/动作/环境音——
+    这些不该被念出来，要被丢掉，别进合成指令。
+    """
+    t = text.strip()
+    if not t:
+        return True
+    # 开头就是括号提示：(环境音提示：...) / （动作提示：...） / (提示：...)
+    if re.match(r"^[（(](?:提示|说明|描述|备注|声音|音|动作|环境|环境音)[提示说明描述备注声音音动作环境]*[：:]?", t):
+        return True
+    if t.startswith("（") or t.startswith("("):
+        # 剩下的也可能是纯情绪描述「（极度疲惫，语速缓慢，带一点叹息）」，
+        # 这种要单独处理——作为情绪标签，不是跳过。
+        return False
+    return False
+
+
+def _strip_outer_quotes(text: str) -> str:
+    """剥掉首尾成对的引号（中英文双引 / 单引）。
+    还会顺带剥掉引号后紧接的句号「"xx".」——AI 生成剧本常留这个尾巴。
+    """
+    t = text.strip()
+    m = re.match(r'^["「『](.+?)["」』][.\u3002]?$', t)
+    if m:
+        return m.group(1).strip()
+    return t
+
+
+def _split_leading_emotion(text: str) -> tuple[str | None, str]:
+    """把「角色：（情绪描述）后面跟了实际台词」这一行拆开。
+    返回 (情绪标签 or None, 剩余文本)。
+    """
+    t = text.strip()
+    if not t:
+        return None, ""
+    m = re.match(r"^[（(]([^）)]{1,40})[）)]\s*(.*)$", t)
+    if not m:
+        return None, t
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def _merge_skipped_emotions(lines):
+    """跨两行合并：如果上一行是「角色：（情绪）」但没有实际台词，
+    下一行是同一角色的台词，就把情绪贴进下一行；如果下一行换了角色，
+    也把情绪带到那个新角色头上（因为情绪描述写在台词之前）。
+    情绪只往下看一行，超过一行就丢掉——多了连人都搞不清哪段情绪配哪句。
+    """
+    out = []
+    pending_emotion = None     # str | None
+    pending_name = None        # 写情绪的角色；None 表示「谁写的不重要」
+    for item in lines:
+        if item[0] != "line":
+            out.append(item)
+            pending_emotion = None
+            pending_name = None
+            continue
+        kind, lineno, name, tag, text = item
+        if pending_emotion and not tag and text:
+            # 上一行的情绪贴进这一行：新 tag 先写上一行的，
+            # 如果这行自己也有 tag 就用「上一行情绪 + 这行 tag」合并
+            new_tag = tag or pending_emotion
+            if tag and tag != pending_emotion:
+                new_tag = f"{pending_emotion}，{tag}"
+            out.append((kind, lineno, name, new_tag, text))
+        else:
+            out.append(item)
+        pending_emotion = None
+        pending_name = None
+    return out
+
+
+def normalize_script(raw: str) -> list[tuple]:
+    """把用户粘进来的剧本预处理成干净的 (kind, lineno, ...) 列表。
+    目的：让 parse_script 的主循环只吃 shape 稳定的数据，
+    不在里面塞一堆「AI 常这么写所以要兼容」的 if 分支。
+
+    返回行的 shape：
+      ("scene", lineno, name)
+      ("line",  lineno, role_name, emotion_tag_or_None, text)
+      ("skip",  lineno, reason)
+    """
+    out = []
+    raw_lines = (raw or "").splitlines()
+
+    for lineno, raw_line in enumerate(raw_lines, 1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # --- 场次：# 开头 or AI 时间标记 【HH:MM - HH:MM】标题 ---
+        m_t = _TIME_SCENE_RE.match(line)
+        if m_t:
+            out.append(("scene", lineno, m_t.group("name").strip()))
+            continue
+        m_s = _SCENE_RE.match(line)
+        if m_s:
+            out.append(("scene", lineno, m_s.group("name").strip()))
+            continue
+
+        # --- 人设段：「角色（性别）：年龄、音色...核心情绪：X、Y、Z」---
+        # 特征是冒号后是音色描述里有「岁 / 低沉 / 沙哑 / 音色 / 核心情绪」
+        # 冒号后字数通常 > 40 且含顿号，显然不是一句台词。
+        hm = re.match(rf"^(?P<name>{_NAME})\s*[（(][男女][）)]\s*[：:]\s*(?P<body>.+)$", line)
+        if hm:
+            body = hm.group("body")
+            keywords = ("岁", "音色", "沙哑", "清亮", "共鸣", "气声", "拖音",
+                        "咬字", "语速", "腔", "腔腔")
+            if any(k in body for k in keywords) or len(body) > 40 and ("、" in body or "，" in body):
+                # 人设行：提取「核心情绪：」后面的内容作为默认情绪候选
+                cm = re.search(r"核心情绪[：:]\s*([^，,。.\n]+)", body)
+                if cm:
+                    emotions = [x.strip() for x in re.split(r"[、,，]", cm.group(1)) if x.strip()]
+                    if emotions:
+                        out.append(("role_default", lineno, hm.group("name"), emotions[0]))
+                # 同时提取性别，自动配音色时用来给"林队"这种没特征的名字补性别
+                gm = re.search(r"[（(]([男女])[）)]", line.split("：")[0] if "：" in line else line.split(":")[0])
+                if gm:
+                    out.append(("role_gender", lineno, hm.group("name"),
+                                "male" if gm.group(1) == "男" else "female"))
+                out.append(("skip", lineno, "人设行"))
+                continue
+
+        # --- 括号提示 / 环境音 / 动作描述：整行是提示，跳过 ---
+        m_br = _BRACKET_ROLE_RE.match(line) if line.startswith("【") else None
+        m_ln = m_br or _LINE_RE.match(line)
+        if not m_ln:
+            # 真认不出来的行（没冒号、没【角色】）：自动归到旁白，
+            # 和前端 normalizePaste 的行为一致——让用户粘进来直接能用，
+            # 而不是满屏报错。
+            out.append(("line", lineno, "旁白", None, line))
+            out.append(("soft_warning", lineno, f"行 {lineno} 没写角色，自动归到旁白"))
+            continue
+
+        name = m_ln.group("name").strip()
+        raw_tag = m_ln.group("tag") or m_ln.group("tag2")
+        raw_text = m_ln.group("text").strip()
+
+        # 角色名后面挂了性别：剥掉别让它进台词，也别被当成情绪
+        sex_rm = re.search(r"[（(][男女][）)]", name)
+        if sex_rm:
+            name = re.sub(r"[（(][男女][）)]", "", name).strip()
+
+        if not raw_text:
+            out.append(("skip", lineno, "无台词"))
+            continue
+
+        # 提示行：「角色：(环境音提示：...)」 / 「角色：（动作提示）」
+        if _looks_like_hint_text(raw_text):
+            out.append(("skip", lineno, "提示行"))
+            continue
+
+        # 情绪描述行（可能跨到下一行台词）：先记下来，让 _merge_skipped_emotions 贴回去
+        # 先剥掉可能的情绪前缀「（极度疲惫，语速缓慢，带一点叹息）」
+        emo, rest = _split_leading_emotion(raw_text)
+        # 如果整行剥完只剩情绪（rest 为空或很短，且没有可念的句子），就标 pending
+        if emo and (not rest or len(rest) <= 8) and '"' not in rest and "「" not in rest:
+            out.append(("emotion_only", lineno, name, emo))
+            continue
+
+        # 有情绪前缀 + 有实际台词：把情绪剥出来当 tag，正文进 text
+        tag = raw_tag
+        if emo and not tag:
+            tag = emo
+        elif emo and tag and emo != tag:
+            tag = f"{emo}，{tag}"
+        # 台词剥首尾引号：AI 生成剧本常写「旁白："台词……"」
+        text = _strip_outer_quotes(rest or raw_text)
+
+        out.append(("line", lineno, name, tag, text))
+
+    # 情绪-only 行往下粘一行；整理后交给主循环。
+    # AI 生成剧本的典型格式：
+    #   林队：（极度疲惫，语速缓慢，带一点叹息）     ← emotion_only，角色=林队
+    #   旁白："苏娜……这已经是你坐在这里的第六个小时了……"  ← 台词实际想让林队说
+    # 这种情况下不能让旁白白念，要把下一行的旁白台词归到 pending 的角色头上。
+    merged = []
+    pending = None     # (role_name, emotion) or None
+    for item in out:
+        if item[0] == "emotion_only":
+            _, ln, nm, emo = item
+            pending = (nm, emo)
+            continue
+        if pending and item[0] == "line":
+            _, ln2, nm2, tag2, text2 = item
+            p_name, p_emo = pending
+            if nm2 == "旁白" and text2:
+                # 下一行是旁白台词：把旁白的台词归给 pending 的角色 + 情绪
+                # （旁白的文本可能带引号，上面 normalize 已经剥过了）
+                new_tag = p_emo
+                if tag2 and tag2 != p_emo:
+                    new_tag = f"{p_emo}，{tag2}"
+                merged.append(("line", ln2, p_name, new_tag, text2))
+            elif not text2 or nm2 == p_name:
+                # 下一行是同一个角色（或无台词）：正常合并
+                new_tag = tag2 or p_emo
+                if tag2 and tag2 != p_emo:
+                    new_tag = f"{p_emo}，{tag2}"
+                merged.append(("line", ln2, nm2, new_tag, text2))
+            else:
+                # 下一行换了角色且不是旁白：pending 情绪丢弃（跨角色不继承）
+                merged.append(item)
+            pending = None
+            continue
+        if pending:
+            # 下一行不是 line（是 scene / skip）：pending 丢弃，情绪不跨场次
+            pending = None
+        merged.append(item)
+    return merged
 
 
 @dataclass
@@ -299,10 +541,14 @@ class ParsedScript:
     lines: list[ScriptLine] = field(default_factory=list)
     scenes: list[str] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    # 从人设行提取的角色性别（"male"/"female"），给 auto_cast 用。
+    # 名字不带性别特征时（林队 / 苏娜 / 老陈）靠词表猜不出，
+    # 人设行写了就别浪费。
+    role_genders: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
-        return not self.errors
+        return not any(not (e.get("soft") or False) for e in self.errors)
 
     def as_dict(self) -> dict:
         return {
@@ -310,6 +556,7 @@ class ParsedScript:
             "scenes": self.scenes,
             "errors": self.errors,
             "ok": self.ok,
+            "role_genders": self.role_genders,
         }
 
 
@@ -417,49 +664,66 @@ def parse_script(
     role_instructions = role_instructions or {}
     scene_moods = scene_moods or {}
 
+    # 先 normalize：粘进来的剧本格式五花八门（人设 / 时间场次 / 括号提示 /
+    # 情绪+台词拆成两行 / 引号包台词），全在这一步拆干净；主循环只吃
+    # (kind, lineno, ...) shape 稳定的数据。
+    rows = normalize_script(raw)
+
+    # normalize 从人设里提取的「核心情绪」作为角色默认情绪的候选——
+    # 只在角色还没默认情绪时补进去，不覆盖作者手动配过的。
+    # 同时收集角色性别（人设里写了男/女的），名字没性别特征时给 auto_cast 用。
+    pending_genders: dict[str, str] = {}
+    for item in rows:
+        if item[0] == "role_default":
+            _, _, nm, emo = item
+            if nm and emo and nm not in role_defaults:
+                role_defaults[nm] = emo
+        elif item[0] == "role_gender":
+            _, _, nm, g = item
+            if nm and g and nm not in pending_genders:
+                pending_genders[nm] = g
+
     out = ParsedScript()
+    out.role_genders = pending_genders
     scene = ""
     scene_used = False
     last_emotion = ""      # 本场上一行的情绪，供 carry_emotion 沿用
 
-    # 报错要给「编辑器里的第几行」，不是「第几个解析行」——场次行与坏行
-    # 也占行号，按 len(lines)+1 算会让用户找不到地方。
-    for lineno, raw_line in enumerate((raw or "").splitlines(), 1):
-        line = raw_line.strip()
-        if not line:
-            continue
+    for item in rows:
+        kind = item[0]
+        lineno = item[1]
 
-        m_scene = _SCENE_RE.match(line)
-        if m_scene:
-            scene = m_scene.group("name").strip()
+        if kind == "scene":
+            scene = item[2]
             if scene and scene not in out.scenes:
                 out.scenes.append(scene)
             scene_used = False
             last_emotion = ""      # 换场即重置：别把上一场的情绪带进雨夜
             continue
 
-        m = _LINE_RE.match(line)
-        if not m:
-            out.errors.append({
-                "line": lineno,
-                "text": raw_line,
-                "reason": "认不出这一行：请写成「角色名：台词」，或用 ## 开头表示场次",
-            })
+        if kind != "line":
+            # role_default（人设提取，上面已并入 role_defaults）/ skip（提示 / 空台词 / 人设整行）
+            # / soft_warning（自动归旁白的软提示——不进 errors，ok 仍为 True）
+            if kind == "soft_warning":
+                out.errors.append({
+                    "line": lineno,
+                    "reason": item[2],
+                    "role_name": "旁白",
+                    "soft": True,
+                })
             continue
 
-        name = m.group("name").strip()
-        tag = m.group("tag") or m.group("tag2")
-        text = m.group("text").strip()
+        _, _, name, tag, text = item
 
         if not text:
-            out.errors.append({"line": lineno, "text": raw_line,
+            out.errors.append({"line": lineno, "text": text,
                                "reason": "这一行没有台词内容"})
             continue
 
         if role_defaults is not None and name not in role_defaults:
             out.errors.append({
                 "line": lineno,
-                "text": raw_line,
+                "text": text,
                 "reason": f"剧本里出现了未知角色「{name}」",
                 "role_name": name,
             })

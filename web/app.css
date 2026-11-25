@@ -378,6 +378,63 @@
     font-family:var(--font-mono);font-size:13.5px;line-height:1.9;
     padding:12px 14px;white-space:pre-wrap;
   }
+  /* ---- 块编辑（R-01）：DSL 收进「源码」，默认按角色块排版 ---- */
+  .script-mode-switch{
+    display:inline-flex;gap:2px;flex:0 0 auto;margin:2px 0 8px;padding:2px;
+    border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);
+    align-self:flex-start;
+  }
+  .script-mode-switch .seg-btn{
+    padding:4px 12px;border-radius:calc(var(--r-sm) - 2px);font-size:12px;
+    color:var(--text-3);background:transparent;
+  }
+  .script-mode-switch .seg-btn:hover{color:var(--text)}
+  .script-mode-switch .seg-btn.is-on{color:var(--accent-ink);background:var(--accent)}
+  .script-blocks{
+    flex:1 1 auto;min-height:0;overflow-y:auto;display:flex;flex-direction:column;
+    gap:12px;padding-right:2px;
+  }
+  .script-blocks[hidden]{display:none}
+  .script-paste-empty{
+    display:flex;flex-direction:column;gap:8px;padding:14px;
+    border:1px dashed var(--line-strong, var(--line));border-radius:var(--r-sm);
+    background:var(--surface-2);
+  }
+  .script-paste-title{margin:0;font-size:13px;font-weight:600;color:var(--text-1)}
+  .script-paste{height:150px;padding:10px 12px;resize:vertical;font-size:13px;line-height:1.8}
+  .script-paste-hint{margin:0;font-size:11.5px;color:var(--text-3);line-height:1.6}
+  .block-scene{
+    display:flex;flex-direction:column;gap:6px;padding:9px 10px;
+    border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);
+  }
+  .block-scene-name{
+    height:30px;padding:0 8px;font-size:12.5px;font-weight:600;
+    background:transparent;border-color:transparent;
+  }
+  .block-scene-name:hover{border-color:var(--line)}
+  .block-turn{
+    display:flex;flex-direction:column;gap:5px;padding:7px 8px;
+    border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);
+  }
+  .block-turn:focus-within{border-color:var(--accent)}
+  .block-turn-top{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}
+  .block-role{
+    flex:0 1 110px;min-width:70px;height:28px;padding:0 8px;font-size:12px;
+    border-radius:999px;color:hsl(var(--h) 70% 68%);
+    border-color:hsl(var(--h) 45% 34%);background:hsl(var(--h) 45% 16% / .55);
+  }
+  .block-emotion{
+    flex:0 1 88px;min-width:64px;height:28px;padding:0 8px;font-size:11.5px;text-align:center;
+  }
+  .block-emotion-src{
+    flex:0 0 auto;font-size:10.5px;color:var(--text-disabled);white-space:nowrap;
+  }
+  .block-turn-top .icon-btn{margin-left:auto}
+  .block-text{
+    height:auto;min-height:34px;padding:6px 9px;font-size:13px;line-height:1.7;
+    resize:none;overflow:hidden;
+  }
+  .block-add{align-self:flex-start}
   .script-toolbar{display:flex;align-items:center;gap:14px;flex:0 0 auto;margin-top:8px}
   .script-field{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-3)}
   .script-field .input{width:74px;text-align:center;padding:6px 8px}

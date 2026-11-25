@@ -125,6 +125,8 @@
     if (name === "clone") refreshCloneState();
     if (name === "script") {
       refreshScripts();
+      // 首次进入剧本台：先按当前编辑模式把中栏渲染出来（块/源码）
+      applyEditMode();
       // 素材还没加载过就先拉一次：场次铺底的下拉要显示素材名，不能只有「不铺」
       if (!S.assets.length) refreshAssets().then(renderSceneMoods);
     }
@@ -2061,6 +2063,9 @@
     gap: 0.35, archetypes: [], emotions: [], moods: [], scenes: [], assets: [],
     missingRoles: [], lineFilter: "all", lineRole: "", jumpIdx: 0,
     lastRender: null, producing: false, produceParts: [],
+    // 块是前端派生视图（按场次分组 lines），raw 仍是唯一真相源；
+    // editMode 决定中栏显示块编辑还是源码文本框。
+    blocks: [], editMode: "blocks",
   };
 
   // 后端存的是相对 data/ 的路径（audio/scripts/<id>/full.wav），
@@ -2129,6 +2134,9 @@
     $("exportScriptBtn").disabled = false;
     renderLines(d);
     renderSceneMoods();
+    // 打开剧本时重建块视图（块只是 lines 的派生显示，raw 没有被改写）
+    S.blocks = deriveBlocks(S.lines);
+    applyEditMode();
     renderScriptList();
     const full = audioUrl(d.full_wav);
     const audio = $("scriptAudio");
@@ -2144,6 +2152,13 @@
     // 筛选/跳转会重绘，记住最近一次解析结果，别为了改个下拉再发一次请求。
     // 只有真拿到数据才覆盖缓存：否则一次进度刷新就会把场次/报错从缓存里抹掉。
     if (d) S.lastRender = d;
+    // 源码模式或外部改动（保存 / 补齐角色）后，块视图要跟着刷新；
+    // 正在块内输入时跳过，否则每次预览都会重建 DOM、打断光标。
+    const blockBox = $("scriptBlocks");
+    if (blockBox && !blockBox.contains(document.activeElement)) {
+      S.blocks = deriveBlocks(lines);
+      renderBlocks();
+    }
     $("lineCount").textContent = `${lines.length} 行`;
     $("scriptMeta").textContent = lines.length
       ? `${lines.length} 行 · 约 ${Math.round((d && d.estimate) || 0)} 秒${S.current && S.current.duration ? " · 已合成 " + S.current.duration.toFixed(1) + " 秒" : ""}`
@@ -2259,14 +2274,174 @@
     }
 
     const bad = errs.length;
+    const plainHint = S.editMode === "source"
+      ? "用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气"
+      : "直接改角色和台词；切到「源码」可用 ## 分场与 [情绪] 标注";
     $("scriptHint").textContent = missing.length
       ? `${missing.length} 个角色还没配好，点上方「立即补齐」就能开合成`
       : bad ? `有 ${bad} 处需要修一下（见下方分镜顶部）`
-      : "用 ## 开头的行表示场次；[情绪] 或（情绪）标注语气";
+      : plainHint;
     $("scriptHint").classList.toggle("is-warn", bad > 0);
   }
 
-  // 自动推断的氛围不能因为界面把 scenes 整组回传就被固化成「作者选的」：
+  // ---------------------------------------------------------------- 块编辑
+  // 块 = 前端派生视图：按场次把 lines 分组，编辑后序列化回 #scriptRaw，
+  // 后端与存储都不新增字段，raw 仍是唯一真相源（REQ-20261124-02 方案 B）。
+
+  function deriveBlocks(lines) {
+    const blocks = [];
+    let cur = null;
+    (lines || []).forEach((l) => {
+      const scene = l.scene || "";
+      if (!cur || cur.scene !== scene) {
+        cur = { scene, turns: [] };
+        blocks.push(cur);
+      }
+      cur.turns.push({
+        idx: l.idx,
+        role_name: l.role_name || "旁白",
+        text: l.text || "",
+        emotion: l.emotion || "",
+        emotion_source: l.emotion_source || "neutral",
+      });
+    });
+    return blocks;
+  }
+
+  // 只把作者显式写下的情绪写回文本：自动推断 / 角色默认 / 延续 再写一遍
+  // 就会变成「作者标注」，下次改台词也不会重新判断——等于偷偷固化推断结果。
+  function serializeBlocks() {
+    const out = [];
+    (S.blocks || []).forEach((b) => {
+      if (b.scene) out.push("## " + b.scene);
+      b.turns.forEach((t) => {
+        const text = String(t.text || "").replace(/\r?\n/g, " ").trim();
+        if (!text) return;
+        const tag = t.emotion_source === "explicit" && t.emotion ? `[${t.emotion}]` : "";
+        out.push(`${(t.role_name || "旁白").trim()}${tag}：${text}`);
+      });
+    });
+    return out.join("\n");
+  }
+
+  // 粘贴兜底：普通对白已有「角色：台词」可直接解析；小说里没有角色前缀的
+  // 行归到旁白，用户不必先学标记语法。整段无角色也只是若干个旁白块，不会消失。
+  const _SCENE_LINE_RE = /^#{1,3}\s*/;
+  const _BRACKET_ROLE_RE = /^【[^】]{1,20}】/;
+  const _ROLE_LINE_RE = /^[^：:\[\]（）()\s][^：:\[\]（）()]{0,19}?\s*(?:[\[［][^\]］]{1,12}[\]］]|[（(][^）)]{1,12}[）)])?\s*[：:]/;
+  function normalizePaste(text) {
+    return String(text || "").split(/\r?\n/).map((line) => {
+      const t = line.trim();
+      if (!t) return line;
+      if (_SCENE_LINE_RE.test(t) || _BRACKET_ROLE_RE.test(t) || _ROLE_LINE_RE.test(t)) return line;
+      return "旁白：" + t;
+    }).join("\n");
+  }
+
+  function autoGrow(el) {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight || 0, 220) + "px";
+  }
+
+  function emptyBlocksHtml() {
+    if (!S.current) {
+      return '<div class="empty-hint">先在左栏选一个剧本，或点右上角「新建剧本」。</div>';
+    }
+    return `<div class="script-paste-empty">
+      <p class="script-paste-title">粘贴一段对白就能开始</p>
+      <textarea class="input script-paste" id="scriptPaste" spellcheck="false" aria-label="粘贴对白"
+        placeholder="不用学标记语法，直接粘：&#10;雪峰：你来了。&#10;小满：嗯，雨太大了。&#10;&#10;整段小说也可以，没有角色前缀的行会自动归到旁白。"></textarea>
+      <p class="script-paste-hint">系统会拆成角色块，并按名字自动配音色。</p>
+    </div>`;
+  }
+
+  // force=false 时若焦点在块内就不重绘，避免每敲一个字光标就被重置。
+  function renderBlocks(force) {
+    const box = $("scriptBlocks");
+    if (!box) return;
+    const pane = $("scriptEditPane");
+    const source = pane && pane.classList.contains("show-source");
+    box.hidden = source;
+    $("scriptRaw").hidden = !source;
+    if (source) return;
+    if (!force && box.contains(document.activeElement)) return;
+    const blocks = S.blocks || [];
+    if (!blocks.length) { box.innerHTML = emptyBlocksHtml(); return; }
+    box.innerHTML = blocks.map((b, bi) => {
+      const turns = b.turns.map((t, ti) => {
+        const hue = roleHue(t.role_name);
+        return `<div class="block-turn" data-block="${bi}" data-turn="${ti}">
+          <div class="block-turn-top">
+            <input class="input block-role" data-field="role_name" value="${esc(t.role_name)}"
+              aria-label="角色名" style="--h:${hue}">
+            <input class="input block-emotion" data-field="emotion" value="${esc(t.emotion)}"
+              aria-label="情绪" placeholder="情绪">
+            <span class="block-emotion-src">${esc(EMOTION_SOURCE[t.emotion_source] || "")}</span>
+            <button class="icon-btn" type="button" data-del-turn="${bi}:${ti}" title="删除这一句">
+              <svg class="icon icon-sm"><use href="#i-trash"/></svg>
+            </button>
+          </div>
+          <textarea class="input block-text" data-field="text" rows="1"
+            aria-label="台词">${esc(t.text)}</textarea>
+        </div>`;
+      }).join("");
+      return `<div class="block-scene" data-block="${bi}">
+        <input class="input block-scene-name" data-field="scene" value="${esc(b.scene)}"
+          placeholder="未分场（可写场次名）" aria-label="场次名">
+        ${turns}
+        <button class="btn-sm block-add" type="button" data-add-turn="${bi}">＋ 添加台词</button>
+      </div>`;
+    }).join("");
+    box.querySelectorAll(".block-text").forEach(autoGrow);
+  }
+
+  function applyEditMode() {
+    const mode = S.editMode || "blocks";
+    const pane = $("scriptEditPane");
+    if (pane) pane.classList.toggle("show-source", mode === "source");
+    const blocksBtn = $("scriptModeBlocks");
+    const sourceBtn = $("scriptModeSource");
+    if (blocksBtn) {
+      blocksBtn.classList.toggle("is-on", mode === "blocks");
+      blocksBtn.setAttribute("aria-selected", String(mode === "blocks"));
+    }
+    if (sourceBtn) {
+      sourceBtn.classList.toggle("is-on", mode === "source");
+      sourceBtn.setAttribute("aria-selected", String(mode === "source"));
+    }
+    renderBlocks(true);
+  }
+
+  function setEditMode(mode) {
+    S.editMode = mode;
+    applyEditMode();
+    if (S.lastRender) renderLines(S.lastRender);   // 提示文案随模式切换
+    if (mode === "source") $("scriptRaw").focus();
+  }
+
+  // 块内改动统一写回 raw：raw 是唯一真相源，解析/保存/合成全都读它。
+  function writeRawFromBlocks() {
+    $("scriptRaw").value = serializeBlocks();
+    schedulePreview();
+  }
+
+  let _pasteTimer = null;
+  function schedulePasteImport(text) {
+    clearTimeout(_pasteTimer);
+    _pasteTimer = setTimeout(async () => {
+      if (!S.current) return;
+      $("scriptRaw").value = normalizePaste(text);
+      // 保存会顺带把新出现的角色配好音色；之后用服务端结果重建块
+      const ok = await saveScript(true);
+      if (!ok) return;
+      S.blocks = deriveBlocks(S.lines || []);
+      renderBlocks(true);
+      await previewScriptNow();
+    }, 400);
+  }
+
+
   // 发送时把 auto 项的 mood 清空，后端会按场次名重新推断（结果一致）。
   function scenesPayload() {
     // 铺底字段照发：后端按「有没有这个键」判断，只传 name/mood 时它会保留
@@ -2665,7 +2840,9 @@
         body: JSON.stringify({ title: "未命名剧本", raw: "" }),
       });
       await refreshScripts(d.id);
-      $("scriptRaw").focus();
+      const paste = $("scriptPaste");
+      if (paste) paste.focus();
+      else $("scriptRaw").focus();
     } catch (e) { toast("新建失败：" + e.message, true); }
   }
 
@@ -3199,6 +3376,93 @@
     });
     $("scriptRaw").addEventListener("input", schedulePreview);
     $("scriptRaw").addEventListener("blur", () => saveScript(true));
+    // 源码模式里粘贴普通对白也要能直接开工：先把无角色前缀的行补成旁白
+    $("scriptRaw").addEventListener("paste", (e) => {
+      const dt = e.clipboardData || window.clipboardData;
+      const text = dt && dt.getData("text");
+      if (!text) return;
+      e.preventDefault();
+      const ta = $("scriptRaw");
+      const raw = normalizePaste(text);
+      const start = ta.selectionStart == null ? ta.value.length : ta.selectionStart;
+      const end = ta.selectionEnd == null ? ta.value.length : ta.selectionEnd;
+      ta.value = ta.value.slice(0, start) + raw + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + raw.length;
+      schedulePreview();
+    });
+    $("scriptModeBlocks").addEventListener("click", () => setEditMode("blocks"));
+    $("scriptModeSource").addEventListener("click", () => setEditMode("source"));
+    // 块编辑：输入即写回 raw 并预览；失焦保存（保存会顺带补齐新角色）。
+    $("scriptBlocks").addEventListener("input", (e) => {
+      const paste = e.target.closest("#scriptPaste");
+      if (paste) { schedulePasteImport(paste.value); return; }
+      const field = e.target.closest("[data-field]");
+      if (!field) return;
+      const turnEl = field.closest(".block-turn");
+      const sceneEl = field.closest(".block-scene");
+      const bi = parseInt((turnEl || sceneEl).dataset.block, 10);
+      const b = (S.blocks || [])[bi];
+      if (!b) return;
+      const name = field.dataset.field;
+      if (name === "scene") {
+        b.scene = field.value.trim();
+      } else {
+        const t = b.turns[parseInt(turnEl.dataset.turn, 10)];
+        if (!t) return;
+        t[name] = field.value;
+        if (name === "emotion") {
+          // 手动写情绪 = 显式标注；清空则交回「跟随文本自动判断」
+          t.emotion_source = field.value.trim() ? "explicit" : "neutral";
+          const badge = turnEl.querySelector(".block-emotion-src");
+          if (badge) badge.textContent = EMOTION_SOURCE[t.emotion_source] || "";
+        }
+        if (name === "text") autoGrow(field);
+      }
+      writeRawFromBlocks();
+    });
+    $("scriptBlocks").addEventListener("change", (e) => {
+      if (e.target.closest("#scriptPaste")) return;   // 粘贴框由 debounce 导入
+      const field = e.target.closest("[data-field]");
+      if (!field) return;
+      const sceneEl = field.closest(".block-scene");
+      const bi = sceneEl ? parseInt(sceneEl.dataset.block, 10) : -1;
+      // 非首块清空场次名会并入上一场：拦下来，恢复原值并说明原因
+      if (field.dataset.field === "scene" && bi > 0 && !field.value.trim()) {
+        field.value = (S.blocks[bi] && S.blocks[bi].scene) || "";
+        toast("场次名不能留空，否则这一块会并入上一场", true);
+        return;
+      }
+      saveScript(true);
+    });
+    $("scriptBlocks").addEventListener("click", async (e) => {
+      const add = e.target.closest("[data-add-turn]");
+      if (add) {
+        const bi = parseInt(add.dataset.addTurn, 10);
+        const b = (S.blocks || [])[bi];
+        if (!b) return;
+        const last = b.turns[b.turns.length - 1];
+        b.turns.push({
+          idx: -1, role_name: (last && last.role_name) || "旁白", text: "",
+          emotion: "", emotion_source: "neutral",
+        });
+        renderBlocks(true);
+        const texts = $("scriptBlocks").querySelectorAll(`.block-scene[data-block="${bi}"] .block-text`);
+        const target = texts[texts.length - 1];
+        if (target) target.focus();
+        return;
+      }
+      const del = e.target.closest("[data-del-turn]");
+      if (del) {
+        const [bi, ti] = del.dataset.delTurn.split(":").map(Number);
+        const b = (S.blocks || [])[bi];
+        if (!b) return;
+        b.turns.splice(ti, 1);
+        if (!b.turns.length) S.blocks.splice(bi, 1);
+        renderBlocks(true);
+        writeRawFromBlocks();
+        await saveScript(true);
+      }
+    });
     $("scriptTitleInput").addEventListener("blur", () => saveScript(true));
     $("scriptGap").addEventListener("change", () => saveScript(true));
     // 情绪跨行延续：改的是每行下发的指令，必须重新解析；已经合成过的行

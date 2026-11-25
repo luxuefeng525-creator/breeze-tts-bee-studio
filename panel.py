@@ -85,7 +85,10 @@ def _post_upstream(api_path: str, body: bytes, content_type: str, timeout: int =
     try:
         with urlopen(req, timeout=timeout) as resp:
             if headers_out is not None:
-                headers_out.update({k: resp.headers.get(k) for k in resp.headers.keys()})
+                headers_out.update({
+                    str(k).lower(): resp.headers.get(k)
+                    for k in resp.headers.keys()
+                })
             return resp.status, resp.read(), resp.headers.get("Content-Type",
                                                               "application/octet-stream")
     except HTTPError as e:
@@ -117,9 +120,18 @@ def _post_with_retry(api_path: str, body: bytes, content_type: str,
     return code, raw
 
 
+def _header_get(headers: dict, name: str) -> str:
+    """HTTP 头名大小写不敏感；uvicorn 会统一发送小写头名。"""
+    target = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == target:
+            return str(value or "")
+    return ""
+
+
 def _engine_note(headers: dict) -> str:
     """还原上游 percent-encode 过的降级说明（HTTP 头不支持非 latin-1 字符）。"""
-    return unquote(headers.get("X-Adapter-Note", "") or "")
+    return unquote(_header_get(headers, "X-Adapter-Note"))
 
 
 # ---------------------------------------------------------------------------
@@ -2074,8 +2086,21 @@ class Handler(BaseHTTPRequestHandler):
         from script_routes import handle as _script_handle
         if _script_handle(self, "GET", path, b"", ""):
             return
+        # Bee Studio 视频/成本路由（惰性导入）
+        try:
+            from api.router import handle as _bee_handle
+            if _bee_handle(self, "GET", path, b"", ""):
+                return
+        except Exception:
+            pass
 
-        if path in ("/", "/index.html"):
+        if path == "/":
+            # Bee Studio 作为默认首页（方案 A 多 Tab 共存）
+            self.send_response(302)
+            self.send_header("Location", "/bee-studio.html")
+            self.end_headers()
+            return
+        if path == "/index.html":
             _web_index = ROOT / "web" / "index.html"
             if _web_index.is_file():
                 raw = _web_index.read_bytes()
@@ -2101,6 +2126,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+        # W2-1b: serve any .html/.css/.js/.svg/.ico from web/ (for bee-studio.html etc.)
+        _web_exts = {".html", ".css", ".js", ".svg", ".ico", ".woff2", ".png", ".jpg"}
+        _web_ctype = {".html": "text/html", ".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff2": "font/woff2", ".png": "image/png", ".jpg": "image/jpeg"}
+        _fname = path.lstrip("/")
+        _fpath = ROOT / "web" / _fname
+        if _fname and _fpath.is_file() and _fpath.suffix in _web_exts:
+            data = _fpath.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", _web_ctype[_fpath.suffix] + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         # W2-3c: 发音词典读取
         if path == "/api/dict":
             self._json(_load_dict().to_list())
@@ -2162,6 +2201,13 @@ class Handler(BaseHTTPRequestHandler):
         from script_routes import handle as _script_handle
         if _script_handle(self, "POST", path, body, ctype):
             return
+        # Bee Studio 视频/成本路由
+        try:
+            from api.router import handle as _bee_handle
+            if _bee_handle(self, "POST", path, body, ctype):
+                return
+        except Exception:
+            pass
 
 
         # ---- W2-3c: 朗读预览 ----
@@ -2671,7 +2717,7 @@ class Handler(BaseHTTPRequestHandler):
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
                 "text_used": api_fields.get("text", ""),
                 "engine_note": _engine_note(_up_hdrs),
-                "engine_route": _up_hdrs.get("X-Adapter-Route", ""),
+                "engine_route": _header_get(_up_hdrs, "X-Adapter-Route"),
             })
             return
 
@@ -2792,7 +2838,7 @@ class Handler(BaseHTTPRequestHandler):
                 "cfg_used": _safe_int(cfg_used, 1),
                 "instruction_used": (api_fields.get("instruction") or "").strip(),
                 "engine_note": _engine_note(_up_hdrs),
-                "engine_route": _up_hdrs.get("X-Adapter-Route", ""),
+                "engine_route": _header_get(_up_hdrs, "X-Adapter-Route"),
             })
             return
 
@@ -2933,6 +2979,13 @@ class Handler(BaseHTTPRequestHandler):
         from script_routes import handle as _script_handle
         if _script_handle(self, "DELETE", path, b"", ""):
             return
+        # Bee Studio DELETE 路由（模型 registry 删除等）
+        try:
+            from api.router import handle as _bee_handle
+            if _bee_handle(self, "DELETE", path, b"", ""):
+                return
+        except Exception:
+            pass
 
         # W2-3c: 删除词典条目
         if path.startswith("/api/dict/"):

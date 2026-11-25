@@ -1,0 +1,1160 @@
+"""Bee Studio 视频/成本/合成路由。panel.py 在 script_routes.handle 之后调它。
+
+路由表：
+  GET  /api/providers                       —— 四家 provider 列表（含定价元数据）
+  GET  /api/cost/estimate                   —— 单家估算（query: provider, resolution, duration, prompt_len）
+  GET  /api/cost/compare                    —— 四家对比（query: resolution, duration, prompt_len）
+  POST /api/video/generate                  —— 发起视频生成（body: {provider, resolution, duration, prompt, image_url}）
+  GET  /api/video/poll/{job_id}             —— 轮询一次
+  POST /api/video/providers/{provider}/keys —— 暂不实现 Key 存储（前端暂时硬塞，后续加密落盘）
+  POST /api/export/{project_id}             —— ffmpeg 合成 + ZIP 打包（切片 D，占位）
+"""
+from __future__ import annotations
+import json, os, sys, time, threading, datetime, base64, sqlite3, contextlib
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from pathlib import Path
+
+# 把 breeze-tts/ 放进 sys.path（api 子模块的 __file__ 在 breeze-tts/api/）
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+
+# ------------------------------------------------------------------
+# SQLite 任务持久化（A1：视频生成 + ffmpeg 导出）
+# ------------------------------------------------------------------
+_DB_PATH = _ROOT / "data" / "bee_tasks.db"
+_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+_db_lock = threading.Lock()
+_db_ready = False
+
+
+def _db_init() -> None:
+    """建表（幂等，只调一次）。"""
+    global _db_ready
+    if _db_ready:
+        return
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS video_jobs (
+          job_id TEXT PRIMARY KEY,
+          provider TEXT, provider_label TEXT,
+          status TEXT DEFAULT 'queued',
+          video_url TEXT DEFAULT '',
+          actual_cost REAL DEFAULT 0,
+          error TEXT DEFAULT '',
+          prompt TEXT DEFAULT '',
+          resolution TEXT DEFAULT '',
+          duration REAL DEFAULT 0,
+          created_at TEXT,
+          updated_at TEXT,
+          poll_count INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS export_jobs (
+          job_id TEXT PRIMARY KEY,
+          project_id TEXT,
+          status TEXT DEFAULT 'pending',
+          output_path TEXT DEFAULT '',
+          output_duration REAL DEFAULT 0,
+          error TEXT DEFAULT '',
+          created_at TEXT,
+          updated_at TEXT,
+          poll_count INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS scripts (
+          project_id TEXT PRIMARY KEY,
+          title TEXT,
+          genre TEXT,
+          shots_json TEXT,
+          prompt TEXT,
+          llm_backend TEXT,
+          created_at TEXT
+        );
+        """)
+        conn.commit()
+    _db_ready = True
+
+
+def _video_job_write(job: dict) -> None:
+    """写入/更新视频任务。"""
+    _db_init()
+    job = dict(job)
+    job.setdefault("created_at", datetime.datetime.now().isoformat())
+    job["updated_at"] = datetime.datetime.now().isoformat()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.execute("""
+            INSERT INTO video_jobs(job_id,provider,provider_label,status,video_url,actual_cost,error,prompt,resolution,duration,created_at,updated_at,poll_count)
+            VALUES(:job_id,:provider,:provider_label,:status,:video_url,:actual_cost,:error,:prompt,:resolution,:duration,:created_at,:updated_at,:poll_count)
+            ON CONFLICT(job_id) DO UPDATE SET
+              status=excluded.status, video_url=excluded.video_url,
+              actual_cost=excluded.actual_cost, error=excluded.error,
+              updated_at=excluded.updated_at, poll_count=excluded.poll_count
+        """, job)
+        conn.commit()
+
+
+def _video_job_read(job_id: str) -> dict | None:
+    """读视频任务，返回 dict 或 None。"""
+    _db_init()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM video_jobs WHERE job_id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def _video_job_list(limit: int = 50) -> list[dict]:
+    _db_init()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM video_jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _export_job_write(job: dict) -> None:
+    _db_init()
+    job = dict(job)
+    job.setdefault("created_at", datetime.datetime.now().isoformat())
+    job["updated_at"] = datetime.datetime.now().isoformat()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.execute("""
+            INSERT INTO export_jobs(job_id,project_id,status,output_path,output_duration,error,created_at,updated_at,poll_count)
+            VALUES(:job_id,:project_id,:status,:output_path,:output_duration,:error,:created_at,:updated_at,:poll_count)
+            ON CONFLICT(job_id) DO UPDATE SET
+              status=excluded.status, output_path=excluded.output_path,
+              output_duration=excluded.output_duration, error=excluded.error,
+              updated_at=excluded.updated_at, poll_count=excluded.poll_count
+        """, job)
+        conn.commit()
+
+
+def _export_job_read(ejid: str) -> dict | None:
+    _db_init()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM export_jobs WHERE job_id=?", (ejid,)).fetchone()
+        return dict(row) if row else None
+
+
+def _script_write(project_id: str, title: str, genre: str, shots_json: str,
+                  prompt: str, llm_backend: str) -> None:
+    """A3：剧本历史持久化。"""
+    _db_init()
+    now = datetime.datetime.now().isoformat()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.execute("""
+            INSERT INTO scripts(project_id,title,genre,shots_json,prompt,llm_backend,created_at)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(project_id) DO UPDATE SET
+              title=excluded.title, genre=excluded.genre,
+              shots_json=excluded.shots_json, prompt=excluded.prompt,
+              llm_backend=excluded.llm_backend
+        """, (project_id, title, genre, shots_json, prompt, llm_backend, now))
+        conn.commit()
+
+
+def _script_read(project_id: str) -> dict | None:
+    _db_init()
+    with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM scripts WHERE project_id=?", (project_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            parsed = json.loads(d.pop("shots_json"))
+            # 兼容：可能存的是 {"shots": [...]} 也可能直接存 [...]
+            if isinstance(parsed, dict) and "shots" in parsed:
+                d["shots"] = parsed["shots"]
+            elif isinstance(parsed, list):
+                d["shots"] = parsed
+            else:
+                d["shots"] = []
+        except Exception:
+            d["shots"] = []
+        return d
+
+
+def _new_export_job_id() -> str:
+    return f"ej_{int(time.time())}_{os.getpid()}"
+
+
+def _new_job_id() -> str:
+    return f"vj_{int(time.time())}_{os.getpid()}"
+
+
+# ------------------------------------------------------------------
+# Key 存储（先内存，后续落盘 + AES-256）
+# ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# A2：AI Key 加密（纯 Python PBKDF2 + XOR；BEE_MASTER_KEY 环境变量）
+# ------------------------------------------------------------------
+def _crypto_key() -> bytes | None:
+    """从环境变量读主密钥，sha256 成 32 字节。没设就返回 None（退化成明文 + Warning）。"""
+    raw = os.environ.get("BEE_MASTER_KEY", "").strip()
+    if not raw:
+        return None
+    import hashlib
+    return hashlib.sha256(raw.encode("utf-8")).digest()
+
+
+def _encrypt(text: str, key: bytes | None) -> str:
+    """纯 Python XOR 流加密（PBKDF2 派生 key + AES-CTR 风格）。无 key 时返回 base64 原串。"""
+    import hashlib, os, base64
+    if not key:
+        # 无主密钥：存 base64 + prefix:plain: 标识，方便以后升级时识别
+        return "plain:" + base64.b64encode(text.encode()).decode()
+    # 16 字节 nonce（盐）
+    nonce = os.urandom(16)
+    # PBKDF2 派生 32 字节 AES key
+    derived = hashlib.pbkdf2_hmac("sha256", key, nonce, 100000, dklen=32)
+    # 用 hashlib.sha256 生成 stream（AES 不可用的 fallback）
+    stream = hashlib.sha256(nonce + b"|stream|00000001" + derived).digest()
+    # 循环生成足够长的 stream
+    out_bytes = text.encode("utf-8")
+    while len(stream) < len(out_bytes):
+        stream += hashlib.sha256(nonce + b"|stream|" + str(len(stream)).encode() + derived).digest()
+    cipher = bytes(a ^ b for a, b in zip(out_bytes, stream))
+    tag = hashlib.sha256(b"BEE-MAC|" + nonce + cipher + derived).digest()[:16]
+    return "enc:" + base64.b64encode(nonce + tag + cipher).decode()
+
+
+def _decrypt(b64: str, key: bytes | None) -> str:
+    import hashlib, base64
+    if b64.startswith("plain:"):
+        return base64.b64decode(b64[len("plain:"):]).decode("utf-8", errors="replace")
+    if not b64.startswith("enc:"):
+        # 老版本明文兼容
+        return b64
+    try:
+        raw = base64.b64decode(b64[len("enc:"):])
+        nonce, tag, cipher = raw[:16], raw[16:32], raw[32:]
+        if not key:
+            raise RuntimeError("no BEE_MASTER_KEY env var — cannot decrypt")
+        derived = hashlib.pbkdf2_hmac("sha256", key, nonce, 100000, dklen=32)
+        stream = hashlib.sha256(nonce + b"|stream|00000001" + derived).digest()
+        while len(stream) < len(cipher):
+            stream += hashlib.sha256(nonce + b"|stream|" + str(len(stream)).encode() + derived).digest()
+        plain = bytes(a ^ b for a, b in zip(cipher, stream))
+        expected_tag = hashlib.sha256(b"BEE-MAC|" + nonce + cipher + derived).digest()[:16]
+        if tag != expected_tag:
+            raise RuntimeError("tag mismatch — wrong key or corrupted")
+        return plain.decode("utf-8")
+    except Exception as e:
+        return f"[DECRYPT_FAILED: {e}]"
+
+
+def _keys_load() -> dict:
+    """从 data/api_keys.json 加载并解密。无 BEE_MASTER_KEY 时退化成明文读。"""
+    import warnings
+    path = _ROOT / "data" / "api_keys.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    master_key = _crypto_key()
+    if not master_key:
+        # 环境变量没设，先试试数据里有没有 enc: 前缀 → 警告但不解密
+        for k, v in list(data.items()):
+            if str(v).startswith("enc:"):
+                import sys
+                print(f"⚠️ BEE_MASTER_KEY 未设置，无法解密 {k} 的 API Key。请 export BEE_MASTER_KEY=<your-secret>", file=sys.stderr)
+                data[k] = ""  # 置空防泄漏
+        return data
+    return {k: _decrypt(v, master_key) for k, v in data.items()}
+
+
+def _keys_save(d: dict) -> None:
+    """加密并存盘。"""
+    import warnings
+    path = _ROOT / "data" / "api_keys.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    master_key = _crypto_key()
+    if not master_key:
+        import sys
+        print("⚠️ BEE_MASTER_KEY 未设置，API Key 将以 base64 形式存储（非加密）。", file=sys.stderr)
+    encrypted = {k: _encrypt(str(v), master_key) for k, v in d.items()}
+    path.write_text(json.dumps(encrypted, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+_API_KEYS: dict[str, str] = _keys_load()  # 启动时加载（解密后在内存里是明文）
+
+
+def _get_key(provider: str) -> str:
+    return _API_KEYS.get(provider, "")
+
+
+def _all_provider_names() -> list[str]:
+    """所有 provider 名称（视频 + LLM）。用于 /api/providers 列表 + 测试端点。"""
+    return [
+        # 视频生成 providers
+        "jimeng", "kling", "vidu", "wanx",
+        # LLM providers
+        "longcat", "openai",
+    ]
+
+
+# LLM providers metadata（给 /api/providers 列表用）
+_LLM_LABELS = {
+    "longcat": {"label": "LongCat 2.5", "type": "llm",
+                "desc": "高性能 Agentic 模型 · OpenAI/Anthropic 兼容 · https://longcat.chat"},
+    "openai":  {"label": "OpenAI GPT", "type": "llm",
+                "desc": "OpenAI 官方 GPT-4o-mini 等 · https://platform.openai.com"},
+}
+
+
+# ------------------------------------------------------------------
+# 模型 Registry — 内置 + 自定义（持久化 data/model_registry.json）
+# ------------------------------------------------------------------
+_MODEL_REGISTRY_FILE = _ROOT / "data" / "model_registry.json"
+
+_BUILTIN_MODELS = [
+    # 视频生成模型（4 家服务商，每家 2-3 个档位）
+    {"id": "jimeng-seed21",  "name": "Seed 2.1",        "type": "video", "provider": "jimeng",   "model_name": "seedance-2.1",     "builtin": True},
+    {"id": "jimeng-seed25",  "name": "Seed 2.5",        "type": "video", "provider": "jimeng",   "model_name": "seedance-2.5",     "builtin": True},
+    {"id": "jimeng-seedev",  "name": "Seed-Evolving",   "type": "video", "provider": "jimeng",   "model_name": "seed-evolving",    "builtin": True},
+    {"id": "kling-15",       "name": "Kling 1.5",       "type": "video", "provider": "kling",    "model_name": "kling-v1.5",       "builtin": True},
+    {"id": "kling-30s",      "name": "Kling 3.0",       "type": "video", "provider": "kling",    "model_name": "kling-v3.0",       "builtin": True},
+    {"id": "vidu-q3t",       "name": "Vidu Q3-turbo",   "type": "video", "provider": "vidu",     "model_name": "vidu-q3-turbo",    "builtin": True},
+    {"id": "wanx-wan3",      "name": "Wan 3.0-video",  "type": "video", "provider": "wanx",     "model_name": "wan3.0-video",     "builtin": True},
+    # LLM 模型（剧本生成）
+    {"id": "longcat-25",     "name": "LongCat 2.5",    "type": "llm",   "provider": "longcat", "model_name": "longcat-2.5",      "builtin": True},
+    {"id": "gpt-4o-mini",    "name": "GPT-4o-mini",    "type": "llm",   "provider": "openai",  "model_name": "gpt-4o-mini",      "builtin": True},
+    {"id": "gpt-4o",         "name": "GPT-4o",         "type": "llm",   "provider": "openai",  "model_name": "gpt-4o",           "builtin": True},
+    # 自动路由
+    {"id": "auto-video",     "name": "Auto（自动选择最快可用）", "type": "video", "provider": "auto", "model_name": "auto", "builtin": True, "auto": True},
+    {"id": "auto-llm",       "name": "Auto（自动选择最快可用）", "type": "llm",   "provider": "auto", "model_name": "auto", "builtin": True, "auto": True},
+]
+
+
+def _load_custom_models() -> list:
+    """从 data/model_registry.json 读自定义模型（无则返回 []）。"""
+    try:
+        if _MODEL_REGISTRY_FILE.exists():
+            data = json.loads(_MODEL_REGISTRY_FILE.read_text(encoding="utf-8"))
+            return [m for m in data if isinstance(m, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def _save_custom_models(models: list) -> None:
+    _MODEL_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _MODEL_REGISTRY_FILE.write_text(
+        json.dumps(models, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _all_models(model_type: str | None = None) -> list:
+    """内置 + 自定义，按 type 过滤（None = 全部）。"""
+    all_mods = _BUILTIN_MODELS + _load_custom_models()
+    if model_type:
+        all_mods = [m for m in all_mods if m.get("type") == model_type]
+    return all_mods
+
+
+# ------------------------------------------------------------------
+# 辅助：请求解析 / 响应
+# ------------------------------------------------------------------
+def _parse_body(h: BaseHTTPRequestHandler) -> dict:
+    raw = h.rfile.read(int(h.headers.get("Content-Length", 0) or 0))
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _query(h: BaseHTTPRequestHandler) -> dict[str, list[str]]:
+    return parse_qs(urlparse(h.path).query, keep_blank_values=True)
+
+
+def _h_json(h: BaseHTTPRequestHandler, obj, code: int = 200):
+    data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    h.send_response(code)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(data)))
+    h.send_header("Access-Control-Allow-Origin", "*")
+    h.end_headers()
+    h.wfile.write(data)
+
+
+def _h_text(h: BaseHTTPRequestHandler, text: str, code: int = 200):
+    data = text.encode("utf-8")
+    h.send_response(code)
+    h.send_header("Content-Type", "text/plain; charset=utf-8")
+    h.send_header("Content-Length", str(len(data)))
+    h.end_headers()
+    h.wfile.write(data)
+
+
+# ------------------------------------------------------------------
+# GET 路由
+# ------------------------------------------------------------------
+def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
+    qs = _query(h)
+    parts = [p for p in path.split("/") if p]
+
+    # ---- GET /api/providers ----
+    if parts == ["api", "providers"]:
+        from api.cost_calc import list_providers, _PRICING_TABLE
+        out = []
+        for p in list_providers():
+            out.append({
+                "name": p["name"], "label": p["label"],
+                "type": "video",
+                "pricing": _PRICING_TABLE.get(p["name"], {}),
+                "api_key_configured": bool(_get_key(p["name"])),
+            })
+        for name, info in _LLM_LABELS.items():
+            out.append({
+                "name": name, "label": info["label"],
+                "type": info["type"],
+                "desc": info["desc"],
+                "pricing": {},
+                "api_key_configured": bool(_get_key(name)),
+            })
+        _h_json(h, out)
+        return True
+
+    # ---- GET /api/models?type=video|llm ----
+    if parts == ["api", "models"]:
+        mtype = qs.get("type", [None])[0]
+        _h_json(h, _all_models(mtype))
+        return True
+
+    # ---- GET /api/routes (调试用) ----
+    if parts == ["api", "routes"]:
+        _h_json(h, {
+            "GET": [
+                "/api/providers",
+                "/api/cost/estimate?provider=X&resolution=Y&duration=N",
+                "/api/cost/compare?resolution=Y&duration=N",
+                "/api/video/poll/{job_id}",
+                "/api/export/poll/{job_id}",
+                "/api/routes",
+            ],
+            "POST": [
+                "/api/providers/{provider}/keys",
+                "/api/providers/{provider}/test",
+                "/api/video/generate",
+                "/api/export/{project_id}",
+            ],
+        })
+        return True
+
+    # ---- GET /api/cost/estimate ----
+    if parts == ["api", "cost", "estimate"]:
+        from api.cost_calc import estimate
+        provider = qs.get("provider", ["jimeng"])[0]
+        resolution = qs.get("resolution", ["720p"])[0]
+        duration = float(qs.get("duration", ["5"])[0])
+        prompt = qs.get("prompt", [""])[0]
+        prompt_len = int(qs.get("prompt_len", [len(prompt)] or [0])[0] or 0)
+        try:
+            q = estimate(provider, resolution, duration,
+                         prompt=prompt, prompt_len=prompt_len)
+            _h_json(h, {
+                "provider": q.provider, "label": q.provider_label,
+                "resolution": q.resolution,
+                "duration_input": duration,
+                "duration_real": q.duration_real,
+                "base_cost": round(q.base_cost, 2),
+                "adjustment": round(q.adjustment, 2),
+                "adjustment_label": q.adjustment_label,
+                "total_cost": q.total_cost,
+                "eta_sec": q.eta_sec,
+                "notes": q.notes,
+            })
+        except Exception as e:
+            _h_json(h, {"error": str(e)}, 400)
+        return True
+
+    # ---- GET /api/cost/compare ----
+    if parts == ["api", "cost", "compare"]:
+        from api.cost_calc import compare
+        resolution = qs.get("resolution", ["720p"])[0]
+        duration = float(qs.get("duration", ["5"])[0])
+        prompt = qs.get("prompt", [""])[0]
+        try:
+            quotes = compare(resolution, duration, prompt=prompt)
+            _h_json(h, [
+                {"provider": q.provider, "label": q.provider_label,
+                 "total_cost": q.total_cost, "eta_sec": q.eta_sec,
+                 "adjustment_label": q.adjustment_label, "notes": q.notes}
+                for q in quotes
+            ])
+        except Exception as e:
+            _h_json(h, {"error": str(e)}, 400)
+        return True
+
+    # ---- GET /api/video/poll/{job_id} ----
+    if len(parts) == 4 and parts[0:3] == ["api", "video", "poll"]:
+        job_id = parts[3]
+        job = _video_job_read(job_id)
+        if not job:
+            _h_json(h, {"error": f"job {job_id} not found"}, 404)
+            return True
+        # 读的时候顺便 +1 poll_count（纯只读行为，别在 SQL update 里写，避免误触发）
+        job["poll_count"] = int(job.get("poll_count") or 0) + 1
+        _video_job_write(job)
+        _h_json(h, job)
+        return True
+
+    # ---- GET /api/bee/video/jobs — Bee Studio 专属命名空间，避免与原产品冲突 ----
+    if parts == ["api", "bee", "video", "jobs"]:
+        # 列出最近 50 条视频任务（A1：持久化后可以重查）
+        _h_json(h, _video_job_list(50))
+        return True
+
+    # ---- GET /api/export/poll/{job_id} ----
+    if len(parts) == 4 and parts[0:3] == ["api", "export", "poll"]:
+        ejid = parts[3]
+        job = _export_job_read(ejid)
+        if job:
+            job["poll_count"] = int(job.get("poll_count") or 0) + 1
+            _export_job_write(job)
+        resp = dict(job) if job else {}
+        _h_json(h, resp if resp else {"error": "job not found"}, 200 if resp else 404)
+        return True
+
+    # ---- GET /api/bee/scripts —— 剧本历史列表（摘要） ----
+    if parts == ["api", "bee", "scripts"]:
+        _db_init()
+        with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT project_id, title, prompt, llm_backend, created_at, "
+                "LENGTH(shots_json) as shots_len FROM scripts "
+                "ORDER BY created_at DESC LIMIT 50"
+            ).fetchall()
+        scripts_list = []
+        for r in rows:
+            raw_shots_len = r["shots_len"] or 0
+            # 粗略估 shot_count：实际需 JSON 解析，但列表只展示摘要
+            shot_count = 0
+            try:
+                full = _script_read(r["project_id"])
+                if full and full.get("shots"):
+                    shot_count = len(full["shots"])
+            except Exception:
+                pass
+            scripts_list.append({
+                "project_id": r["project_id"],
+                "title": r["title"] or "(未命名剧本)",
+                "prompt": (r["prompt"] or "")[:80],
+                "shot_count": shot_count,
+                "llm_backend": r["llm_backend"],
+                "created_at": r["created_at"],
+            })
+        _h_json(h, {"scripts": scripts_list, "total": len(scripts_list)})
+        return True
+
+    # ---- GET /api/bee/script/{project_id} —— A3 剧本历史回查 ----
+    if len(parts) == 4 and parts[0:3] == ["api", "bee", "script"]:
+        pid = parts[3]
+        sc = _script_read(pid)
+        if sc:
+            _h_json(h, sc)
+        else:
+            _h_json(h, {"error": "script not found", "project_id": pid}, 404)
+        return True
+
+    return False
+
+
+# ------------------------------------------------------------------
+# POST 路由
+# ------------------------------------------------------------------
+def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", ctype: str = "") -> bool:
+    # body 已经由 panel.py 读过并传进来了，不要重读 rfile
+    body = {}
+    if body_bytes:
+        try:
+            body = json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            body = {}
+    parts = [p for p in path.split("/") if p]
+
+    # ---- POST /api/models —— 添加自定义模型 ----
+    if parts == ["api", "models"]:
+        name = str(body.get("name", "")).strip()
+        mtype = str(body.get("type", "")).strip()
+        provider = str(body.get("provider", "")).strip()
+        model_name = str(body.get("model_name", "")).strip()
+        if not name or not mtype or not model_name:
+            _h_json(h, {"error": "name/type/model_name 必填"}, 400)
+            return True
+        customs = _load_custom_models()
+        mid = body.get("id") or f"custom-{int(time.time())}"
+        # 防重复：id 存在 → 更新；否则追加
+        existing = next((i for i, m in enumerate(customs) if m.get("id") == mid), -1)
+        entry = {
+            "id": mid, "name": name, "type": mtype,
+            "provider": provider or "custom",
+            "model_name": model_name, "builtin": False,
+            "base_url": body.get("base_url", ""),
+            "note": body.get("note", ""),
+        }
+        if existing >= 0:
+            customs[existing] = entry
+        else:
+            customs.append(entry)
+        _save_custom_models(customs)
+        _h_json(h, entry)
+        return True
+
+    # ---- /api/providers/{provider}/keys ---- （暂存 Key）
+    if len(parts) == 4 and parts[0:2] == ["api", "providers"] and parts[3] == "keys":
+        provider = parts[2]
+        key = str(body.get("api_key", "")).strip()
+        if not key:
+            _h_json(h, {"error": "api_key 不能空"}, 400)
+            return True
+        _API_KEYS[provider] = key
+        # A2：加密写盘（BEE_MASTER_KEY env var，无则退化成 base64 + Warning）
+        try:
+            _keys_save(_API_KEYS)
+        except Exception as e:
+            _h_json(h, {"ok": False, "error": f"Key 写入失败: {str(e)[:200]}"}, 500)
+            return True
+        _h_json(h, {"ok": True, "provider": provider, "masked": key[:4] + "****" + key[-4:]})
+        return True
+
+    # ---- /api/providers/{provider}/test ---- （连通性 ping）
+    if len(parts) == 4 and parts[0:2] == ["api", "providers"] and parts[3] == "test":
+        provider = parts[2]
+        api_key = _get_key(provider)
+        latency_ms = 0
+        if not api_key:
+            _h_json(h, {"ok": False, "error": "未配置 API Key", "latency_ms": 0})
+            return True
+        # LLM provider → 打一次最小 chat completion 测 key + endpoint
+        if provider in ("longcat", "openai"):
+            try:
+                import time as _t
+                from api.llm_client import call_chat
+                t0 = _t.time()
+                call_chat(provider=provider, api_key=api_key,
+                          user="ping", json_mode=False, max_retries=0, timeout=10)
+                latency_ms = int((_t.time() - t0) * 1000)
+                _h_json(h, {"ok": True, "latency_ms": latency_ms})
+            except Exception as exc:
+                latency_ms = int(latency_ms or 0)
+                _h_json(h, {"ok": False, "error": str(exc)[:200], "latency_ms": latency_ms})
+            return True
+        # 视频 provider → ping endpoint 域名（DNS+TCP 可达性）
+        try:
+            import time as _t
+            import requests as _r
+            _providers_urls = {
+                "jimeng": ("api.providers.jimeng", "JimengProvider", "VOLC_ENDPOINT_T2V"),
+                "kling":  ("api.providers.kling",  "KlingProvider",  "KLING_ENDPOINT_T2V"),
+                "vidu":   ("api.providers.vidu",   "ViduProvider",   "VIDU_ENDPOINT_T2V"),
+                "wanx":   ("api.providers.wanx",   "WanxProvider",   "WANX_ENDPOINT_T2V"),
+            }
+            if provider in _providers_urls:
+                import importlib
+                mod_name, cls_name, attr = _providers_urls[provider]
+                mod = importlib.import_module(mod_name)
+                endpoint = getattr(mod, attr, "")
+            else:
+                endpoint = ""
+            if not endpoint or not endpoint.startswith("http"):
+                _h_json(h, {"ok": True, "latency_ms": 0, "note": "Key 已配，endpoint 占位未填，跳过网络测试"})
+                return True
+            from urllib.parse import urlparse as _up
+            host = f"{_up(endpoint).scheme}://{_up(endpoint).netloc}"
+            t0 = _t.time()
+            resp = _r.get(host, timeout=5)
+            latency_ms = int((_t.time() - t0) * 1000)
+            _h_json(h, {"ok": True, "latency_ms": latency_ms, "http_status": resp.status_code})
+        except Exception as exc:
+            latency_ms = int(latency_ms or 0)
+            _h_json(h, {"ok": False, "error": str(exc)[:200], "latency_ms": latency_ms})
+        return True
+
+    # ---- /api/video/generate ----
+    if parts == ["api", "video", "generate"]:
+        provider = body.get("provider", "jimeng")
+        resolution = body.get("resolution", "720p")
+        duration = float(body.get("duration", 5))
+        prompt = str(body.get("prompt", ""))
+        image_url = str(body.get("image_url", ""))
+
+        # 1. Key 检查
+        api_key = _get_key(provider)
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key，请先在「设置 → API Keys」里填入"}, 402)
+            return True
+
+        # 2. 加载 provider 类
+        try:
+            _providers = {
+                "jimeng": ("api.providers.jimeng", "JimengProvider"),
+                "kling":  ("api.providers.kling",  "KlingProvider"),
+                "vidu":   ("api.providers.vidu",   "ViduProvider"),
+                "wanx":   ("api.providers.wanx",   "WanxProvider"),
+            }
+            mod_name, cls_name = _providers[provider]
+            import importlib
+            mod = importlib.import_module(mod_name)
+            cls = getattr(mod, cls_name)
+            prov = cls(api_key=api_key)
+        except Exception as e:
+            _h_json(h, {"error": f"provider 加载失败: {e}"}, 500)
+            return True
+
+        # 3. 发起任务
+        from api.providers import GenRequest, ProviderError
+        try:
+            result = prov.generate(GenRequest(
+                prompt=prompt, image_url=image_url,
+                duration=duration, resolution=resolution,
+            ))
+        except ProviderError as e:
+            _h_json(h, {"error": str(e)}, 400)
+            return True
+        except Exception as e:
+            _h_json(h, {"error": f"生成失败: {e}"}, 500)
+            return True
+
+        # 4. 存进 SQLite + 起后台线程轮询
+        job_id = result.job_id or _new_job_id()
+        initial_job = {
+            "job_id": job_id,
+            "provider": provider,
+            "provider_label": prov.label,
+            "status": result.status or "queued",
+            "video_url": "",
+            "actual_cost": 0.0,
+            "error": "",
+            "created_at": datetime.datetime.now().isoformat(),
+            "poll_count": 0,
+            "prompt": prompt[:200],
+            "resolution": resolution,
+            "duration": duration,
+        }
+        _video_job_write(initial_job)
+        # 后台线程：阻塞轮询（最多 300s，5s 间隔）
+        def _run():
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                time.sleep(5)
+                try:
+                    r = prov.poll(result, job_id)
+                    j = _video_job_read(job_id)
+                    if not j:
+                        return  # DB 里没了，不轮了
+                    j["status"] = r.status
+                    j["video_url"] = r.video_url
+                    j["actual_cost"] = r.actual_cost
+                    j["error"] = r.error
+                    j["poll_count"] = int(j.get("poll_count") or 0) + 1
+                    _video_job_write(j)
+                    if r.status in ("succeeded", "failed"):
+                        return
+                except Exception as e:
+                    j = _video_job_read(job_id)
+                    if j:
+                        j["error"] = str(e)[:200]
+                        _video_job_write(j)
+            # 超时
+            j = _video_job_read(job_id)
+            if j and j["status"] not in ("succeeded", "failed"):
+                j["status"] = "failed"
+                j["error"] = "轮询超时（300s）"
+                _video_job_write(j)
+        threading.Thread(target=_run, daemon=True).start()
+        # 立刻返回
+        _h_json(h, {"ok": True, "job_id": job_id, "status": initial_job["status"]})
+        return True
+
+    # ---- POST /api/export/{project_id} —— 切片 D（异步后台 ffmpeg） ----
+    if len(parts) == 3 and parts[0:2] == ["api", "export"]:
+        project_id = parts[2]
+        shots_raw = body.get("shots", [])
+        from video_pipeline.ffmpeg_export import ShotSegment, compose as _ffmpeg_compose
+        shots = []
+        for s in shots_raw:
+            shots.append(ShotSegment(
+                shot_id=str(s.get("shot_id") or s.get("id") or ""),
+                video_path=str(s.get("video_path") or s.get("videoUrl") or ""),
+                start_sec=float(s.get("start_sec", 0.0)),
+                end_sec=float(s.get("end_sec") or s.get("duration", 5.0)),
+                voice_path=str(s.get("voice_path") or s.get("audioUrl") or ""),
+                subtitle=str(s.get("subtitle") or s.get("prompt") or ""),
+                scene_no=int(s.get("scene_no") or 1),
+            ))
+        if not shots:
+            _h_json(h, {"error": "shots 列表不能为空"}, 400)
+            return True
+        ejid = _new_export_job_id()
+        out_dir = _ROOT / "outputs" / "bee-studio" / project_id
+        _export_job_write({
+            "job_id": ejid,
+            "status": "pending",
+            "project_id": project_id,
+            "poll_count": 0,
+        })
+
+        def _bg_compose():
+            try:
+                j = _export_job_read(ejid) or {}
+                j["status"] = "running"
+                j["poll_count"] = 0
+                _export_job_write(j)
+                result = _ffmpeg_compose(shots, out_dir)
+                j = _export_job_read(ejid) or {}
+                if result.get("error"):
+                    j["status"] = "failed"
+                    j["error"] = result["error"]
+                else:
+                    j["status"] = "succeeded"
+                    j.update(result)
+                _export_job_write(j)
+            except Exception as exc:
+                j = _export_job_read(ejid) or {}
+                j["status"] = "failed"
+                j["error"] = str(exc)
+                _export_job_write(j)
+
+        threading.Thread(target=_bg_compose, daemon=True).start()
+        _h_json(h, {"job_id": ejid, "status": "pending", "message": "ffmpeg 合成已发起"}, 202)
+        return True
+
+    # ---- POST /api/llm/script-gen —— AI 生成剧本（LongCat 等 LLM 后端） ----
+    if parts == ["api", "llm", "script-gen"]:
+        topic = str(body.get("topic", "")).strip()
+        shots_count = int(body.get("shots_count", 5))
+        audience = str(body.get("audience", "")).strip()
+        style = str(body.get("style", "")).strip()
+        provider = str(body.get("provider", "longcat")).strip()
+        api_key = str(body.get("api_key", "")).strip() or _get_key(provider)
+
+        if not topic:
+            _h_json(h, {"error": "topic 必填"}, 400)
+            return True
+        if shots_count < 1 or shots_count > 30:
+            _h_json(h, {"error": "shots_count 应在 1~30 之间"}, 400)
+            return True
+
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
+            return True
+
+        # 构造 system + user prompt，要求输出结构化 JSON
+        system_prompt = (
+            "你是资深短视频导演兼编剧。根据用户给的主题生成一段分镜剧本（JSON 格式）。\n"
+            "严格遵守以下约束：\n"
+            "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
+            "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
+            "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
+            "4. 角色名保持一致；情绪多样化（悬疑→冲突→高潮→收尾）。\n"
+            "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
+        )
+        user_prompt = (
+            f"主题：{topic}\n"
+            f"镜头数：{shots_count}\n"
+            f"目标受众：{audience or '通用'}\n"
+            f"风格/色调：{style or '电影感，冷暖对比'}\n\n"
+            "请输出完整 JSON。"
+        )
+
+        # A5：schema validation + retry
+        def _normalize_shot(s: dict | None) -> dict:
+            """兜底填空值，保证每个 shot 都有必需字段。"""
+            s = s or {}
+            return {
+                "scene_no": int(s.get("scene_no") or s.get("shot_num") or 1),
+                "title": str(s.get("title") or f"镜头{s.get('scene_no')}"),
+                "char": str(s.get("char") or s.get("character") or ""),
+                "emotion": str(s.get("emotion") or "中性"),
+                "duration_sec": int(s.get("duration_sec") or s.get("duration") or 5),
+                "prompt": str(s.get("prompt") or s.get("description") or ""),
+                "voice_prompt": str(s.get("voice_prompt") or s.get("voice_text") or ""),
+            }
+
+        def _build_mock_script() -> dict:
+            """A5 兜底 mock（LLM 挂了也能出个可编辑剧本）。"""
+            mock_shots = []
+            for i in range(max(shots_count, 1)):
+                mock_shots.append({
+                    "scene_no": i + 1,
+                    "title": f"镜头 {i + 1}",
+                    "char": "主角",
+                    "emotion": ["平静", "紧张", "爆发", "沉思", "释然"][i % 5],
+                    "duration_sec": 5,
+                    "prompt": f"（mock）{topic} 场景 {i + 1}",
+                    "voice_prompt": f"（mock）旁白，第 {i + 1} 句台词",
+                })
+            return {"title": topic or "mock 剧本", "shots": mock_shots}
+
+        try:
+            from api.llm_client import call_chat
+            raw = call_chat(provider=provider, api_key=api_key,
+                            system=system_prompt, user=user_prompt,
+                            json_mode=True, max_retries=1, timeout=90)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```", 2)[1].split("```")[0].strip()
+            try:
+                data = json.loads(cleaned)
+            except json.JSONDecodeError:
+                # A5：retry 一次，prompt 更硬
+                retry_prompt = (user_prompt + "\n\n⚠️ 上一次输出 JSON 解析失败。"
+                                "这一次请确保：只输出裸 JSON，不要任何文字解释，不要 Markdown 代码块，"
+                                "不要在开头加「好的，这是剧本：」。直接输出 {\"title\":...,\"shots\":[...]}")
+                raw2 = call_chat(provider=provider, api_key=api_key,
+                                 system=system_prompt, user=retry_prompt,
+                                 json_mode=True, max_retries=0, timeout=90)
+                cleaned2 = raw2.strip()
+                if cleaned2.startswith("```"):
+                    cleaned2 = cleaned2.split("```", 2)[1].split("```")[0].strip()
+                data = json.loads(cleaned2)
+
+            # A5：schema validation —— 兜底填空值
+            shots_raw = data.get("shots") or []
+            if not isinstance(shots_raw, list) or not shots_raw:
+                raise ValueError("LLM 返回 shots 为空或非数组")
+            shots = [_normalize_shot(s) for s in shots_raw[:30]]  # 上限 30
+            title = str(data.get("title") or topic or "未命名剧本")
+
+            # A3：剧本历史持久化（存 SQLite scripts 表）
+            pid = body.get("project_id") or f"proj-{int(time.time())}"
+            _script_write(pid, title, str(data.get("genre") or ""),
+                          json.dumps({"shots": shots}, ensure_ascii=False),
+                          topic, provider)
+
+            _h_json(h, {
+                "project_id": pid, "title": title, "shots": shots,
+                "generated_by": provider, "shots_count": len(shots),
+                "used_mock": False,
+            })
+        except json.JSONDecodeError as exc:
+            # A5：双重失败 → mock 降级（不是真 502，是可用 fallback）
+            mock = _build_mock_script()
+            pid = body.get("project_id") or f"proj-{int(time.time())}"
+            _script_write(pid, mock["title"], "",
+                          json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
+                          topic, "mock")
+            _h_json(h, {
+                "project_id": pid, "title": mock["title"], "shots": mock["shots"],
+                "generated_by": "mock", "shots_count": len(mock["shots"]),
+                "used_mock": True, "mock_reason": f"JSON 解析失败: {exc.msg}",
+                "raw_preview": (raw or "")[:500],
+            }, 200)  # 200 OK mock 也算可用，不报 502
+        except Exception as exc:
+            # LLM 调用挂了 → mock 降级
+            try:
+                mock = _build_mock_script()
+                pid = body.get("project_id") or f"proj-{int(time.time())}"
+                _script_write(pid, mock["title"], "",
+                              json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
+                              topic, "mock")
+                _h_json(h, {
+                    "project_id": pid, "title": mock["title"], "shots": mock["shots"],
+                    "generated_by": "mock", "shots_count": len(mock["shots"]),
+                    "used_mock": True, "mock_reason": f"LLM 调用失败: {str(exc)[:200]}",
+                }, 200)
+            except Exception as exc2:
+                _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)
+        return True
+
+    # ---- POST /api/llm/script-edit —— C1：剧本改镜头（只改指定镜头，不重生成全剧） ----
+    if parts == ["api", "llm", "script-edit"]:
+        project_id = str(body.get("project_id") or "").strip()
+        shot_index = body.get("shot_index")
+        edit_instruction = str(body.get("edit_instruction") or "").strip()
+        provider = str(body.get("provider") or "longcat").strip()
+        api_key = str(body.get("api_key") or "").strip() or _get_key(provider)
+
+        if not project_id or shot_index is None or not edit_instruction:
+            _h_json(h, {"error": "project_id, shot_index, edit_instruction 必填"}, 400)
+            return True
+
+        sc = _script_read(project_id)
+        if not sc:
+            _h_json(h, {"error": f"script {project_id} 不存在，请先 script-gen"}, 404)
+            return True
+
+        shots = sc.get("shots") or []
+        if shot_index < 0 or shot_index >= len(shots):
+            _h_json(h, {"error": f"shot_index {shot_index} 越界（0~{len(shots)-1}）"}, 400)
+            return True
+
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key（改镜头需要真实 LLM）",
+                         "need_key": True}, 402)
+            return True
+
+        system_prompt = (
+            "你是短视频分镜编剧。只修改用户指定的那一个镜头，其它镜头不动。\n"
+            "输出 JSON：{\"updated_shot\": {...}} 。镜头字段见原剧本。"
+        )
+        old_shot = shots[shot_index]
+        user_prompt = (
+            f"剧本主题：{sc.get('title', '')}\n"
+            f"要修改的镜头 #{shot_index}（当前值）：\n"
+            f"{json.dumps(old_shot, ensure_ascii=False, indent=2)}\n\n"
+            f"修改指令：{edit_instruction}\n\n"
+            "请只输出 updated_shot JSON，严格遵循原镜头的字段结构。"
+        )
+
+        try:
+            from api.llm_client import call_chat
+            raw = call_chat(provider=provider, api_key=api_key,
+                            system=system_prompt, user=user_prompt,
+                            json_mode=True, max_retries=1, timeout=60)
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```", 2)[1].split("```")[0].strip()
+            data = json.loads(cleaned)
+            updated = data.get("updated_shot") or data
+
+            def _normalize_edit(s: dict) -> dict:
+                return {
+                    "scene_no": int(s.get("scene_no") or shot_index + 1),
+                    "title": str(s.get("title") or old_shot.get("title") or ""),
+                    "char": str(s.get("char") or old_shot.get("char") or ""),
+                    "emotion": str(s.get("emotion") or old_shot.get("emotion") or ""),
+                    "duration_sec": int(s.get("duration_sec") or old_shot.get("duration_sec") or 5),
+                    "prompt": str(s.get("prompt") or old_shot.get("prompt") or ""),
+                    "voice_prompt": str(s.get("voice_prompt") or old_shot.get("voice_prompt") or ""),
+                }
+
+            shots[shot_index] = _normalize_edit(updated)
+            _script_write(project_id, sc.get("title", ""), str(sc.get("genre") or ""),
+                          json.dumps({"shots": shots}, ensure_ascii=False),
+                          sc.get("prompt", ""), provider)
+            _h_json(h, {
+                "project_id": project_id, "updated_shot_index": shot_index,
+                "updated_shot": shots[shot_index],
+                "shots": shots, "edited_by": provider,
+            })
+        except Exception as exc:
+            _h_json(h, {"error": f"改镜头 LLM 失败: {str(exc)[:200]}",
+                         "raw_preview": (raw or "")[:500] if 'raw' in dir() else ""}, 502)
+        return True
+
+    # ---- POST /api/video/generate-batch —— A4：多镜头并行视频生成 ----
+    if parts == ["api", "video", "generate-batch"]:
+        provider = str(body.get("provider", "jimeng"))
+        shot_list = body.get("shots", [])
+        max_workers = int(body.get("max_workers", 3))
+        if not isinstance(shot_list, list) or not shot_list:
+            _h_json(h, {"error": "shots 列表不能为空"}, 400)
+            return True
+        if not _get_key(provider):
+            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
+            return True
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from api.providers import load_provider, GenRequest, ProviderError
+
+        prov = load_provider(provider)
+        batch_results = []  # [{shot_index, job_id, status, error}]
+
+        def _one(idx: int, shot: dict) -> dict:
+            try:
+                req = GenRequest(
+                    prompt=str(shot.get("prompt") or ""),
+                    image_url=str(shot.get("image_url") or ""),
+                    duration=float(shot.get("duration") or shot.get("duration_sec") or 5),
+                    resolution=str(shot.get("resolution") or "720p"),
+                )
+                result = prov.generate(req)
+                jid = result.job_id or f"vb_{int(time.time())}_{idx}"
+                initial = {
+                    "job_id": jid, "provider": provider, "provider_label": prov.label,
+                    "status": result.status or "queued",
+                    "video_url": "", "actual_cost": 0.0, "error": "",
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "poll_count": 0, "prompt": req.prompt[:200],
+                    "resolution": req.resolution, "duration": req.duration,
+                    "shot_index": idx,
+                }
+                _video_job_write(initial)
+                # 启动轮询线程（复用单镜头逻辑）
+                def _poll():
+                    deadline = time.time() + 300
+                    while time.time() < deadline:
+                        time.sleep(5)
+                        try:
+                            r = prov.poll(result, jid)
+                            j = _video_job_read(jid) or {}
+                            j.update({
+                                "status": r.status, "video_url": r.video_url,
+                                "actual_cost": r.actual_cost, "error": r.error,
+                                "poll_count": int(j.get("poll_count") or 0) + 1,
+                            })
+                            _video_job_write(j)
+                            if r.status in ("succeeded", "failed"):
+                                return
+                        except Exception as e:
+                            j = _video_job_read(jid) or {}
+                            j["error"] = str(e)[:200]
+                            _video_job_write(j)
+                    j = _video_job_read(jid) or {}
+                    if j.get("status") not in ("succeeded", "failed"):
+                        j["status"] = "failed"
+                        j["error"] = "轮询超时（300s）"
+                        _video_job_write(j)
+                threading.Thread(target=_poll, daemon=True).start()
+                return {"shot_index": idx, "job_id": jid, "status": "queued"}
+            except ProviderError as e:
+                return {"shot_index": idx, "status": "failed", "error": str(e)}
+            except Exception as e:
+                return {"shot_index": idx, "status": "failed", "error": str(e)[:200]}
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(shot_list))) as pool:
+            futures = {pool.submit(_one, i, s): i for i, s in enumerate(shot_list)}
+            for fut in as_completed(futures):
+                batch_results.append(fut.result())
+
+        # 按 shot_index 排序
+        batch_results.sort(key=lambda x: x["shot_index"])
+        _h_json(h, {
+            "ok": True, "provider": provider,
+            "batch_size": len(shot_list), "max_workers": min(max_workers, len(shot_list)),
+            "results": batch_results,
+        }, 202)
+        return True
+
+    return False
+
+
+# ------------------------------------------------------------------
+# 让 panel.py 只需调一个入口
+# ------------------------------------------------------------------
+def handle(h: BaseHTTPRequestHandler, method: str, path: str,
+           body: bytes = b"", ctype: str = "") -> bool:
+    if method == "GET":
+        return handle_get(h, path)
+    if method == "POST":
+        return handle_post(h, path, body_bytes=body, ctype=ctype)
+    if method == "DELETE":
+        return handle_delete(h, path)
+    return False
+
+
+# ------------------------------------------------------------------
+# DELETE 路由
+# ------------------------------------------------------------------
+def handle_delete(h: BaseHTTPRequestHandler, path: str) -> bool:
+    parts = [p for p in path.split("/") if p]
+
+    # ---- DELETE /api/models/{id} ----
+    if len(parts) == 3 and parts[0:2] == ["api", "models"]:
+        mid = parts[2]
+        customs = _load_custom_models()
+        customs = [m for m in customs if m.get("id") != mid]
+        _save_custom_models(customs)
+        _h_json(h, {"deleted": mid})
+        return True
+
+    return False

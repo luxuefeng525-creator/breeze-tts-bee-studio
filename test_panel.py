@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.request
 import uuid
+from unittest.mock import patch
 
 import pytest
 
@@ -52,6 +53,47 @@ def test_parse_multipart_fields_and_files():
     assert fields["text"] == "你好"
     fname, data = files["ref_audio"]
     assert fname == "a.wav" and data == b"RIFFDATA"
+
+
+def test_adapter_headers_are_case_insensitive():
+    headers = {
+        "x-adapter-note": "%E4%BD%BF%E7%94%A8%20CUDA%20Graph",
+        "x-adapter-route": "design",
+    }
+
+    assert P._header_get(headers, "X-Adapter-Note") == headers["x-adapter-note"]
+    assert P._header_get(headers, "X-Adapter-Route") == "design"
+    assert P._engine_note(headers) == "使用 CUDA Graph"
+
+
+def test_upstream_headers_are_lowercased():
+    class FakeResponse:
+        status = 200
+        headers = {
+            "Content-Type": "audio/pcm",
+            "x-adapter-route": "design",
+            "x-adapter-note": "ok",
+        }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b"pcm"
+
+    headers = {}
+    with patch.object(P, "urlopen", return_value=FakeResponse()):
+        code, body, ctype = P._post_upstream(
+            "/v1/audio/speech", b"", "application/octet-stream",
+            headers_out=headers,
+        )
+
+    assert code == 200 and body == b"pcm" and ctype == "audio/pcm"
+    assert headers["x-adapter-route"] == "design"
+    assert P._header_get(headers, "X-Adapter-Route") == "design"
 
 
 # ---------- 面板服务（进程内真实起服） ----------
