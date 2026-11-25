@@ -462,9 +462,14 @@ def _scenes_view(names: list[str], configured) -> list[dict]:
 
 
 def _line_hash(row: dict) -> str:
-    """一行音频的身份：文本、角色、音色、指令、语速任何一项变了就不该复用旧音频。"""
+    """一行音频的身份：文本、角色、音色、指令、语速、CFG、seed 任何一项变了就不该复用旧音频。
+
+    2026-11-25 补 cfg_scale 和 seed：这俩改了但 hash 不变会导致用户以为"换了参数"，
+    实际合成用的是旧音频。剧本级 gap 不进 hash——它影响行间停顿，不影响单行音频本身。
+    """
     raw = "|".join(str(row.get(k) or "") for k in
-                   ("text", "role_id", "voice_id", "instruction", "speed"))
+                   ("text", "role_id", "voice_id", "instruction", "speed",
+                    "cfg_scale", "seed"))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
