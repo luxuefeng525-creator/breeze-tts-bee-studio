@@ -73,6 +73,13 @@ def _db_init() -> None:
           created_at TEXT
         );
         """)
+        # 迁移：POST /api/bee/script/{pid}/shots 要写 updated_at，但早期建的表没有这一列，
+        # CREATE TABLE IF NOT EXISTS 不会补列 —— 老库会一直 500「no such column: updated_at」，
+        # 前端 autosave 的 catch 又把错误吞掉，表现为「镜头编辑永远存不进去」。
+        try:
+            conn.execute("ALTER TABLE scripts ADD COLUMN updated_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # 已经有了
         conn.commit()
     _db_ready = True
 

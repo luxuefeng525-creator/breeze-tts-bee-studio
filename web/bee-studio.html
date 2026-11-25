@@ -1788,12 +1788,16 @@ async function syncProjectsFromDB() {
           prompt: sh.prompt || '',
           voice: sh.voice_prompt || '',
           emotion: sh.emotion || '中性',
-          provider: 'kling',
-          res: '1080p',
+          provider: sh.provider || 'kling',
+          res: sh.res || '1080p',
           cost: 0,
-          audioUrl: null,
-          videoReady: false,
-          videoUrl: null,
+          // 后端 shots_json 原样存取；不读回就等于每次刷新丢配音/视频/剧本绑定
+          bt_script_id: sh.bt_script_id || null,
+          audioUrl: sh.audio_url || null,
+          audioMock: !!sh.audio_mock,
+          videoReady: !!sh.video_url,
+          videoUrl: sh.video_url || null,
+          videoMock: !!sh.video_mock,
         }));
         const totalDuration = shots.reduce((a, b) => a + (b.duration || 0), 0);
         loaded.push({
@@ -1848,6 +1852,14 @@ async function autosaveProject() {
     duration_sec: s.duration || 5,
     prompt: s.prompt || '',
     voice_prompt: s.voice || '',
+    // 持久化：不存这些，刷新后配音/视频/剧本绑定全丢，界面回到「未生成」
+    bt_script_id: s.bt_script_id || null,
+    audio_url: s.audioUrl || null,
+    audio_mock: !!s.audioMock,
+    video_url: s.videoUrl || null,
+    video_mock: !!s.videoMock,
+    provider: s.provider || 'kling',
+    res: s.res || '1080p',
   }));
   try {
     await apiBT(`/api/bee/script/${proj.id}/shots`, {
@@ -2281,11 +2293,13 @@ async function synthShot(shotId) {
         ? '❌ 合成失败：请检查角色是否绑定了音色'
         : '🎙️ 音频未生成，请重试', 'warn');
     }
+    _debounceAutosave();   // 把 bt_script_id / audio_url 落库，否则刷新后又变回「未生成」
     renderStoryboard();
   } catch (err) {
     console.warn('[BeeStudio] synth error:', err);
     shot.audioMock = true;
     showToast('❌ 语音合成失败：' + err.message, 'error');
+    _debounceAutosave();
     renderStoryboard();
   }
 }
@@ -2315,6 +2329,7 @@ async function generateVideo(shotId, cardEl) {
       shot.videoMock = true;
       shot.videoReady = false;
       shot.videoUrl = '';
+      _debounceAutosave();
       renderStoryboard();
       showToast('⚠️ 已标记「示例预览」· 未接真实视频模型（配置 API Key 后生成真片）', 'warn');
     }, 2200 + Math.random() * 1500);
@@ -2377,6 +2392,7 @@ async function generateVideo(shotId, cardEl) {
     shot.videoMock = false;
     shot.videoUrl = lastVideoUrl;
     if (lastCost > 0) shot.cost = lastCost;
+    _debounceAutosave();   // 视频地址落库，刷新后不丢
     showToast(`✅ 视频完成 · 实际结算 ¥${lastCost.toFixed(2)}`, 'success');
   } else {
     showToast('⏱️ 生成超时（>200s），可稍后重试', 'warn');
