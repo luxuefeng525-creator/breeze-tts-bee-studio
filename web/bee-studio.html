@@ -2203,6 +2203,7 @@ async function exportProject() {
 // -------------------------- Timeline ---------------------------
 function renderTimeline() {
   const project = getActiveProject();
+  if (!project) return; // L1-根因修复：空 state 时不崩，等 syncProjectsFromDB 回来再调
   const total = project.totalDuration;
   const shots = project.shots;
 
