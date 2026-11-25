@@ -184,6 +184,17 @@ input:focus, textarea:focus, select:focus {
   75% { opacity: 1; }
   100% { opacity: 0; }
 }
+/* G7: Undo/Redo 按钮 */
+.tb-undo-btn {
+  width: 28px; height: 28px; border-radius: var(--radius-md);
+  background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--text); font-size: 15px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.tb-undo-btn:hover:not(:disabled) { background: var(--panel-3); border-color: var(--primary); color: var(--primary); }
+.tb-undo-btn:active:not(:disabled) { transform: scale(.94); }
+.tb-undo-btn:disabled { opacity: .3; cursor: not-allowed; }
 
 /* ============================================================
    GRID LAYOUT
@@ -1209,6 +1220,10 @@ input:focus, textarea:focus, select:focus {
     <a class="topbar-tab external" href="/?screen=library">🔊 音色库</a>
   </div>
   <div class="topbar-right">
+    <div class="tb-undo-group" style="display:flex;gap:2px;margin-right:4px">
+      <button id="btnUndo" class="tb-undo-btn" title="撤销 Ctrl+Z" disabled>↶</button>
+      <button id="btnRedo" class="tb-undo-btn" title="重做 Ctrl+Y / Ctrl+Shift+Z" disabled>↷</button>
+    </div>
     <span class="topbar-status" id="beeEngineStatus">✓ 双引擎就绪</span>
     <span class="topbar-save" id="beeSaveHint" style="display:none">💾 自动保存 · 刚刚</span>
     <a href="/" class="topbar-tab external" style="padding:6px 10px;font-size:11px">BreezeTTS 首页</a>
@@ -1747,7 +1762,7 @@ function switchProject(id) {
   renderTimeline();
   const proj = getActiveProject();
   $('#projectTitleInput').value = proj.name;
-  showToast(`已切换到 "${proj.name}"`);
+  updateUndoRedoUI();  // G7: 切项目时刷新撤销栈状态
 }
 
 function getActiveProject() {
@@ -1822,7 +1837,8 @@ function renderStoryboard() {
       promptEdit.select();
     });
     promptEdit.addEventListener('blur', () => {
-      shot.prompt = promptEdit.value.trim();
+      const newVal = promptEdit.value.trim();
+      commitUndo(() => { shot.prompt = newVal; }, '修改提示词');
       promptText.textContent = shot.prompt || '点击添加提示词…';
       promptEdit.style.display = 'none';
       promptText.style.display = 'block';
@@ -1859,11 +1875,15 @@ function renderStoryboard() {
       item.addEventListener('click', (e) => {
         e.stopPropagation();
         if (item.dataset.model) {
-          shot.provider = item.dataset.model;
-          shot.cost = calcCost(shot.provider, shot.res, shot.duration);
+          commitUndo(() => {
+            shot.provider = item.dataset.model;
+            shot.cost = calcCost(shot.provider, shot.res, shot.duration);
+          }, '切换视频模型');
         } else if (item.dataset.res) {
-          shot.res = item.dataset.res;
-          shot.cost = calcCost(shot.provider, shot.res, shot.duration);
+          commitUndo(() => {
+            shot.res = item.dataset.res;
+            shot.cost = calcCost(shot.provider, shot.res, shot.duration);
+          }, '切换分辨率');
         } else if (item.dataset.gen) {
           closeAllDropdowns();
           generateVideo(shot.id, card);
@@ -2257,6 +2277,98 @@ function renderTimeline() {
   $('#tlTime').textContent = `00:00 / ${fmtTime(total)}`;
 }
 
+// -------------------------- G7: Undo/Redo 栈 --------------------------
+// 设计：项目级栈（每个 project 独立），before/after 完整快照保证严格对偶
+// 拖拽场景：pointerdown 拍 before → 中间高频只改 state → pointerup 拍 after + 入栈一次
+// 非拖拽场景：commitUndo(fn, label) —— fn 内改 state，前后拍快照
+const _undoState = { stacks: {}, _dragBefore: null, _dragPid: null };
+const _UNDO_LIMIT = 50;
+
+function _getUndoStack(pid) {
+  if (!pid) return null;
+  if (!_undoState.stacks[pid]) _undoState.stacks[pid] = { undo: [], redo: [] };
+  return _undoState.stacks[pid];
+}
+function _snapshot() {
+  const p = getActiveProject();
+  if (!p) return null;
+  return JSON.parse(JSON.stringify({ id: p.id, shots: p.shots, totalDuration: p.totalDuration }));
+}
+
+// --- 拖拽模式 ---
+function undoDragBegin() {
+  _undoState._dragBefore = _snapshot();
+  _undoState._dragPid = getActiveProject()?.id;
+}
+function undoDragCommit(label) {
+  const before = _undoState._dragBefore;
+  const after = _snapshot();
+  _undoState._dragBefore = null; _undoState._dragPid = null;
+  if (!before || !after) return;
+  if (JSON.stringify(before) === JSON.stringify(after)) return; // 没改不入栈
+  const stack = _getUndoStack(before.id);
+  if (!stack) return;
+  stack.undo.push({ before, after, label });
+  if (stack.undo.length > _UNDO_LIMIT) stack.undo.shift();
+  stack.redo.length = 0;
+  updateUndoRedoUI();
+}
+
+// --- 非拖拽模式 ---
+function commitUndo(fn, label = '修改') {
+  const before = _snapshot();
+  fn();
+  const after = _snapshot();
+  if (!before || !after) return;
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
+  const stack = _getUndoStack(before.id);
+  if (!stack) return;
+  stack.undo.push({ before, after, label });
+  if (stack.undo.length > _UNDO_LIMIT) stack.undo.shift();
+  stack.redo.length = 0;
+  updateUndoRedoUI();
+}
+
+// --- Undo/Redo 动作 ---
+function undo() {
+  const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
+  if (!stack || !stack.undo.length) return;
+  const entry = stack.undo.pop();
+  Object.assign(p, JSON.parse(JSON.stringify(entry.before)));
+  stack.redo.push({ before: JSON.parse(JSON.stringify(entry.before)), after: JSON.parse(JSON.stringify(entry.after)), label: entry.label });
+  _writeClipsDOM(); renderStoryboard(); renderInspector();
+  _debounceAutosave(); updateUndoRedoUI();
+  showToast(`↶ 撤销：${entry.label}`, 'info', 1200);
+}
+function redo() {
+  const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
+  if (!stack || !stack.redo.length) return;
+  const entry = stack.redo.pop();
+  Object.assign(p, JSON.parse(JSON.stringify(entry.after)));
+  stack.undo.push({ before: JSON.parse(JSON.stringify(entry.before)), after: JSON.parse(JSON.stringify(entry.after)), label: entry.label });
+  _writeClipsDOM(); renderStoryboard(); renderInspector();
+  _debounceAutosave(); updateUndoRedoUI();
+  showToast(`↷ 重做：${entry.label}`, 'info', 1200);
+}
+function updateUndoRedoUI() {
+  const p = getActiveProject(); const stack = p && _getUndoStack(p.id);
+  const ub = $('#btnUndo'); if (ub) ub.disabled = !stack || !stack.undo.length;
+  const rb = $('#btnRedo'); if (rb) rb.disabled = !stack || !stack.redo.length;
+}
+
+// --- 快捷键（全局 keydown，textinput 时让浏览器接管） ---
+document.addEventListener('keydown', (e) => {
+  const inInput = /INPUT|TEXTAREA/.test(e.target.tagName) || e.target.isContentEditable;
+  // textarea 里 Ctrl+Z 让浏览器默认栈接管（Bee Studio autosave 栈只管项目数据，不管 textarea 里的临时输入）
+  if (inInput) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+  } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'y') {
+    e.preventDefault(); redo();
+  }
+});
+
 // Playhead animation
 let playheadRAF, playheadT = 0;
 $('#tlPlayBtn').addEventListener('click', function() {
@@ -2405,6 +2517,8 @@ $('#tlTracks').addEventListener('pointerdown', (e) => {
     _tlDrag.type = 'clip';
     _tlDrag.shotIndex = parseInt(videoClip.dataset.shot);
   } else { return; }
+  // G7: 拖拽开始前拍 undo before 快照
+  undoDragBegin();
   const project = getActiveProject();
   const total = project.totalDuration || 1;
   const shot = project.shots[_tlDrag.shotIndex];
@@ -2527,7 +2641,7 @@ document.body.addEventListener('pointermove', (e) => {
   }
 });
 
-// pointerup: commit + autosave + 清状态 + G6 swap 后全链路刷新
+// pointerup: commit + autosave + 清状态 + G6 swap 后全链路刷新 + G7 undoDragCommit
 document.body.addEventListener('pointerup', () => {
   if (!_tlDrag.type) return;
   const project = getActiveProject();
@@ -2539,6 +2653,7 @@ document.body.addEventListener('pointerup', () => {
     playheadT = (_tlDrag._curPct / 100) * total;
     $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
     $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
+    // playhead 移动不改数据，不入 undo 栈
   } else if (_tlDrag.type === 'clip') {
     // G6: swap 后 renumber + 全链路重渲染 + autosave
     _renumberShots(project.shots);
@@ -2550,6 +2665,8 @@ document.body.addEventListener('pointerup', () => {
     // 分镜卡 + inspector 也要刷新（shot 编号变了）
     renderStoryboard();
     renderInspector();
+    // G7: 拖拽完成后一次性入 undo 栈
+    undoDragCommit('交换镜头');
     _debounceAutosave();
   } else {
     // resize commit totalDuration + autosave
@@ -2557,6 +2674,8 @@ document.body.addEventListener('pointerup', () => {
     project.shots.forEach(s => { newTotal += s.duration; });
     project.totalDuration = Math.round(newTotal * 10) / 10;
     _writeClipsDOM();
+    // G7: 入 undo 栈
+    undoDragCommit('调整镜头时长');
     _debounceAutosave();
   }
   // 清 drag 状态
@@ -3504,6 +3623,9 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#modelModalCancel')?.addEventListener('click', closeModelModal);
   $('#modelModalSave')?.addEventListener('click', saveCustomModel);
   $('#modelModal')?.addEventListener('click', (e) => { if (e.target.id === 'modelModal') closeModelModal(); });
+  // G7: Undo/Redo 按钮点击
+  $('#btnUndo')?.addEventListener('click', undo);
+  $('#btnRedo')?.addEventListener('click', redo);
 });
 
 // -------------------------- Init ---------------------------
@@ -3517,6 +3639,7 @@ loadKeyStates();
 loadAllModels().then(async () => {
   await Promise.all([loadVoices(), loadRoles(), loadVideoModels(), loadLLMModels()]);
   await syncProjectsFromDB();
+  updateUndoRedoUI();  // G7: 初始化撤销按钮禁用态
 });
 </script>
 
