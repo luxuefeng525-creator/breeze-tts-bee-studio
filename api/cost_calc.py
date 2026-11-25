@@ -139,7 +139,7 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
         return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, duration,
                          0.0, 0.0, "", eta_sec=max(180.0, duration * 60),
                          supports_image_input=False,
-                         notes="本地显卡推理，零单价；出片前自动让语音模型卸卡，之后首次合成需重新加载（约半分钟）")
+                         notes="本地显卡推理，零单价；出片前自动让语音模型卸卡，之后首次合成需重新加载（约 1 分钟）")
 
     raise ValueError(f"未知 provider: {provider}")
 
