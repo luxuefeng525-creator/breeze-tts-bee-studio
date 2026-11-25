@@ -988,6 +988,28 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)
         return True
 
+    # ---- POST /api/bee/script/{project_id}/shots —— G4-P1: 保存 shots（自动保存） ----
+    if len(parts) == 5 and parts[0:3] == ["api", "bee", "script"] and parts[4] == "shots":
+        pid = parts[3]
+        shots = body.get("shots")
+        if not shots or not isinstance(shots, list):
+            _h_json(h, {"error": "shots 必须是数组"}, 400); return True
+        _db_init()
+        try:
+            conn = sqlite3.connect(_DB_PATH)
+            cur = conn.execute("SELECT title FROM scripts WHERE project_id=?", (pid,))
+            row = cur.fetchone()
+            if not row:
+                _h_json(h, {"error": "project 不存在"}, 404); conn.close(); return True
+            conn.execute("UPDATE scripts SET shots_json=?, updated_at=? WHERE project_id=?",
+                         (json.dumps({"shots": shots}, ensure_ascii=False),
+                          datetime.datetime.now().isoformat(), pid))
+            conn.commit(); conn.close()
+            _h_json(h, {"ok": True, "saved_shots": len(shots)})
+        except Exception as exc:
+            _h_json(h, {"error": str(exc)[:120]}, 500)
+        return True
+
     # ---- POST /api/llm/script-edit —— C1：剧本改镜头（只改指定镜头，不重生成全剧） ----
     if parts == ["api", "llm", "script-edit"]:
         project_id = str(body.get("project_id") or "").strip()

@@ -408,7 +408,14 @@ input:focus, textarea:focus, select:focus {
 
 .shot-title { font-weight: 700; var(--font-md); line-height: 1.3; }
 .shot-char { var(--font-sm); color: var(--text-muted); display:flex; align-items:center; gap: var(--space-1) }
-.shot-char .char-dot { width: var(--space-2) height: 8px; border-radius: 50%; background: var(--primary); }
+.shot-char .char-dot { width: var(--space-2); height: 8px; border-radius: 50%; background: var(--primary); }
+
+/* G4-P1: prompt 显示 + inline 编辑 */
+.shot-prompt { margin: 8px 0 6px; }
+.shot-prompt .sp-text { font-size: 11px; color: var(--text-muted); line-height: 1.5; cursor: text; padding: 6px 8px; background: var(--panel-2, #2a2a2a); border-radius: 4px; max-height: 52px; overflow: hidden; transition: background .15s; }
+.shot-prompt .sp-text:hover { background: var(--panel-3, #333); color: var(--text); }
+.shot-prompt .sp-edit { font-size: 11px; color: var(--text); line-height: 1.5; width: 100%; padding: 6px 8px; background: var(--bg, #1a1a1a); border: 1px solid var(--primary); border-radius: 4px; resize: vertical; outline: none; box-sizing: border-box; font-family: inherit; }
+.shot-prompt .sp-save-hint { font-size: 10px; color: var(--primary); margin-top: 2px; }
 
 .shot-preview {
   position: relative;
@@ -1497,56 +1504,107 @@ const PRICING = {
 
 const EMOTIONS = ['平静','忧郁','紧张','愤怒','温柔','悬疑','兴奋','孤独','希望','恐惧','幽默','怀旧'];
 
+// G4-P0 修复：state.projects 改为从 DB 拉取，不再硬编码
 let state = {
-  activeProjectId: 'proj-1',
+  activeProjectId: null,
   activeShotId: null,
-  projects: [
-    {
-      id: 'proj-1',
-      name: '雨夜的抉择',
-      status: 'voicing',
-      updated: '2 分钟前',
-      totalDuration: 28,
-      shots: [
-        { id:'s1', num:1, title:'雨夜街角', char:'男子 · 陈默', duration:5,
-          prompt:'雨夜的十字路口，霓虹灯下穿着黑色风衣的男子站在斑马线前，雨水顺着帽檐滴落，远处出租车尾灯模糊成一条光河。',
-          voice:'男声 · 沉稳 · 晓峰', emotion:'忧郁', provider:'kling', res:'1080p', cost: 3.05, audioUrl:null, videoReady:false },
-        { id:'s2', num:2, title:'闪回 · 分手电话', char:'陈默 + 苏雨', duration:4,
-          prompt:'闪回镜头，暖色室内，年轻女人举着手机神情疲惫，屏幕上是陈默的号码，背景虚化，景深极浅。',
-          voice:'女声 · 温柔 · 晴川', emotion:'紧张', provider:'kling', res:'1080p', cost: 2.44, audioUrl:null, videoReady:false },
-        { id:'s3', num:3, title:'香烟特写', char:'陈默', duration:3,
-          prompt:'点燃的香烟特写，火苗在雨夜风中晃动，烟灰长长地落下，湿冷的地面反光中映出模糊的烟圈。',
-          voice:'男声 · 沉稳 · 晓峰', emotion:'平静', provider:'jimeng', res:'720p', cost: 0.84, audioUrl:null, videoReady:true },
-        { id:'s4', num:4, title:'出租车驶过', char:'无', duration:4,
-          prompt:'慢镜头，黄色出租车驶过积水路面，溅起的水花被霓虹染成金色，相机置于地面低角度仰拍。',
-          voice:'旁白 · 都市感', emotion:'悬疑', provider:'wanx', res:'1080p', cost: 3.32, audioUrl:null, videoReady:false },
-        { id:'s5', num:5, title:'决定迈步', char:'陈默', duration:4,
-          prompt:'男子深吸一口气，将半根烟弹入积水，烟头发出嘶的一声，然后他迈步走进了斑马线。',
-          voice:'男声 · 沉稳 · 晓峰', emotion:'希望', provider:'kling', res:'1080p', cost: 2.44, audioUrl:null, videoReady:false },
-        { id:'s6', num:6, title:'对面的她', char:'苏雨', duration:4,
-          prompt:'斑马线对面，一把透明雨伞下站着女子，她没有打给陈默，只是静静地看着他走过来。',
-          voice:'女声 · 清冷 · 月白', emotion:'温柔', provider:'jimeng', res:'1080p', cost: 1.80, audioUrl:null, videoReady:false },
-        { id:'s7', num:7, title:'拥抱 · 尾声', char:'陈默 + 苏雨', duration:4,
-          prompt:'雨夜里两人紧紧拥抱，雨伞被风吹翻也不在意，画面渐暗，只剩霓虹光晕环绕。',
-          voice:'旁白 · 温暖', emotion:'温柔', provider:'kling', res:'1080p', cost: 2.44, audioUrl:null, videoReady:false },
-      ]
-    },
-    {
-      id: 'proj-2',
-      name: '城市黎明',
-      status: 'done',
-      updated: '昨天',
-      totalDuration: 22,
-      shots: [
-        { id:'s1', num:1, title:'鸟瞰日出', char:'无', duration:5, prompt:'城市天际线从黎明前的深蓝渐渐泛出橙金色光芒，鸟瞰航拍。', voice:'旁白 · 大气', emotion:'希望', provider:'kling', res:'1080p', cost:3.05, videoReady:true },
-        { id:'s2', num:2, title:'地铁入口', char:'上班族', duration:4, prompt:'最早的地铁入口，一个背着包的年轻人快步走入台阶。', voice:'旁白 · 叙事', emotion:'平静', provider:'jimeng', res:'1080p', cost:1.80, videoReady:true },
-        { id:'s3', num:3, title:'咖啡店拉花', char:'咖啡师', duration:4, prompt:'咖啡师熟练地拉着白色奶泡，心形图案在深褐色咖啡表面成形。', voice:'环境音', emotion:'平静', provider:'wanx', res:'720p', cost:3.00, videoReady:true },
-        { id:'s4', num:4, title:'天桥剪影', char:'无', duration:5, prompt:'天桥上行人剪影，日出金光从城市天际线下升上来，打亮每一个人的脸。', voice:'旁白 · 诗意', emotion:'希望', provider:'kling', res:'1080p', cost:3.05, videoReady:true },
-        { id:'s5', num:5, title:'结尾字幕', char:'无', duration:4, prompt:'留白画面，一行字幕缓缓浮现。', voice:'无', emotion:'平静', provider:'jimeng', res:'720p', cost:1.12, videoReady:true },
-      ]
-    }
-  ]
+  projects: []
 };
+
+// G4-P0: 从 /api/bee/scripts + /api/bee/script/{pid} 同步所有项目到 state
+async function syncProjectsFromDB() {
+  try {
+    const list = await apiBT('/api/bee/scripts');
+    const scripts = list.scripts || [];
+    const loaded = [];
+    for (const s of scripts) {
+      try {
+        const detail = await apiBT('/api/bee/script/' + s.project_id);
+        const shotsRaw = detail.shots || [];
+        const shots = shotsRaw.map((sh, i) => ({
+          id: `s-${s.project_id}-${i}`,
+          num: sh.scene_no || i + 1,
+          title: sh.title || `镜头 ${i+1}`,
+          char: sh.char || '主角',
+          duration: sh.duration_sec || 5,
+          prompt: sh.prompt || '',
+          voice: sh.voice_prompt || '',
+          emotion: sh.emotion || '中性',
+          provider: 'kling',
+          res: '1080p',
+          cost: 0,
+          audioUrl: null,
+          videoReady: false,
+          videoUrl: null,
+        }));
+        const totalDuration = shots.reduce((a, b) => a + (b.duration || 0), 0);
+        loaded.push({
+          id: s.project_id,
+          name: detail.title || s.title || '未命名项目',
+          status: 'draft',
+          updated: _fmtRelative(s.created_at),
+          totalDuration,
+          shots,
+        });
+      } catch { /* 单项目拉取失败不阻塞全局 */ }
+    }
+    state.projects = loaded;
+    // 自动选第一个项目
+    if (!state.activeProjectId && loaded.length) {
+      state.activeProjectId = loaded[0].id;
+    }
+    renderProjects();
+    if (state.activeProjectId) renderStoryboard();
+  } catch (err) {
+    console.warn('syncProjectsFromDB failed:', err);
+  }
+}
+
+function _fmtRelative(iso) {
+  if (!iso) return '';
+  try {
+    const t = new Date(iso);
+    const diff = (Date.now() - t.getTime()) / 1000;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff/60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff/3600) + ' 小时前';
+    if (diff < 86400*7) return Math.floor(diff/86400) + ' 天前';
+    return t.toLocaleDateString();
+  } catch { return ''; }
+}
+
+// G4-P1: 自动保存（debounce 800ms → POST /api/bee/script/{pid}/shots）
+let _autosaveTimer = null;
+function _debounceAutosave() {
+  clearTimeout(_autosaveTimer);
+  _autosaveTimer = setTimeout(autosaveProject, 800);
+}
+async function autosaveProject() {
+  const proj = getActiveProject();
+  if (!proj || !proj.id) return;
+  const shotsPayload = proj.shots.map(s => ({
+    scene_no: s.num || (s.id && s.id.split('-').pop()) || 1,
+    title: s.title || `镜头 ${s.num}`,
+    char: s.char || '',
+    emotion: s.emotion || '中性',
+    duration_sec: s.duration || 5,
+    prompt: s.prompt || '',
+    voice_prompt: s.voice || '',
+  }));
+  try {
+    await apiBT(`/api/bee/script/${proj.id}/shots`, {
+      method: 'POST', body: JSON.stringify({ shots: shotsPayload })
+    });
+    // 刷新 save hint（如果有正在编辑的 textarea）
+    document.querySelectorAll('[data-role="save-hint"]').forEach(el => {
+      el.style.display = 'inline';
+      clearTimeout(el._hideTimer);
+      el._hideTimer = setTimeout(() => el.style.display = 'none', 1500);
+    });
+  } catch (err) {
+    console.warn('autosave failed:', err);
+  }
+}
 
 // -------------------------- Utils ---------------------------
 const $ = (sel, root=document) => root.querySelector(sel);
@@ -1664,6 +1722,13 @@ function renderStoryboard() {
       <div class="shot-title">${shot.title}</div>
       <div class="shot-char"><span class="char-dot"></span>${shot.char}</div>
 
+      <!-- G4-P1: prompt 显示 + inline 编辑（点击展开 textarea） -->
+      <div class="shot-prompt" data-shot-id="${shot.id}">
+        <div class="sp-text" data-role="prompt-display" title="点击编辑提示词">${escapeHtml(shot.prompt || '点击添加提示词…')}</div>
+        <textarea class="sp-edit" data-role="prompt-edit" rows="3" style="display:none" placeholder="描述这个镜头的画面...">${escapeHtml(shot.prompt || '')}</textarea>
+        <span class="sp-save-hint" data-role="save-hint" style="display:none">💾 已保存</span>
+      </div>
+
       <div class="shot-preview ${shot.videoReady ? 'preview-ready' : ''}" data-state="${shot.videoReady ? 'ready' : 'empty'}">
         ${shot.videoReady
           ? `<div><div class="play-ico">▶</div>视频已生成</div>`
@@ -1691,16 +1756,38 @@ function renderStoryboard() {
       </div>
     `;
 
+    // G4-P1: prompt inline edit + autosave
+    const promptBox = card.querySelector('.shot-prompt');
+    const promptText = promptBox.querySelector('[data-role="prompt-display"]');
+    const promptEdit = promptBox.querySelector('[data-role="prompt-edit"]');
+    const saveHint = promptBox.querySelector('[data-role="save-hint"]');
+    promptText.addEventListener('click', (e) => {
+      e.stopPropagation();
+      promptText.style.display = 'none';
+      promptEdit.style.display = 'block';
+      promptEdit.focus();
+      promptEdit.select();
+    });
+    promptEdit.addEventListener('blur', () => {
+      shot.prompt = promptEdit.value.trim();
+      promptText.textContent = shot.prompt || '点击添加提示词…';
+      promptEdit.style.display = 'none';
+      promptText.style.display = 'block';
+      _debounceAutosave();
+    });
+    promptEdit.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { promptEdit.blur(); }
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { promptEdit.blur(); }
+    });
+
     card.addEventListener('click', (e) => {
-      if (e.target.closest('.dropdown-menu')) return;
+      if (e.target.closest('.dropdown-menu') || e.target.closest('.shot-prompt')) return;
       state.activeShotId = shot.id;
       renderInspector();
       $$('.shot-card').forEach(c => c.style.outline = '');
       card.style.outline = '2px solid var(--primary)';
       card.style.outlineOffset = '2px';
     });
-
-    // Voice button
     card.querySelector('[data-action="voice"]').addEventListener('click', (e) => {
       e.stopPropagation();
       synthShot(shot.id);
@@ -2291,21 +2378,16 @@ $('#scriptModalGen').addEventListener('click', async () => {
 
   btn.disabled = false; btn.textContent = '✨ 生成剧本 & 分镜';
 
-  // 构建项目 + 激活
-  const newProject = {
-    id: 'proj-' + Date.now(),
-    name: title.length > 14 ? title.slice(0, 14) + '…' : title,
-    status: usedLLM ? 'llm-draft' : 'mock-draft',
-    updated: usedLLM ? `${llmName} 生成` : 'AI Mock',
-    totalDuration: totalDur,
-    shots
-  };
-  state.projects.unshift(newProject);
-  state.activeProjectId = newProject.id;
-  $('#projectTitleInput').value = newProject.name;
-  $('#scriptModal').classList.remove('open');
-  renderProjects(); renderStoryboard(); renderInspector();
-  showToast(`📐 已创建 ${newProject.name} · ${shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+  // G4-P0: 从 DB 拉最新项目列表（force_mock/LLM 都已写 DB），自动切到最新
+  const pid = (usedLLM && _llmGenerate._lastPid) || (shots[0] && shots[0].id && shots[0].id.split('-')[1]) || null;
+  await syncProjectsFromDB();
+  // 自动切换到最新的项目（DB 里最后插入的就是刚生成的）
+  const latest = state.projects[0];
+  if (latest) {
+    switchProject(latest.id);
+    $('#scriptModal').classList.remove('open');
+    showToast(`📐 已创建 ${latest.name} · ${latest.shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+  }
 });
 
 $('#fromScriptBtn').addEventListener('click', async () => {
@@ -2980,15 +3062,19 @@ async function loadAllModels() {
   try { allModels = await apiBT('/api/models'); } catch { allModels = []; }
 }
 
+// G4-P0 修复：#costModel 应该是视频 provider 列表（jimeng/kling/vidu/wanx），不是自定义模型注册表
 async function loadVideoModels() {
   const sel = $('#costModel'); if (!sel) return;
   try {
-    const mods = allModels.filter(m => m.type === 'video' && !m.auto);
-    sel.innerHTML = mods.map(m => `<option value="${m.provider}" data-mid="${m.id}">${escapeHtml(m.name)}</option>`).join('');
+    const provs = await apiBT('/api/providers');
+    const videoProvs = provs.filter(p => p.type === 'video');
+    sel.innerHTML = videoProvs.map(p =>
+      `<option value="${p.name}">${escapeHtml(p.label)}${p.api_key_configured ? ' ✓' : ''}</option>`
+    ).join('');
+    if (sel.innerHTML === '') sel.innerHTML = '<option value="kling">Kling 3.0 Standard</option>';
   } catch {
-    sel.innerHTML = '<option value="kling">Kling 1.5</option>';
+    sel.innerHTML = '<option value="kling">Kling 3.0 Standard</option><option value="jimeng">即梦 Jimeng Seedance 2.5</option>';
   }
-  // 模型填好后立刻触发一次成本计算
   try { updateCost(); } catch {}
 }
 
@@ -3073,13 +3159,13 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // -------------------------- Init ---------------------------
-renderProjects();
-renderStoryboard();
-renderInspector();
-renderTimeline();
+// G4-P0: 不再用硬编码 state，从 DB 拉所有项目
 renderKeyManager();
 loadKeyStates();
-loadAllModels().then(refreshAllProductData);
+loadAllModels().then(async () => {
+  await Promise.all([loadVoices(), loadRoles(), loadVideoModels(), loadLLMModels()]);
+  await syncProjectsFromDB();
+});
 </script>
 
 <!-- Script Edit Modal (A3 + C1 剧本历史镜头编辑) -->
