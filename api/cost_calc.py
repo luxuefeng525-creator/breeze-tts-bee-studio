@@ -135,11 +135,15 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
                          notes="输入秒 + 输出秒双重计费")
 
     if provider == "comfyui":
-        # 本地推理不产生 API 费用；只提示平均耗时（单卡跑 5 秒约 3~8 分钟）
+        # 本地推理不产生 API 费用。RTX 5060 8GB 实测（4 步 SMD 蒸馏 + cfg1）：
+        # 热态 5 秒片端到端 34.5s（ComfyUI 内部 27.6s，其中采样 9s）；
+        # 采样随帧数近似线性，其余是固定开销，故 eta = 30 + duration * 2。
+        # 冷态（服务重启后第一单）还要多约 150s 加载 6.4GB 文本编码器。
         return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, duration,
-                         0.0, 0.0, "", eta_sec=max(180.0, duration * 60),
+                         0.0, 0.0, "", eta_sec=30.0 + duration * 2.0,
                          supports_image_input=False,
-                         notes="本地显卡推理，零单价；出片前自动让语音模型卸卡，之后首次合成需重新加载（约 1 分钟）")
+                         notes="本地显卡推理，零单价；4 步蒸馏档热态约 35 秒出片，"
+                               "服务刚启动的第一单需额外约 2~3 分钟加载模型")
 
     raise ValueError(f"未知 provider: {provider}")
 

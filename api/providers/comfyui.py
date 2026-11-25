@@ -31,8 +31,16 @@ _DEFAULT_URL = "http://127.0.0.1:8188"
 _UNET = "wan2.1_t2v_1.3B_fp16.safetensors"
 _TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 _VAE = "wan_2.1_vae.safetensors"
-# 采样步数：30 步在 8GB 卡上单条 5 秒要约 15 分钟，25 步是质量/耗时折中
-_STEPS = int(os.environ.get("BREEZE_COMFYUI_STEPS") or 25)
+# 4 步蒸馏 LoRA（SMD，Wan2.1 T2V 1.3B 专用）。25 步 × 8.2s/步 = 205s 纯采样，
+# 8GB 卡上永远进不了 1 分钟；4 步 + cfg=1（ComfyUI 在 cfg=1 时跳过反向分支，
+# 每步省一半算力）把采样压到 ~16s。
+_LORA = os.environ.get("BREEZE_COMFYUI_LORA", "smd_wan21_1.3b_4step_comfy.safetensors")
+_TURBO = (os.environ.get("BREEZE_COMFYUI_TURBO", "1") != "0")
+# 采样步数：蒸馏档 4 步；关掉 turbo 回到 25 步原生采样
+_STEPS = int(os.environ.get("BREEZE_COMFYUI_STEPS") or (4 if _TURBO else 25))
+_CFG = float(os.environ.get("BREEZE_COMFYUI_CFG") or (1.0 if _TURBO else 6.0))
+_SAMPLER = os.environ.get("BREEZE_COMFYUI_SAMPLER") or ("euler" if _TURBO else "uni_pc")
+_SHIFT = float(os.environ.get("BREEZE_COMFYUI_SHIFT") or (10.0 if _TURBO else 8.0))
 # 低于这个空闲显存就别开跑：模型 1.4GB + 激活，剩太少会一路换页，跑 30 分钟还不一定出得来
 _MIN_FREE_VRAM_MB = 3500
 # 语音合成服务（7860）的「卸下模型」接口：8GB 卡上 TTS 常驻约 5.9GB，
@@ -253,7 +261,7 @@ class ComfyUIProvider(BaseProvider):
         w, h = self._size_for(req.resolution)
         length = self._length_for(req.duration)
         seed = int(req.seed if req.seed is not None else time.time()) % (2 ** 31)
-        return {
+        wf = {
             "1": {"class_type": "UNETLoader",
                   # fp8 权重：fp16 在 8GB 卡上跑 81 帧会被迫来回换页，
                   # 实测 fp16 45~88s/步，fp8 降到 20~30s/步
@@ -265,13 +273,11 @@ class ComfyUIProvider(BaseProvider):
                   "inputs": {"text": req.prompt, "clip": ["2", 0]}},
             "5": {"class_type": "CLIPTextEncode",
                   "inputs": {"text": _NEGATIVE, "clip": ["2", 0]}},
-            "6": {"class_type": "ModelSamplingSD3",
-                  "inputs": {"model": ["1", 0], "shift": 8.0}},
             "7": {"class_type": "EmptyHunyuanLatentVideo",
                   "inputs": {"width": w, "height": h, "length": length, "batch_size": 1}},
             "8": {"class_type": "KSampler",
-                  "inputs": {"model": ["6", 0], "seed": seed, "steps": _STEPS, "cfg": 6.0,
-                             "sampler_name": "uni_pc", "scheduler": "simple",
+                  "inputs": {"model": ["6", 0], "seed": seed, "steps": _STEPS, "cfg": _CFG,
+                             "sampler_name": _SAMPLER, "scheduler": "simple",
                              "positive": ["4", 0], "negative": ["5", 0],
                              "latent_image": ["7", 0], "denoise": 1.0}},
             "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
@@ -280,6 +286,16 @@ class ComfyUIProvider(BaseProvider):
                    "inputs": {"video": ["10", 0], "filename_prefix": "bee-studio",
                               "format": "mp4", "codec": "h264"}},
         }
+        # 蒸馏档：在 UNET 后面挂 4 步 LoRA，再交给 ModelSamplingSD3
+        model_src: list = ["1", 0]
+        if _TURBO and _LORA:
+            wf["12"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": ["1", 0], "lora_name": _LORA,
+                                   "strength_model": 1.0}}
+            model_src = ["12", 0]
+        wf["6"] = {"class_type": "ModelSamplingSD3",
+                   "inputs": {"model": model_src, "shift": _SHIFT}}
+        return wf
 
     @staticmethod
     def _pick_video(outputs: dict) -> dict | None:
