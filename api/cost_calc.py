@@ -158,7 +158,8 @@ def estimate(provider: Provider, resolution: Resolution, duration: float,
         # 单条上限 121 帧（16fps ≈ 7.56 秒），超出部分不会生成 ——
         # 必须如实回报实际秒数，否则客户按 28 秒下单只拿到 7.5 秒，属于货不对板。
         real_dur = round(ComfyUIProvider._length_for(duration) / 16.0, 2)
-        note = ("本地显卡推理，零单价；纯文本 4 步蒸馏档热态约 35 秒出片，"
+        note = ("本地显卡推理，零单价；纯文本 4 步蒸馏档显存充裕约 35 秒，"
+                "桌面程序占满显存时实测 158.8 秒（25 帧 / 4 步）仍能出片；"
                 "单条最长约 7.5 秒；带参考图会切到 Wan2.2 TI2V-5B（约 5 分钟，与片长无关）；"
                 "服务刚启动的第一单需额外约 2~3 分钟加载模型")
         return CostQuote("comfyui", _LABELS["comfyui"], "480p", duration, real_dur,

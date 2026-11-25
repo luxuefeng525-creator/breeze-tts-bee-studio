@@ -54,13 +54,17 @@ _SAMPLER_22 = os.environ.get("BREEZE_COMFYUI_SAMPLER_22") or "uni_pc"
 _FPS_22 = 24.0
 # TI2V-5B fp16 权重 10GB，8GB 卡只能按 fp8 载入
 _MAX_FRAMES_22 = 121
-# 低于这个空闲显存就别开跑：模型 1.4GB + 激活，剩太少会一路换页，跑 30 分钟还不一定出得来
-_MIN_FREE_VRAM_MB = 3500
-# 5B 带图出片：fp8 UNET 4768MB + Wan2.2 VAE 1344MB，加上激活值约 6.5GB。
-# 实测（2026-11-26）：出片前空闲 5742MB 时每步 4~8 秒（可用）；
-# 空闲只有 824MB 时每步 87~134 秒（桌面应用占满显存，每步都在换页）。
-# 门槛取 5200MB —— 低于它会慢到不可用，高于它没必要拦。
-_MIN_FREE_VRAM_MB_22 = 5200
+# T2V 1.3B fp8：实测（2026-11-26）空闲仅 808MB 时 25 帧 / 4 步仍在 158.8 秒跑完，
+# 显存充裕时约 35 秒。门槛只拦「真的没空间」，不按「装得下」卡。
+_MIN_FREE_VRAM_MB = 700
+# 5B 带图出片：fp8 UNET 4768MB + Wan2.2 VAE 1344MB + 文本编码器 6419MB = 12531MB，
+# 永远装不进 8151MB，ComfyUI 靠 DynamicVRAM 换页跑。
+# 实测（2026-11-26）：
+#   空闲 5742MB → 稳定 2.03 秒/步；
+#   空闲 1154MB → 首步 117 秒、之后 8 秒/步，端到端 307 秒（可用）。
+# 所以门槛不能按「装得下」来卡（那 8GB 卡永远点不动），只拦「真的快没空间」。
+# 900MB 是实测可用值（1154MB）往下留的余量。
+_MIN_FREE_VRAM_MB_22 = 900
 # 语音合成服务（7860）的「卸下模型」接口：8GB 卡上 TTS 常驻约 5.9GB，
 # 出片前先让它卸卡，出完片用户的下一句合成会自动重载。
 _TTS_UNLOAD_URL = (os.environ.get("BREEZE_TTS_UNLOAD_URL")
@@ -289,8 +293,8 @@ class ComfyUIProvider(BaseProvider):
             if free is not None and free < need_mb:
                 raise ProviderError(
                     f"显存不足：显卡当前只剩 {free} MB 空闲，这次出片至少需要 "
-                    f"{need_mb} MB（{note}）。请关掉其它占显卡的程序"
-                    "（如游戏、剪辑软件），或改用纯文本出片（不带参考图只要 3.5GB）。"
+                    f"{need_mb} MB（{note}）。请关掉占显卡的程序（如游戏、剪辑软件），"
+                    "或改用纯文本出片（不带参考图只需 0.7GB，更省显存）。"
                 )
 
     @staticmethod

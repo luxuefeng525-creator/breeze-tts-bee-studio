@@ -237,3 +237,39 @@ def test_release_if_idle_skips_when_jobs_pending(monkeypatch):
     monkeypatch.setattr("api.providers.comfyui.requests.post", fake_post)
     p._release_if_idle()
     assert calls == []
+
+
+def test_vram_gate_matches_measured_reality(monkeypatch):
+    """显存门槛必须贴着实测，不能按「装得下」卡。
+
+    实测（2026-11-26，桌面应用全开）：
+      * I2V 5B：空闲 1154MB 时端到端 307 秒，能出片；
+      * T2V 1.3B：空闲 808MB 时 25 帧 / 4 步 158.8 秒，能出片。
+    早期把门槛设成 5200 / 3500，结果 8GB 卡在当前桌面占用下永远点不动出片。
+    """
+    from api.providers import ProviderError
+    from api.providers import comfyui as C
+
+    # 常量本身也要钉住：谁调回去谁就红
+    assert C._MIN_FREE_VRAM_MB_22 <= 1200, (
+        f"5B 门槛 {C._MIN_FREE_VRAM_MB_22}MB 高于实测可用值 1154MB")
+    assert C._MIN_FREE_VRAM_MB <= 900, (
+        f"T2V 门槛 {C._MIN_FREE_VRAM_MB}MB 高于实测可用值 808MB")
+
+    p = _provider()
+    _patch_get(monkeypatch, {"/system_stats": {}})
+
+    # 实测可用过的低显存，两档都要放行
+    monkeypatch.setattr(C, "_gpu_free_mb", lambda: 900)
+    p._require_online(C._MIN_FREE_VRAM_MB_22)
+    p._require_online(C._MIN_FREE_VRAM_MB)
+
+    # 真的快没空间才拦
+    monkeypatch.setattr(C, "_gpu_free_mb", lambda: 100)
+    monkeypatch.setattr(C, "_free_tts_vram", lambda *a, **kw: "语音服务未响应")
+    try:
+        p._require_online(C._MIN_FREE_VRAM_MB)
+    except ProviderError as e:
+        assert "显存不足" in str(e)
+    else:
+        raise AssertionError("只剩 100MB 应当拦住")
