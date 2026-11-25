@@ -1028,16 +1028,37 @@ input:focus, textarea:focus, select:focus {
 .tl-clip-sub    { background: linear-gradient(90deg, rgba(144,164,174,.8), rgba(96,125,139,.8)); color: #fff; }
 
 .tl-playhead {
-  position: absolute; top: -4px; bottom: -2px;
-  width: 2px; background: var(--accent);
-  pointer-events: none;
-  left: 0%;
+  position: absolute; top: -8px; bottom: -2px;
+  width: 14px; left: 0%;
+  transform: translateX(-50%);
+  pointer-events: auto; cursor: ew-resize;
   z-index: 20;
 }
 .tl-playhead::before {
-  content: ""; position: absolute; top: -5px; left: -4px;
+  content: ""; position: absolute; top: -4px; left: 2px;
   width: 10px; height: 10px; background: var(--accent); border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb,255,0,100),.3);
 }
+.tl-playhead::after {
+  content: ""; position: absolute; top: 6px; left: 6px; bottom: -2px;
+  width: 2px; background: var(--accent);
+}
+
+/* G5: clip 拖拽 + resize */
+.tl-track { height: 18px; }
+.tl-track .tl-clip { cursor: grab; user-select: none; }
+.tl-track .tl-clip:active { cursor: grabbing; }
+.tl-track.dragging * { cursor: grabbing !important; }
+.tl-clip.dragging { opacity: .5; }
+
+.tl-resize-handle {
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: 7px; cursor: ew-resize;
+  border-left: 2px dashed rgba(0,0,0,.25);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.tl-resize-handle:hover { background: rgba(255,255,255,.25); border-left: 2px solid var(--accent); }
+.tl-clip-resizing { opacity: .6; }
 .tl-tracks-wrap { position: relative; flex: 1; display:flex; flex-direction:column; gap: var(--space-1) }
 .tl-time-ruler {
   position: absolute; top: -14px; left: 0; right: 0;
@@ -2151,26 +2172,40 @@ function renderTimeline() {
   [videoTrack, voiceTrack, subTrack].forEach(t => t.innerHTML = '');
   bgmTrack.innerHTML = '';
 
-  shots.forEach(s => {
+  shots.forEach((s, idx) => {
     const left = (offset / total) * 100;
     const width = (s.duration / total) * 100;
 
+    // Video clip（可平移 + 可 resize）
     const v = document.createElement('div');
     v.className = 'tl-clip tl-clip-video';
+    v.dataset.shot = idx;
+    v.dataset.track = 'video';
     v.style.left = left + '%'; v.style.width = width + '%';
     v.textContent = `S${s.num} · ${s.title}`;
+    // 右侧 resize handle
+    const vh = document.createElement('div');
+    vh.className = 'tl-resize-handle';
+    vh.dataset.shot = idx;
+    v.appendChild(vh);
     videoTrack.appendChild(v);
 
+    // Voice clip（跟随 video 偏移 + 宽度）
     const vo = document.createElement('div');
     vo.className = 'tl-clip tl-clip-voice';
-    vo.style.left = left + '%'; vo.style.width = width * 0.85 + '%';
-    vo.style.marginLeft = (width * 0.075) + '%';
+    vo.dataset.shot = idx;
+    vo.dataset.track = 'voice';
+    vo.style.left = (left + width * 0.075) + '%';
+    vo.style.width = (width * 0.85) + '%';
     vo.textContent = `对白 S${s.num}`;
     voiceTrack.appendChild(vo);
 
+    // Sub clip（跟随 video left/width）
     const su = document.createElement('div');
     su.className = 'tl-clip tl-clip-sub';
-    su.style.left = left + '%'; vo.style.width = width + '%';
+    su.dataset.shot = idx;
+    su.dataset.track = 'sub';
+    su.style.left = left + '%';
     su.style.width = width + '%';
     su.textContent = `字幕 S${s.num}`;
     subTrack.appendChild(su);
@@ -2215,6 +2250,245 @@ $('#tlPlayBtn').addEventListener('click', function() {
     playheadRAF = requestAnimationFrame(tick);
   }
   playheadRAF = requestAnimationFrame(tick);
+});
+
+// -------------------------- G5: 时间轴拖拽（playhead + clip + resize + 吸附） --------------------------
+// 设计：pointer events + 统一 rAF 节流 + 事件委托 + 拖拽时暂停 playtick
+
+const _tlDrag = {
+  type: null,             // 'playhead' | 'clip' | 'resize'
+  shotIndex: -1,
+  startX: 0,
+  startPlayheadPct: 0,
+  startShotLeftPct: 0,
+  startShotWidthPct: 0,
+  trackWidthPx: 0,
+};
+let _tlDirtied = false, _tlRAF = null;
+
+function _tlMarkDirty() {
+  _tlDirtied = true;
+  if (!_tlRAF) _tlRAF = requestAnimationFrame(_tlRAFLoop);
+}
+function _tlRAFLoop() {
+  _tlRAF = null;
+  if (!_tlDirtied) return;
+  _tlDirtied = false;
+  if (_tlDrag.type === 'playhead') {
+    $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
+  } else {
+    // clip / resize：重算所有 shots 的 left/width 写 DOM
+    _writeClipsDOM();
+  }
+}
+
+// 从 state 重算并写所有 clips DOM（left/width %）
+function _writeClipsDOM() {
+  const project = getActiveProject();
+  const total = project.totalDuration;
+  const shots = project.shots;
+  const videoTrack = $('#tlTrackVideo');
+  const voiceTrack = $('#tlTrackVoice');
+  const subTrack = $('#tlTrackSub');
+  let offset = 0;
+  shots.forEach((s, idx) => {
+    const left = (offset / total) * 100;
+    const width = (s.duration / total) * 100;
+    const v = videoTrack.querySelector(`[data-shot="${idx}"]`);
+    if (v) { v.style.left = left + '%'; v.style.width = width + '%'; }
+    const vo = voiceTrack.querySelector(`[data-shot="${idx}"]`);
+    if (vo) { vo.style.left = (left + width * 0.075) + '%'; vo.style.width = (width * 0.85) + '%'; }
+    const su = subTrack.querySelector(`[data-shot="${idx}"]`);
+    if (su) { su.style.left = left + '%'; su.style.width = width + '%'; }
+    offset += s.duration;
+  });
+  // 更新 totalDuration（可能被 resize 改了）
+  project.totalDuration = offset;
+  $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
+}
+
+// 收集所有可吸附的边缘 %（0 和 100 总是）
+function _collectSnapEdges() {
+  const project = getActiveProject();
+  const total = project.totalDuration;
+  const edges = new Set([0, 100]);
+  let offset = 0;
+  project.shots.forEach(s => {
+    edges.add(Math.round((offset / total) * 1000) / 10);
+    offset += s.duration;
+    edges.add(Math.round((offset / total) * 1000) / 10);
+  });
+  return [...edges].sort((a, b) => a - b);
+}
+function _snap(value, edges, thresholdPct = 0.5) {
+  for (const e of edges) {
+    if (Math.abs(value - e) < thresholdPct) return e;
+  }
+  return value;
+}
+
+// Playhead drag（pointerdown on #tlPlayhead）
+$('#tlPlayhead').addEventListener('pointerdown', (e) => {
+  const project = getActiveProject();
+  const total = project.totalDuration || 1;
+  _tlDrag.type = 'playhead';
+  _tlDrag.startX = e.clientX;
+  _tlDrag.startPlayheadPct = (playheadT / total) * 100;
+  _tlDrag._curPct = _tlDrag.startPlayheadPct;
+  const wrap = $('.tl-tracks-wrap').getBoundingClientRect();
+  _tlDrag.trackWidthPx = wrap.width - 14; // playhead width
+  // 暂停正在播放
+  if (playheadRAF) { cancelAnimationFrame(playheadRAF); playheadRAF = null; $('#tlPlayBtn').textContent = '▶'; }
+  document.body.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+// Clip / resize 事件委托（pointerdown on #tlTracks）
+$('#tlTracks').addEventListener('pointerdown', (e) => {
+  const resizeHandle = e.target.closest('.tl-resize-handle');
+  const videoClip = e.target.closest('.tl-clip.tl-clip-video');
+  if (resizeHandle) {
+    _tlDrag.type = 'resize';
+    _tlDrag.shotIndex = parseInt(resizeHandle.dataset.shot);
+  } else if (videoClip) {
+    _tlDrag.type = 'clip';
+    _tlDrag.shotIndex = parseInt(videoClip.dataset.shot);
+  } else { return; }
+  const project = getActiveProject();
+  const total = project.totalDuration || 1;
+  const shot = project.shots[_tlDrag.shotIndex];
+  const wrap = $('.tl-tracks-wrap').getBoundingClientRect();
+  _tlDrag.startX = e.clientX;
+  _tlDrag.trackWidthPx = wrap.width - 14;
+  // 计算起始 leftPct / widthPct
+  let offset = 0;
+  for (let i = 0; i < _tlDrag.shotIndex; i++) offset += project.shots[i].duration;
+  _tlDrag.startShotLeftPct = (offset / total) * 100;
+  _tlDrag.startShotWidthPct = (shot.duration / total) * 100;
+  // 暂停播放
+  if (playheadRAF) { cancelAnimationFrame(playheadRAF); playheadRAF = null; $('#tlPlayBtn').textContent = '▶'; }
+  document.body.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+// 全局 pointermove（drag 时更新目标值，标记 dirty）
+document.body.addEventListener('pointermove', (e) => {
+  if (!_tlDrag.type) return;
+  const dx = e.clientX - _tlDrag.startX;
+  const pctDelta = (dx / _tlDrag.trackWidthPx) * 100;
+  const project = getActiveProject();
+  const total = project.totalDuration || 1;
+
+  if (_tlDrag.type === 'playhead') {
+    let pct = Math.max(0, Math.min(100, _tlDrag.startPlayheadPct + pctDelta));
+    const snap = _snap(pct, _collectSnapEdges(), 0.6);
+    _tlDrag._curPct = snap;
+    _tlMarkDirty();
+  } else if (_tlDrag.type === 'clip') {
+    const idx = _tlDrag.shotIndex;
+    const shots = project.shots;
+    const shot = shots[idx];
+    const totalPxPerSec = _tlDrag.trackWidthPx / total;
+    const secDelta = dx / totalPxPerSec;
+    // 把当前 shot 从序列里"抠出来"，算新的 offset
+    // 先算所有 shots 的原始 offsets
+    const offsets = [0];
+    for (let i = 0; i < shots.length - 1; i++) offsets.push(offsets[i] + shots[i].duration);
+    let newOffset = offsets[idx] + secDelta;
+    // 限制：不能 < 0，不能让 shot 和前后重叠
+    newOffset = Math.max(0, newOffset);
+    // 吸附到相邻 shot 边界
+    const edges = _collectSnapEdges();
+    const edgesSec = edges.map(p => (p / 100) * total);
+    const snappedOffset = _snap(newOffset, edgesSec.map(e => Math.round(e * 10) / 10), 0.5);
+    newOffset = snappedOffset;
+    // 现在更新 shots 序列：shot[idx] 的新 start = newOffset
+    // 后面 shots 的 offset 自动顺延（通过 duration 累加）
+    // 但我们要保证不重叠：shot[idx].start >= shot[idx-1].start + shot[idx-1].duration
+    if (idx > 0) {
+      const prevEnd = offsets[idx - 1] + shots[idx - 1].duration;
+      newOffset = Math.max(newOffset, prevEnd);
+    }
+    if (idx < shots.length - 1) {
+      const nextStart = offsets[idx + 1];
+      const newEnd = newOffset + shot.duration;
+      if (newEnd > nextStart) newOffset = nextStart - shot.duration;
+    }
+    // ripple: 改 duration → 改序列后重算 offsets → 但我们现在是平移 shot，不是改 duration
+    // 所以：把当前 shot 从原位"移"到 newOffset，中间 gap 要填上——用前一个 shot 伸缩？
+    // 更干净的做法：直接改 shots[idx].duration 让 total 跟着变？不行，那 total 就不固定了
+    // 
+    // 简化策略：只允许相邻 shot 交换位置（drag 到相邻 shot 的 gap 区域里 → 交换两 shot）
+    // 或者最保守：限制 newOffset 只能在 [offsets[idx-1].end, offsets[idx+1].start - shot.duration]
+    // 
+    // 先做保守版：限制边界 + 吸附
+    // 把 newOffset 写回 shots 数据模型（我们通过 duration 累加得到 offset，所以要改 duration 之前 shots 的 durations）
+    // 其实更简单：只允许平移前后 gap 里的 shot——gap = offsets[idx+1].start - offsets[idx].end
+    // 如果没有 gap（两个 shot 紧挨着），就只能交换位置
+    // 
+    // 为了实现简单，我们换个模型：给每个 shot 加 startSec 字段
+    // 但现在 shots 只有 duration，我们通过累加算 offset——不破坏数据结构
+    // 就简单做：当前 shot 移到 newOffset，通过修改 shot[idx-1].duration 来吸收 gap
+    if (idx > 0) {
+      const prevOffset = offsets[idx - 1];
+      const newPrevDur = newOffset - prevOffset;
+      if (newPrevDur >= 0.5 && newPrevDur <= 60) { // 限 0.5s ~ 60s
+        shots[idx - 1].duration = Math.round(newPrevDur * 10) / 10;
+      }
+    }
+    _tlMarkDirty();
+  } else if (_tlDrag.type === 'resize') {
+    const idx = _tlDrag.shotIndex;
+    const shots = project.shots;
+    const shot = shots[idx];
+    const totalPxPerSec = _tlDrag.trackWidthPx / total;
+    const secDelta = dx / totalPxPerSec;
+    const newDur = Math.max(0.5, Math.min(60, shot.duration + secDelta));
+    // 同步 ripple: shot[idx+1].start 要跟着变 = newOffset + newDur
+    // 限制 newDur 不能让 shot[idx] 和 shot[idx+1] 重叠
+    if (idx < shots.length - 1) {
+      // 原来 shot[idx+1].start = shot[idx].originalEnd
+      // 新的 shot[idx].end = originalOffset + newDur
+      // shot[idx+1].start 也要跟着变 → 改 shot[idx+1].start...但我们只有 duration 字段
+      // 改 totalDuration 来吸收变化
+      // 简单版：允许 shot[idx+1] 被"挤压"（自动缩小 duration）
+      const originalOffset = _tlDrag.startShotLeftPct / 100 * total;
+      const originalNextStart = originalOffset + _tlDrag.startShotWidthPct / 100 * total;
+      const newEnd = originalOffset + newDur;
+      const gap = originalNextStart - newEnd; // 正 = 有 gap，负 = 重叠
+      if (gap < 0) {
+        // 下一个 shot 被挤：缩小 shot[idx+1].duration
+        shots[idx + 1].duration = Math.max(0.5, shots[idx + 1].duration + gap);
+      }
+    }
+    shot.duration = Math.round(newDur * 10) / 10;
+    _tlMarkDirty();
+  }
+});
+
+// pointerup: commit + autosave + 清状态
+document.body.addEventListener('pointerup', () => {
+  if (!_tlDrag.type) return;
+  const project = getActiveProject();
+  const total = project.totalDuration;
+  // 最后一次 rAF 提交
+  _tlMarkDirty();
+  // Playhead commit
+  if (_tlDrag.type === 'playhead') {
+    playheadT = (_tlDrag._curPct / 100) * total;
+    $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
+    $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
+  } else {
+    // clip/resize commit totalDuration + autosave
+    let newTotal = 0;
+    project.shots.forEach(s => { newTotal += s.duration; });
+    project.totalDuration = Math.round(newTotal * 10) / 10;
+    _writeClipsDOM();
+    _debounceAutosave();
+  }
+  // 清
+  _tlDrag.type = null;
+  document.body.releasePointerCapture?.();
 });
 
 // -------------------------- Inspector editor bindings ---------------------------
@@ -3159,7 +3433,11 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // -------------------------- Init ---------------------------
-// G4-P0: 不再用硬编码 state，从 DB 拉所有项目
+// G4-P0: 不再用硬编码 state，从 DB 拉所有项目；但先 render 空壳让页面不白屏
+renderProjects();
+renderStoryboard();
+renderInspector();
+renderTimeline();
 renderKeyManager();
 loadKeyStates();
 loadAllModels().then(async () => {
