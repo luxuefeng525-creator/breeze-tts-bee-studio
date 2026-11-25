@@ -2212,7 +2212,9 @@ async function updateCost() {
 updateCost();
 
 // -------------------------- BreezeTTS API ---------------------------
-const BT = 'http://localhost:7861';
+// 接口基地址：优先同源。写死 localhost 时，用 127.0.0.1 打开页面会因
+// IPv4/IPv6 解析差异导致 fetch 全部 Failed to fetch，模型列表只剩回退项。
+const BT = /^https?:/.test(location.protocol) ? location.origin : 'http://localhost:7861';
 async function apiBT(path, opts={}) {
   const r = await fetch(BT + path, { headers: {'Content-Type':'application/json'}, ...opts });
   if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
