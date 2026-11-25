@@ -18,6 +18,7 @@ data/videos/ 并返回本项目自己的 /api/videos/<name>，不把外部路径
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -32,6 +33,12 @@ _TEXT_ENCODER = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 _VAE = "wan_2.1_vae.safetensors"
 # 采样步数：30 步在 8GB 卡上单条 5 秒要约 15 分钟，25 步是质量/耗时折中
 _STEPS = int(os.environ.get("BREEZE_COMFYUI_STEPS") or 25)
+# 低于这个空闲显存就别开跑：模型 1.4GB + 激活，剩太少会一路换页，跑 30 分钟还不一定出得来
+_MIN_FREE_VRAM_MB = 3500
+# 语音合成服务（7860）的「卸下模型」接口：8GB 卡上 TTS 常驻约 5.9GB，
+# 出片前先让它卸卡，出完片用户的下一句合成会自动重载。
+_TTS_UNLOAD_URL = (os.environ.get("BREEZE_TTS_UNLOAD_URL")
+                   or "http://127.0.0.1:7860/v1/model/unload")
 
 # Wan2.1 官方推荐的负面提示词（中文），用于压制常见畸形/水印/静止画面
 _NEGATIVE = (
@@ -48,6 +55,46 @@ def _videos_dir() -> Path:
     d = root / "videos"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _gpu_free_mb() -> int | None:
+    """整卡空闲显存（MB）。
+
+    不能用 ComfyUI 的 /system_stats：那个是它自己 CUDA 上下文的上限，
+    别的进程（语音合成）已经吃掉的显存它看不见，会报「7GB 空闲」骗人。
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        line = (out.stdout or "").strip().splitlines()[0]
+        return int(line.strip())
+    except Exception:
+        return None
+
+
+def _free_tts_vram() -> str:
+    """请语音合成服务卸下模型，把显存让出来。
+
+    返回一句人话说明（用于拼进错误文案），成功与否都返回，不抛异常：
+    语音服务没启动本来就不该拦住出片。
+    """
+    try:
+        r = requests.post(_TTS_UNLOAD_URL, timeout=10)
+    except requests.RequestException as e:
+        return f"语音服务未响应（{e.__class__.__name__}），无法自动让出显存"
+    if r.status_code == 409:
+        return "语音服务正在合成，暂时无法让出显存"
+    if r.status_code != 200:
+        return f"语音服务拒绝卸下模型（HTTP {r.status_code}）"
+    # empty_cache 之后驱动释放有延迟，轮询到够用为止
+    for _ in range(20):
+        time.sleep(0.5)
+        free = _gpu_free_mb()
+        if free is None or free >= _MIN_FREE_VRAM_MB:
+            return "已自动暂停语音模型并让出显存"
+    return "已请求语音模型卸载，但显存仍未释放"
 
 
 class ComfyUIProvider(BaseProvider):
@@ -128,6 +175,17 @@ class ComfyUIProvider(BaseProvider):
                 f"本地 ComfyUI 没启动（{self.base_url}）。请先运行 ComfyUI，"
                 f"或改用云端 provider。原始错误：{e}"
             ) from e
+        free = _gpu_free_mb()
+        if free is not None and free < _MIN_FREE_VRAM_MB:
+            # 8GB 卡上语音常驻 ~5.9GB，视频模型放不下：先请语音卸卡再验一次
+            note = _free_tts_vram()
+            free = _gpu_free_mb()
+            if free is not None and free < _MIN_FREE_VRAM_MB:
+                raise ProviderError(
+                    f"显存不足：显卡当前只剩 {free} MB 空闲，本地出片至少需要 "
+                    f"{_MIN_FREE_VRAM_MB} MB（{note}）。请关掉其它占显卡的程序"
+                    "（如游戏、剪辑软件），或改用云端 provider。"
+                )
 
     @staticmethod
     def _size_for(resolution: str) -> tuple[int, int]:

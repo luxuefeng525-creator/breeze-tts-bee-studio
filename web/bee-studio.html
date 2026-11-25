@@ -2335,7 +2335,7 @@ async function generateVideo(shotId, cardEl) {
   const provName = shot.provider === 'wan' ? 'wanx' : shot.provider;
   const isLocal = provName === 'comfyui';
   if (isLocal) {
-    showToast('🖥️ 本地出片需要显卡空闲：语音合成服务会占满显存，若同时打开可能失败', 'warn');
+    showToast('🖥️ 本地出片会用显卡：语音模型会自动让出显存，出片期间请勿合成语音；下次合成需重新加载（约半分钟）', 'warn');
   }
   preview.innerHTML = `<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">AI 生成中... 预计 ${isLocal ? '3-8 分钟' : '90-180s'}</div>`;
   showToast(`🎬 调用 ${PROV_LABEL[shot.provider] || shot.provider} 生成视频（${isLocal ? '480p' : shot.res} · ${shot.duration}s）...`, 'info');

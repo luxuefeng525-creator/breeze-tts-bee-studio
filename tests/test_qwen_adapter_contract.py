@@ -91,6 +91,8 @@ def make_fake_engine(qa):
     class _FakeEngine(qa.Engine):
         def ensure(self, route):
             # 不碰 GPU、不切换显存，仅记录目标路由
+            # （paused 复位与真 ensure() 保持一致：卸载后下一次合成会自动重载）
+            self.paused = False
             self.current = route
             self.ready = True
             self.error = None
@@ -126,7 +128,7 @@ def _speech(client, **fields):
 def test_routes_and_model_info(qa, client):
     c, _ = client
     paths = {r.path for r in qa.app.routes if r.path.startswith("/")}
-    assert {"/health", "/v1/model", "/v1/audio/speech",
+    assert {"/health", "/v1/model", "/v1/model/unload", "/v1/audio/speech",
             "/v1/audio/speech/batch"} <= paths
     h = c.get("/health")
     assert h.status_code == 200 and h.json()["sample_rate"] == 24000
@@ -137,6 +139,24 @@ def test_routes_and_model_info(qa, client):
     assert "ready" in m and "error" in m
     assert "chinese" in m["supported_languages"] and "auto" in m["supported_languages"]
     assert "dylan" in m["preset_speakers"] and "eric" in m["preset_speakers"]
+
+
+def test_unload_frees_vram_then_reloads_on_next_request(client):
+    """本地视频出片要让显存：unload 后 /health 必须是 200 paused（否则守护脚本
+    会重启服务、把刚让出的显存又吃掉），下一次合成自动重载。"""
+    c, eng = client
+    r = c.post("/v1/model/unload")
+    assert r.status_code == 200, r.text[:200]
+    body = r.json()
+    assert body["ok"] is True and body["paused"] is True
+    assert eng.model is None and eng.ready is False
+    h = c.get("/health")
+    assert h.status_code == 200 and h.json()["status"] == "paused"
+    # 下一次合成自动重载，健康状态恢复 ok
+    assert _speech(c).status_code == 200
+    h = c.get("/health")
+    assert h.json()["status"] == "ok"
+    assert eng.paused is False and eng.model is not None
 
 
 def test_new_form_fields_exist(qa):
