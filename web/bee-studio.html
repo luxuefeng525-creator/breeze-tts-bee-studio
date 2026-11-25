@@ -3778,7 +3778,10 @@ loadKeyStates();
 renderProjects();  // 空壳（列表区域）
 renderTimeline();  // 空壳（时间轴骨架）
 loadAllModels().then(async () => {
-  await Promise.all([loadVoices(), loadRoles(), loadVideoModels(), loadLLMModels()]);
+  await Promise.all([
+    loadVoices(), loadRoles(), loadVideoModels(), loadLLMModels(),
+    loadHistory(), renderScriptHistory()   // 漏掉这俩了 → 历史计数永远"加载中..."
+  ]);
   await syncProjectsFromDB();
   // syncProjectsFromDB 内部已调 renderProjects + renderStoryboard，补 renderInspector + timeline
   if (getActiveProject()) {
