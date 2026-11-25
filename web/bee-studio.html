@@ -2373,8 +2373,22 @@ $('#voiceAllBtn').addEventListener('click', () => {
   showToast(`🎙️ 批量配音 · ${shots.length} 镜头开始合成...`, 'info');
   shots.forEach(s => setTimeout(() => synthShot(s.id), 300));
 });
-$('#videoAllBtn').addEventListener('click', () => showToast('🎬 批量视频生成 · 调用队列已加入（占位）', 'info'));
-$('#exportAllBtn').addEventListener('click', () => showToast('⬇️ 批量导出（占位 · 将导出 ZIP + 成片）', 'info'));
+// G3-1: videoAllBtn —— 逐镜头生成（有 Key 走真 API，无 Key 自动 Mock 降级）
+$('#videoAllBtn').addEventListener('click', async () => {
+  const proj = getActiveProject();
+  const shots = proj.shots.filter(s => !s.videoReady);
+  if (shots.length === 0) { showToast('🎬 所有镜头都已有视频 · 点镜头卡的 🎬 单独重生成', 'info'); return; }
+  showToast(`🎬 批量视频生成 · ${shots.length} 镜头排队中（无 Key 自动 Mock）`, 'info');
+  for (let i = 0; i < shots.length; i++) {
+    await new Promise(r => setTimeout(r, 400));
+    // 分镜卡 DOM 里找对应 shot 触发视觉更新
+    const cardEl = document.querySelector(`.shot-card[data-shot-id="${shots[i].id}"]`);
+    await generateVideo(shots[i].id, cardEl || document.body);
+  }
+  showToast('✅ 批量视频生成队列完成', 'success');
+});
+// G3-1: exportAllBtn —— 同 exportProject，传整个项目
+$('#exportAllBtn').addEventListener('click', () => exportProject());
 $('#exportBtn').addEventListener('click', exportProject);
 
 // G2-1: 新建项目 → 复用 AI 剧本生成 modal（后端自动持久化到 SQLite scripts 表）
