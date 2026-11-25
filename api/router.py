@@ -795,10 +795,16 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             return True
         ejid = _new_export_job_id()
         out_dir = _ROOT / "outputs" / "bee-studio" / project_id
+        now_iso = datetime.datetime.now().isoformat()
         _export_job_write({
             "job_id": ejid,
             "status": "pending",
             "project_id": project_id,
+            "output_path": "",
+            "output_duration": 0,
+            "error": "",
+            "created_at": now_iso,
+            "updated_at": now_iso,
             "poll_count": 0,
         })
 
