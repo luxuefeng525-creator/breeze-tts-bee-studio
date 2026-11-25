@@ -100,3 +100,43 @@ def test_poll_keeps_running_within_grace(monkeypatch):
     })
     fresh = GenResult(job_id="job-a", status="running")
     assert p.poll(fresh, "job-a").status == "running"
+
+
+def test_resume_pending_restarts_poll_after_restart(tmp_path, monkeypatch):
+    """面板重启后，停在 running 的任务要自动接回轮询。
+
+    背景（2026-11-26）：GET /api/video/poll 只读数据库，真正轮询的是进程内的
+    后台线程。面板一重启线程就没了，ComfyUI 其实早就出完片，DB 却永远 running，
+    界面一直转圈。这里断言 resume 会把任务推进到终态。
+    """
+    import api.router as R
+
+    monkeypatch.setattr(R, "_DB_PATH", tmp_path / "tasks.db")
+    monkeypatch.setattr(R, "_db_ready", False)
+    monkeypatch.setattr(R.time, "sleep", lambda _s: None)  # 跳过 5 秒间隔
+
+    class FakeProv:
+        def poll(self, result, job_id):
+            return GenResult(job_id=job_id, status="succeeded",
+                             video_url="/api/videos/x.mp4")
+
+    monkeypatch.setattr(R, "_make_provider", lambda _name: FakeProv())
+
+    R._video_job_write({
+        "job_id": "zombie-1", "provider": "comfyui", "provider_label": "本地",
+        "status": "running", "video_url": "", "actual_cost": 0.0, "error": "",
+        "prompt": "x", "resolution": "480p", "duration": 5.0, "poll_count": 0,
+    })
+    R.resume_pending_video_jobs()
+
+    for _ in range(100):
+        if R._video_job_read("zombie-1")["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+
+    job = R._video_job_read("zombie-1")
+    assert job["status"] == "succeeded"
+    assert job["video_url"] == "/api/videos/x.mp4"
+    # 已完成的任务不该被重复挂线程
+    R.resume_pending_video_jobs()
+    assert R._video_job_read("zombie-1")["status"] == "succeeded"

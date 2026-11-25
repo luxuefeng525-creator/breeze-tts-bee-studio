@@ -3257,6 +3257,13 @@ def main() -> None:
               "已有实例在服务，本次不重复启动", flush=True)
         raise SystemExit(0)
     _startup_selfcheck()
+    # 轮询线程活在进程内，面板一重启就没了；GET /api/video/poll 只读 DB，
+    # 不补回线程的话任务会永远停在 running（界面一直转圈）。
+    try:
+        from api.router import resume_pending_video_jobs
+        resume_pending_video_jobs()
+    except Exception:
+        pass
     server = ThreadingHTTPServer(("0.0.0.0", PANEL_PORT), Handler)
     print(f"BreezeTTS Studio panel: http://127.0.0.1:{PANEL_PORT}  (proxy -> {API_BASE}, port locked)", flush=True)
     server.serve_forever()

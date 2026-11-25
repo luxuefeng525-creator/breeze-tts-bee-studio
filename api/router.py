@@ -125,6 +125,93 @@ def _video_job_list(limit: int = 50) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# ------------------------------------------------------------------
+# Provider 构建 + 后台轮询（可复用于重启恢复）
+# ------------------------------------------------------------------
+_PROVIDER_CLASSES = {
+    "jimeng": ("api.providers.jimeng", "JimengProvider"),
+    "kling":  ("api.providers.kling",  "KlingProvider"),
+    "vidu":   ("api.providers.vidu",   "ViduProvider"),
+    "wanx":   ("api.providers.wanx",   "WanxProvider"),
+    "comfyui": ("api.providers.comfyui", "ComfyUIProvider"),
+}
+
+
+def _make_provider(provider: str):
+    """按名字构建 provider 实例。comfyui 跑在本机，不需要 Key。"""
+    import importlib
+    mod_name, cls_name = _PROVIDER_CLASSES[provider]
+    mod = importlib.import_module(mod_name)
+    cls = getattr(mod, cls_name)
+    api_key = "" if provider == "comfyui" else _get_key(provider)
+    return cls(api_key=api_key)
+
+
+def _poll_video_job(prov, job_id: str, result, budget: float) -> None:
+    """后台轮询直到终态或超时。抽成独立函数是为了面板重启后能重新挂载。"""
+    deadline = time.time() + budget
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            r = prov.poll(result, job_id)
+            j = _video_job_read(job_id)
+            if not j:
+                return  # DB 里没了，不轮了
+            j["status"] = r.status
+            j["video_url"] = r.video_url
+            j["actual_cost"] = r.actual_cost
+            j["error"] = r.error
+            j["poll_count"] = int(j.get("poll_count") or 0) + 1
+            _video_job_write(j)
+            if r.status in ("succeeded", "failed"):
+                return
+        except Exception as e:
+            j = _video_job_read(job_id)
+            if j:
+                j["error"] = str(e)[:200]
+                _video_job_write(j)
+    # 超时
+    j = _video_job_read(job_id)
+    if j and j["status"] not in ("succeeded", "failed"):
+        j["status"] = "failed"
+        j["error"] = f"轮询超时（{int(budget)}s）"
+        _video_job_write(j)
+
+
+def resume_pending_video_jobs() -> None:
+    """面板启动时，把没跑完的视频任务重新接回轮询。
+
+    轮询线程活在进程内，面板一重启就没了；而 GET /api/video/poll/{id}
+    只读数据库，于是任务会永远停在 running —— 其实 ComfyUI 早就出完片了，
+    用户看到的是界面一直转圈（僵尸任务）。这里在启动时补回线程。
+    """
+    try:
+        jobs = _video_job_list(200)
+    except Exception:
+        return
+    for job in jobs:
+        if job.get("status") not in ("queued", "running"):
+            continue
+        jid = job.get("job_id")
+        name = job.get("provider")
+        if not jid or name not in _PROVIDER_CLASSES:
+            continue
+        budget = 1800 if name == "comfyui" else 300
+        try:
+            prov = _make_provider(name)
+        except Exception as e:
+            j = _video_job_read(jid)
+            if j:
+                j["status"] = "failed"
+                j["error"] = f"面板重启后无法恢复轮询：{e}"[:200]
+                _video_job_write(j)
+            continue
+        from api.providers import GenResult
+        result = GenResult(job_id=jid, status="running")
+        threading.Thread(target=_poll_video_job,
+                         args=(prov, jid, result, budget), daemon=True).start()
+
+
 def _export_job_write(job: dict) -> None:
     _db_init()
     job = dict(job)
@@ -795,18 +882,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
 
         # 2. 加载 provider 类
         try:
-            _providers = {
-                "jimeng": ("api.providers.jimeng", "JimengProvider"),
-                "kling":  ("api.providers.kling",  "KlingProvider"),
-                "vidu":   ("api.providers.vidu",   "ViduProvider"),
-                "wanx":   ("api.providers.wanx",   "WanxProvider"),
-                "comfyui": ("api.providers.comfyui", "ComfyUIProvider"),
-            }
-            mod_name, cls_name = _providers[provider]
-            import importlib
-            mod = importlib.import_module(mod_name)
-            cls = getattr(mod, cls_name)
-            prov = cls(api_key=api_key)
+            prov = _make_provider(provider)
         except Exception as e:
             _h_json(h, {"error": f"provider 加载失败: {e}"}, 500)
             return True
@@ -845,35 +921,8 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         # 后台线程：阻塞轮询。本地 ComfyUI 单卡跑 5 秒片子要几分钟，给 30 分钟；
         # 云端通常 1~5 分钟，维持原来的 300s。
         _poll_budget = 1800 if provider == "comfyui" else 300
-        def _run():
-            deadline = time.time() + _poll_budget
-            while time.time() < deadline:
-                time.sleep(5)
-                try:
-                    r = prov.poll(result, job_id)
-                    j = _video_job_read(job_id)
-                    if not j:
-                        return  # DB 里没了，不轮了
-                    j["status"] = r.status
-                    j["video_url"] = r.video_url
-                    j["actual_cost"] = r.actual_cost
-                    j["error"] = r.error
-                    j["poll_count"] = int(j.get("poll_count") or 0) + 1
-                    _video_job_write(j)
-                    if r.status in ("succeeded", "failed"):
-                        return
-                except Exception as e:
-                    j = _video_job_read(job_id)
-                    if j:
-                        j["error"] = str(e)[:200]
-                        _video_job_write(j)
-            # 超时
-            j = _video_job_read(job_id)
-            if j and j["status"] not in ("succeeded", "failed"):
-                j["status"] = "failed"
-                j["error"] = f"轮询超时（{int(_poll_budget)}s）"
-                _video_job_write(j)
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_poll_video_job,
+                         args=(prov, job_id, result, _poll_budget), daemon=True).start()
         # 立刻返回
         _h_json(h, {"ok": True, "job_id": job_id, "status": initial_job["status"]})
         return True
