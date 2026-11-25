@@ -631,6 +631,19 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .cost-row label { font-size: var(--font-xs); color: var(--text-muted); min-width: 56px; display:flex; align-items:center; }
 .cost-row select, .cost-row input { flex: 1; padding: var(--space-1) var(--space-2); font-size: var(--font-sm); }
 
+/* 成本口径说明：冷启动耗时、分辨率限制这类"预估之外"的信息单独成行，
+   塞进 cost-rate 那一行会被挤成一团看不清，客户第一次出片就盲等。 */
+.cost-note {
+  margin: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-xs);
+  line-height: 1.6;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, .04);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+}
+
 /* ============================================================
    音色库 / 角色库 / 历史 — 原产品数据对接
    ============================================================ */
@@ -1480,6 +1493,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
             <label>时长(秒)</label>
             <input type="number" id="costDuration" min="1" max="600" value="28" />
           </div>
+          <div class="cost-note" id="costNote" hidden></div>
         </div>
       </section>
 
@@ -2193,10 +2207,14 @@ async function updateCost() {
     const data = await r.json();
     $('#costYuan').textContent = `¥${data.total_cost.toFixed(2)}`;
     let adj = data.adjustment_label ? ` · ${data.adjustment_label}` : '';
-    let note = data.notes ? ` · ${data.notes}` : '';
-    $('#costRate').textContent = `${data.label} · ${res} · ${dur}s${adj}${note}`;
+    // 用后端返回的实际档位：本地 ComfyUI 只有 480p，前端下拉选 1080p 也得显示真值
+    $('#costRate').textContent = `${data.label} · ${data.resolution || res} · ${dur}s${adj}`;
+    const noteEl = $('#costNote');
+    noteEl.hidden = !data.notes;
+    noteEl.textContent = data.notes || '';
   } catch {
     // 后端没通就用前端 fallback
+    $('#costNote').hidden = true;
     const p = PRICING[model];
     if (!p) {
       $('#costYuan').textContent = '¥0.00';
