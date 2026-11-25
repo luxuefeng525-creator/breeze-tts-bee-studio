@@ -245,6 +245,24 @@ def _decrypt(b64: str, key: bytes | None) -> str:
         return f"[DECRYPT_FAILED: {e}]"
 
 
+def _peel_plain(value: str, max_depth: int = 3) -> str:
+    """剥掉可能被重复包裹的 plain:base64。
+
+    历史 bug：把 _get_key() 的返回值又经 _keys_save() 存回去，
+    会形成 plain:<base64("plain:<base64(key)>")> 的双层套娃，这里一并兼容。
+    """
+    import base64
+    s = str(value or "")
+    for _ in range(max_depth):
+        if not s.startswith("plain:"):
+            break
+        try:
+            s = base64.b64decode(s[len("plain:"):]).decode("utf-8")
+        except Exception:
+            break
+    return s
+
+
 def _keys_load() -> dict:
     """从 data/api_keys.json 加载并解密。无 BEE_MASTER_KEY 时退化成明文读。"""
     import warnings
@@ -257,14 +275,17 @@ def _keys_load() -> dict:
         return {}
     master_key = _crypto_key()
     if not master_key:
-        # 环境变量没设，先试试数据里有没有 enc: 前缀 → 警告但不解密
+        # 环境变量没设：enc: 无法解密（置空防泄漏），plain: 必须解码后再用
         for k, v in list(data.items()):
-            if str(v).startswith("enc:"):
+            s = str(v)
+            if s.startswith("enc:"):
                 import sys
                 print(f"⚠️ BEE_MASTER_KEY 未设置，无法解密 {k} 的 API Key。请 export BEE_MASTER_KEY=<your-secret>", file=sys.stderr)
-                data[k] = ""  # 置空防泄漏
+                data[k] = ""
+            else:
+                data[k] = _peel_plain(s)
         return data
-    return {k: _decrypt(v, master_key) for k, v in data.items()}
+    return {k: _peel_plain(_decrypt(v, master_key)) for k, v in data.items()}
 
 
 def _keys_save(d: dict) -> None:
@@ -285,6 +306,25 @@ _API_KEYS: dict[str, str] = _keys_load()  # 启动时加载（解密后在内存
 
 def _get_key(provider: str) -> str:
     return _API_KEYS.get(provider, "")
+
+
+# 明显的占位/测试 Key 特征：这些绝不能被当成「已配置」放行，否则会给用户
+# 「配好了能生成」的错觉，实际一调用就 401。
+_PLACEHOLDER_MARKERS = (
+    "test_d", "dummy", "placeholder", "your_", "your-", "changeme",
+    "xxxx", "example_key", "fake_key", "todo",
+)
+
+
+def _key_state(provider: str) -> tuple[bool, str]:
+    """返回 (是否可用, 状态)。状态：ok / missing / placeholder。"""
+    k = _get_key(provider)
+    if not k:
+        return False, "missing"
+    low = k.lower()
+    if len(k) < 16 or any(m in low for m in _PLACEHOLDER_MARKERS):
+        return False, "placeholder"
+    return True, "ok"
 
 
 def _all_provider_names() -> list[str]:
@@ -404,19 +444,23 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         from api.cost_calc import list_providers, _PRICING_TABLE
         out = []
         for p in list_providers():
+            ok, state = _key_state(p["name"])
             out.append({
                 "name": p["name"], "label": p["label"],
                 "type": "video",
                 "pricing": _PRICING_TABLE.get(p["name"], {}),
-                "api_key_configured": bool(_get_key(p["name"])),
+                "api_key_configured": ok,
+                "key_state": state,
             })
         for name, info in _LLM_LABELS.items():
+            ok, state = _key_state(name)
             out.append({
                 "name": name, "label": info["label"],
                 "type": info["type"],
                 "desc": info["desc"],
                 "pricing": {},
-                "api_key_configured": bool(_get_key(name)),
+                "api_key_configured": ok,
+                "key_state": state,
             })
         _h_json(h, out)
         return True

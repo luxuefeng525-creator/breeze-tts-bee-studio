@@ -25,6 +25,17 @@ class KlingProvider(BaseProvider):
     def estimate_cost(self, duration: float, resolution: str) -> float:
         return float(self._PRICING_USD_PER_S.get(resolution.lower(), 0.084)) * self.FX * duration
 
+    def _auth_headers(self, json_body: bool = False) -> dict:
+        """官方 Kling 用 Authorization: Bearer <JWT>；第三方代理多用 apikey 头。
+        按 Key 形态自动选择，避免把 JWT 塞进 apikey 头被服务器判 401。"""
+        k = str(self.api_key or "")
+        h = {"Content-Type": "application/json"} if json_body else {}
+        if k.startswith("eyJ") and k.count(".") == 2:
+            h["Authorization"] = f"Bearer {k}"
+        else:
+            h["apikey"] = k
+        return h
+
     def generate(self, req: GenRequest) -> GenResult:
         endpoint = KLING_ENDPOINT_I2V if req.image_url else KLING_ENDPOINT_T2V
         payload = {
@@ -37,7 +48,7 @@ class KlingProvider(BaseProvider):
         }
         try:
             resp = requests.post(
-                endpoint, headers={"apikey": self.api_key, "Content-Type": "application/json"},
+                endpoint, headers=self._auth_headers(json_body=True),
                 json=payload, timeout=15,
             )
             if resp.status_code == 429:
@@ -56,14 +67,20 @@ class KlingProvider(BaseProvider):
         try:
             resp = requests.get(
                 KLING_ENDPOINT_QUERY.format(task_id=job_id),
-                headers={"apikey": self.api_key}, timeout=10,
+                headers=self._auth_headers(), timeout=10,
             )
             if not resp.ok:
                 raise ProviderError(f"Kling 查询 {resp.status_code}")
             data = resp.json()
             d = data.get("data", {})
-            r = GenResult(job_id=job_id, status=d.get("task_status", "queued"))
-            if r.status == "succeed":
+            raw = str(d.get("task_status") or "").lower()
+            # Kling 返回 succeed/processing/submitted；路由只认 succeeded/failed，
+            # 不归一化会导致轮询永不结束、300s 后误判失败。
+            _map = {"succeed": "succeeded", "success": "succeeded", "succeeded": "succeeded",
+                    "failed": "failed", "error": "failed",
+                    "processing": "running", "submitted": "queued", "queued": "queued"}
+            r = GenResult(job_id=job_id, status=_map.get(raw, raw or "queued"))
+            if r.status == "succeeded":
                 videos = d.get("task_result", {}).get("videos", [])
                 if videos:
                     r.video_url = videos[0].get("url", "")
