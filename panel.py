@@ -9,9 +9,12 @@
 """
 from __future__ import annotations
 
+import contextlib
+import datetime
 import json
 import os
 import re
+import sqlite3
 import sys
 import struct
 import threading
@@ -1917,6 +1920,36 @@ document.addEventListener("keydown", (e) => {
 """
 
 
+def _local_video_busy(max_age_sec: int = 1800) -> bool:
+    """本地出片（ComfyUI）是否正在占用显卡。
+
+    8GB 卡做不到「语音常驻 + 视频推理」并存：出片前我们主动请语音卸卡，
+    如果这时候再进来一个合成请求，语音会把模型重新装回显存，把正在跑的
+    出片顶爆（OOM，白等几分钟）。所以出片期间直接拒绝合成类请求，
+    并说清原因，而不是让人等到一半才失败。
+    """
+    db = DATA / "bee_tasks.db"
+    if not db.is_file():
+        return False
+    try:
+        with contextlib.closing(sqlite3.connect(db, timeout=3)) as con:
+            rows = con.execute(
+                "SELECT updated_at FROM video_jobs "
+                "WHERE provider='comfyui' AND status IN ('queued','running')"
+            ).fetchall()
+    except Exception:
+        return False
+    now = datetime.datetime.now()
+    for (ts,) in rows:
+        try:
+            started = datetime.datetime.fromisoformat(str(ts))
+        except Exception:
+            continue
+        if (now - started).total_seconds() <= max_age_sec:
+            return True
+    return False
+
+
 # ---------- HTTP Handler ----------
 class Handler(BaseHTTPRequestHandler):
     server_version = "BreezeTTSPanel/1.0"
@@ -2252,6 +2285,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         ctype = self.headers.get("Content-Type", "")
         body = self._read_body()
+        # 本地出片独占显卡期间，合成类请求一律先拦下：放进去只会把出片顶爆
+        if path.startswith("/api/synthesize") or path.endswith("/synth") or path.endswith("/produce"):
+            if _local_video_busy():
+                self._err("本地出片正在使用显卡（约 3-8 分钟）。出片期间合成会把它挤崩，"
+                          "请等出片完成后再合成；要边配音边出片请改用云端 provider。", 409)
+                return
         # 剧本台路由（独立模块；惰性导入避免与 panel 互相 import）
         from script_routes import handle as _script_handle
         if _script_handle(self, "POST", path, body, ctype):
