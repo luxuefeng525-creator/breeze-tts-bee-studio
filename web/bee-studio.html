@@ -1752,6 +1752,14 @@ const PRICING = {
 };
 
 const EMOTIONS = ['平静','忧郁','紧张','愤怒','温柔','悬疑','兴奋','孤独','希望','恐惧','幽默','怀旧'];
+// 后端 tts_pipeline/script.py 的 EMOTIONS 只有 11 个键（中性/温柔/开心/激动/悲伤/愤怒/紧张/迟疑/恐惧/讽刺/疲惫）。
+// UI 用词更贴创作，合成前必须映射过去；否则后端认不出（script.py 只在 tag in EMOTIONS 时生效），会静默退回默认。
+const EMOTION_MAP = {
+  平静:'中性', 忧郁:'悲伤', 紧张:'紧张', 愤怒:'愤怒', 温柔:'温柔', 悬疑:'迟疑',
+  兴奋:'激动', 孤独:'悲伤', 希望:'温柔', 恐惧:'恐惧', 幽默:'讽刺', 怀旧:'疲惫',
+  中性:'中性', 开心:'开心', 激动:'激动', 悲伤:'悲伤', 迟疑:'迟疑', 讽刺:'讽刺', 疲惫:'疲惫',
+};
+const toBackendEmotion = (e) => EMOTION_MAP[e] || (Object.values(EMOTION_MAP).includes(e) ? e : '中性');
 
 // G4-P0 修复：state.projects 改为从 DB 拉取，不再硬编码
 let state = {
@@ -2209,13 +2217,19 @@ async function synthShot(shotId) {
   showToast(`🎙️ 合成：${shot.title}...`, 'info');
   try {
     // 1. 确保 BreezeTTS 有对应剧本（不带场景头，避免把标题也念出来）
-    const raw = `${shot.char || '旁白'}：${cleanPrompt || shot.title}`;
+    //    情绪用后端认的 [情绪] 标注语法写进 raw（script.py: 「角色名[情绪]：台词」），
+    //    不写就等于没选——这才是「情感对不上」的根因。
+    const raw = `${shot.char || '旁白'}[${toBackendEmotion(shot.emotion)}]：${cleanPrompt || shot.title}`;
     let sid = shot.bt_script_id;
     if (!sid) {
       const created = await apiBT('/api/scripts', { method:'POST', body: JSON.stringify({
         title: `[BeeStudio] ${shot.title}`, raw, cast: []
       })});
       sid = created.id;
+    } else {
+      // 复用旧剧本时必须刷新 raw：后端按 raw 解析情绪/台词，不更新就永远用第一次的内容，
+      // 改台词或改情绪都「看起来没生效」（行状态按 _line_hash 判定，raw 不变不会误重做）。
+      await apiBT(`/api/scripts/${sid}`, { method:'PUT', body: JSON.stringify({ raw }) }).catch(() => {});
     }
     // 2. auto_cast：确保角色都绑上音色（后端会自动建角色并分配默认音色）
     await apiBT(`/api/scripts/${sid}/cast`, { method:'POST', body: '{}' }).catch(() => {});
@@ -2294,7 +2308,7 @@ async function generateVideo(shotId, cardEl) {
   } catch {}
   if (!keyConfigured) {
     const why = keyState === 'placeholder' ? 'API Key 是测试占位，需换成真实 Key' : '未配置 API Key';
-    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why} — 用 Mock 演示`, 'warn');
+    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。LongCat 是文本模型写不了视频，需配 Kling / 即梦 / vidu / 万相 的 Key`, 'warn');
     // Mock fallback
     preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">Mock 演示模式</div>';
     setTimeout(() => {
