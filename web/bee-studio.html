@@ -2285,21 +2285,30 @@ async function generateVideo(shotId, cardEl) {
   preview.innerHTML = '<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">AI 生成中... 预计 90-180s</div>';
   showToast(`🎬 调用 ${PROV_LABEL[shot.provider] || shot.provider} 生成视频（${shot.res} · ${shot.duration}s）...`, 'info');
 
-  // 2. 发起任务
+  // 2. 发起任务（时长吸附到模型支持的档位：Kling/即梦 均 5/10/15/20）
+  const ALLOWED_DUR = [5, 10, 15, 20];
+  const genDur = ALLOWED_DUR.reduce((a, b) => Math.abs(b - shot.duration) < Math.abs(a - shot.duration) ? b : a);
+  if (genDur !== shot.duration) showToast(`⏱ 时长 ${shot.duration}s 不在模型档位，按 ${genDur}s 生成`, 'info');
   let jobId;
   try {
-    const resp = await apiBT('/api/video/generate', {
-      method: 'POST',
+    const resp = await fetch(BT + '/api/video/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         provider: shot.provider,
         resolution: shot.res,
-        duration: shot.duration,
-        prompt: shot.prompt || shot.title,
+        duration: genDur,
+        prompt: (shot.prompt || shot.title).replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim(),
         image_url: '',
       })
     });
-    if (resp.error) { showToast('❌ ' + resp.error, 'error'); return; }
-    jobId = resp.job_id;
+    if (!resp.ok) {
+      let msg = String(resp.status);
+      try { const j = await resp.json(); msg = j.error || j.detail || j.message || msg; } catch {}
+      showToast('❌ ' + msg, 'error');
+      return;
+    }
+    const j = await resp.json();
+    jobId = j.job_id;
   } catch (err) {
     showToast('❌ 发起失败: ' + err.message, 'error');
     return;
