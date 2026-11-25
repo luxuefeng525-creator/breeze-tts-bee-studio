@@ -89,6 +89,20 @@
   --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.35);
 }
 
+/* Dark mode: primary = #FFB300 (bright gold, great for foreground),
+   but button backgrounds also use it → white text only 1.79:1 contrast.
+   Override button foregrounds with theme dark (#1A1410) instead. */
+[data-theme="dark"] .btn-primary,
+[data-theme="dark"] .km-btn.km-primary,
+[data-theme="dark"] .voice-card .vc-play,
+[data-theme="dark"] .history-item .hi-play { color: #1A1410; }
+/* Dark mode accent hover: need dark text on bright gold */
+[data-theme="dark"] .btn-xs.accent:hover { color: #1A1410; }
+/* Dark mode vc-tags: use lighter tints on dark bg (#1A1410) */
+[data-theme="dark"] .voice-card .vc-tag.clone    { background: rgba(100,181,246,.18); color: #90CAF9; }
+[data-theme="dark"] .voice-card .vc-tag.design   { background: rgba(206,147,216,.18); color: #CE93D8; }
+[data-theme="dark"] .voice-card .vc-tag.direction{ background: rgba(255,179,0,.18); color: #FFD54F; }
+
 html, body {
   height: 100%;
   font-family: "SF Pro Display", "SF Pro Text", -apple-system, "Inter",
@@ -339,7 +353,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   font-weight: 600; letter-spacing: .3px;
 }
 .badge-draft    { background: rgba(158,151,136,.2); color: var(--text-muted); }
-.badge-voicing  { background: rgba(191,54,12,.22); color: var(--accent); }
+.badge-voicing  { background: var(--primary-soft); color: var(--primary-deep); }
 .badge-done     { background: rgba(76,175,80,.18); color: var(--success); }
 
 .new-project-btn {
@@ -496,8 +510,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .btn-xs:hover { border-color: var(--primary); color: var(--primary-deep); }
 .btn-xs.accent { background: var(--primary-soft); color: var(--accent); border-color: rgba(191,54,12,.25); }
-.btn-xs.accent:hover { background: var(--primary); color: #1a1a1a; }
-.btn-xs.danger:hover { color: #e74c3c; border-color: rgba(231,76,60,.3); }
+.btn-xs.accent:hover { background: var(--primary); color: #fff; }
+.btn-xs.danger { color: #C0392B; border-color: rgba(192,57,43,.5); }
+.btn-xs.danger:hover { color: #fff; background: #C0392B; border-color: #C0392B; }
 
 .cost-tag {
   font-size: var(--font-xs);
@@ -611,13 +626,13 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   font-size: var(--font-xs); padding: var(--space-1) var(--space-1) border-radius: var(--radius-md) font-weight: 600;
   text-transform: uppercase; letter-spacing: .5px;
 }
-.voice-card .vc-tag.clone    { background: rgba(33,150,243,.12); color: #2196F3; }
-.voice-card .vc-tag.design   { background: rgba(156,39,176,.12); color: #9C27B0; }
-.voice-card .vc-tag.direction{ background: rgba(255,152,0,.12); color: #FF9800; }
+.voice-card .vc-tag.clone    { background: rgba(21,101,192,.12); color: #1565C0; }
+.voice-card .vc-tag.design   { background: rgba(123,31,162,.12); color: #6A1B9A; }
+.voice-card .vc-tag.direction{ background: rgba(191,54,12,.14); color: var(--primary-deep); }
 .voice-card .vc-play {
   position: absolute; top: 8px; right: 8px;
   width: 22px; height: 22px; border-radius: 50%;
-  background: var(--primary); color: #2a1a00; font-size: var(--font-xs);
+  background: var(--primary); color: #fff; font-size: var(--font-xs);
   display: grid; place-items: center; font-weight: 700;
 }
 .voice-card.empty { grid-column: 1/-1; text-align: center; padding: var(--space-5) color: var(--text-faint); font-size: var(--font-sm); }
@@ -647,7 +662,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .history-item .hi-play {
   width: var(--space-7) height: 26px; border-radius: 50%;
-  background: var(--primary); color: #2a1a00; font-size: var(--font-xs);
+  background: var(--primary); color: #fff; font-size: var(--font-xs);
   display: grid; place-items: center; flex-shrink: 0; font-weight: 700;
 }
 .history-item .hi-body { flex: 1; min-width: 0; }
@@ -670,7 +685,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .shi-title { font-size: var(--font-sm); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
 .shi-badge {
   font-size: var(--font-xs); padding: 1px var(--space-1); border-radius: var(--radius-pill);
-  background: rgba(191,54,12,.15); color: var(--accent); font-weight: 600; flex-shrink: 0;
+  background: rgba(var(--accent-rgb), .15); color: var(--primary-deep); font-weight: 600; flex-shrink: 0;
 }
 .shi-badge.mock { background: rgba(158,151,136,.2); color: var(--text-muted); }
 .shi-meta { display: flex; gap: var(--space-2); align-items: center; color: var(--text-faint); font-size: var(--font-xs); }
@@ -743,7 +758,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .btn-ghost:hover { background: var(--panel-2); color: var(--text); }
 .btn-primary {
   background: var(--primary); border: 1px solid var(--primary);
-  color: #1a1410; padding: var(--space-2) var(--space-4);
+  color: #fff; padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm); cursor: pointer;
   font-size: var(--font-base); font-weight: 600;
   transition: background .12s, box-shadow .12s;
@@ -797,8 +812,8 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 }
 .mm-item .mmi-name { font-weight: 600; flex: 1; }
 .mm-item .mmi-meta { color: var(--text-faint); font-size: var(--font-xs); }
-.mm-item .mmi-del { color: #e74c3c; font-size: var(--font-xs); cursor: pointer; padding: var(--space-1) var(--space-2) border-radius: var(--radius-sm) }
-.mm-item .mmi-del:hover { background: rgba(231,76,60,.1); }
+.mm-item .mmi-del { color: #C0392B; font-size: var(--font-xs); cursor: pointer; padding: var(--space-1) var(--space-2) border-radius: var(--radius-sm) }
+.mm-item .mmi-del:hover { background: rgba(192,57,43,.12); }
 .mm-item.empty { text-align: center; padding: var(--space-4) color: var(--text-faint); font-size: var(--font-sm); }
 
 /* Provider settings */
@@ -836,7 +851,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .km-btn:hover { background: var(--primary-soft); border-color: var(--primary); }
 .km-btn:disabled { opacity: .45; cursor: not-allowed; }
 .km-btn.km-ghost { background: transparent; }
-.km-btn.km-primary { background: var(--primary); color: #2a1a00; border-color: transparent; }
+.km-btn.km-primary { background: var(--primary); color: #fff; border-color: transparent; }
 .km-btn.km-primary:hover { filter: brightness(.95); }
 .km-sep { width: 1px; height: 16px; background: var(--border); margin: 0 var(--space-1) }
 
