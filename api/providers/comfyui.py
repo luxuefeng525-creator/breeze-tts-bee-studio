@@ -301,8 +301,9 @@ class ComfyUIProvider(BaseProvider):
     def _size_for(resolution: str) -> tuple[int, int]:
         """分辨率档位 -> (width, height)。
 
-        8GB 卡（RTX 5060）实测：832x480 单条 5 秒约 15 分钟，640x368 约 6 分钟，
-        耗时随像素量线性涨。本地档默认降一档，宁可慢一点也不能让人等半小时。
+        8GB 卡（RTX 5060）实测（2026-11-26）：T2V 640×368 / 25 帧 / 4 步，
+        显存充裕约 35 秒，桌面程序占满显存时 158.8 秒。像素越多越慢，
+        本地档默认降一档，宁可慢一点也不让人等半小时。
         """
         r = (resolution or "").lower()
         if r == "720p":
