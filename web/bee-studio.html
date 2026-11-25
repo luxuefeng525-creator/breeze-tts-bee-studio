@@ -169,8 +169,20 @@ input:focus, textarea:focus, select:focus {
 .topbar-tab.external::after { content: "↗"; var(--font-xs); opacity: .5; margin: var(--space-1) }
 .topbar-right { display: flex; align-items: center; gap: var(--space-2) margin-left: auto; }
 .topbar-status {
-  var(--font-xs); padding: var(--space-1) var(--space-2) border-radius: var(--radius-md);
+  var(--font-xs); padding: var(--space-1) var(--space-2); border-radius: var(--radius-md);
   background: rgba(76,175,80,.12); color: var(--success); border: 1px solid rgba(76,175,80,.3);
+}
+/* G6: 顶栏 autosave 状态 */
+.topbar-save {
+  font-size: 10px; color: var(--text-muted); padding: 4px 8px; border-radius: var(--radius-md);
+  background: var(--panel-2); border: 1px solid var(--border); transition: opacity .3s;
+  opacity: 0; animation: fadeInOut 2.5s ease;
+}
+@keyframes fadeInOut {
+  0% { opacity: 0; transform: translateY(-3px); }
+  15% { opacity: 1; transform: translateY(0); }
+  75% { opacity: 1; }
+  100% { opacity: 0; }
 }
 
 /* ============================================================
@@ -1028,28 +1040,44 @@ input:focus, textarea:focus, select:focus {
 .tl-clip-sub    { background: linear-gradient(90deg, rgba(144,164,174,.8), rgba(96,125,139,.8)); color: #fff; }
 
 .tl-playhead {
-  position: absolute; top: -8px; bottom: -2px;
-  width: 14px; left: 0%;
+  position: absolute; top: -10px; bottom: -2px;
+  width: 16px; left: 0%;
   transform: translateX(-50%);
   pointer-events: auto; cursor: ew-resize;
   z-index: 20;
 }
 .tl-playhead::before {
-  content: ""; position: absolute; top: -4px; left: 2px;
-  width: 10px; height: 10px; background: var(--accent); border-radius: 50%;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb,255,0,100),.3);
+  content: ""; position: absolute; top: -5px; left: 1px;
+  width: 14px; height: 14px; background: var(--accent); border-radius: 50%;
+  box-shadow: 0 0 0 5px rgba(var(--accent-rgb,255,193,7),.35), 0 2px 6px rgba(0,0,0,.4);
 }
 .tl-playhead::after {
-  content: ""; position: absolute; top: 6px; left: 6px; bottom: -2px;
-  width: 2px; background: var(--accent);
+  content: ""; position: absolute; top: 10px; left: 6px; bottom: -2px;
+  width: 3px; background: var(--accent);
+  filter: drop-shadow(0 0 2px rgba(255,193,7,.4));
 }
 
 /* G5: clip 拖拽 + resize */
-.tl-track { height: 18px; }
-.tl-track .tl-clip { cursor: grab; user-select: none; }
+.tl-track { height: 22px; }
+.tl-track .tl-clip { cursor: grab; user-select: none; transition: left .12s ease-out, width .12s ease-out; }
 .tl-track .tl-clip:active { cursor: grabbing; }
 .tl-track.dragging * { cursor: grabbing !important; }
-.tl-clip.dragging { opacity: .5; }
+.tl-clip.dragging { opacity: .45; filter: saturate(1.4); }
+
+/* G6: swap 目标高亮 */
+.tl-clip.swap-target { outline: 2.5px solid var(--accent); outline-offset: -2px; box-shadow: 0 0 0 3px rgba(255,193,7,.35), inset 0 0 12px rgba(255,193,7,.35); z-index: 15; }
+
+/* G6: 拖拽 ghost 预览框 */
+.tl-ghost {
+  height: 22px;
+  background: rgba(255,193,7,.22);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  z-index: 18;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.2), 0 0 10px rgba(255,193,7,.25);
+}
 
 .tl-resize-handle {
   position: absolute; top: 0; right: 0; bottom: 0;
@@ -1182,6 +1210,7 @@ input:focus, textarea:focus, select:focus {
   </div>
   <div class="topbar-right">
     <span class="topbar-status" id="beeEngineStatus">✓ 双引擎就绪</span>
+    <span class="topbar-save" id="beeSaveHint" style="display:none">💾 自动保存 · 刚刚</span>
     <a href="/" class="topbar-tab external" style="padding:6px 10px;font-size:11px">BreezeTTS 首页</a>
   </div>
 </nav>
@@ -1622,6 +1651,9 @@ async function autosaveProject() {
       clearTimeout(el._hideTimer);
       el._hideTimer = setTimeout(() => el.style.display = 'none', 1500);
     });
+    // G6: 顶栏 autosave 状态（2.5s 淡出动画）
+    const sb = $('#beeSaveHint');
+    if (sb) { sb.style.display = 'inline-block'; sb.style.animation = 'none'; void sb.offsetWidth; sb.style.animation = ''; }
   } catch (err) {
     console.warn('autosave failed:', err);
   }
@@ -2327,6 +2359,25 @@ function _snap(value, edges, thresholdPct = 0.5) {
   return value;
 }
 
+// G6: 拖拽 ghost 预览框（首次 pointerdown 时创建到 #tlTrackVideo）
+function _ensureDragGhost() {
+  if ($('#tlDragGhost')) return;
+  const g = document.createElement('div');
+  g.id = 'tlDragGhost';
+  g.className = 'tl-ghost';
+  g.style.position = 'absolute';
+  g.style.top = '0';
+  g.style.height = '18px';
+  g.style.display = 'none';
+  g.style.pointerEvents = 'none';
+  $('#tlTrackVideo').appendChild(g);
+}
+
+// G6: swap shots 数组后同步 scene_no（镜头"编号"跟着位置走）
+function _renumberShots(shots) {
+  shots.forEach((s, i) => { s.num = i + 1; });
+}
+
 // Playhead drag（pointerdown on #tlPlayhead）
 $('#tlPlayhead').addEventListener('pointerdown', (e) => {
   const project = getActiveProject();
@@ -2385,58 +2436,68 @@ document.body.addEventListener('pointermove', (e) => {
     _tlDrag._curPct = snap;
     _tlMarkDirty();
   } else if (_tlDrag.type === 'clip') {
-    const idx = _tlDrag.shotIndex;
+    // G6: clip 交换模型 —— 拖过相邻 shot 中心即 swap（duration 不变）
+    // 每次 pointermove 只做判断 + 可能 swap + 刷新 DOM（靠 _tlMarkDirty 合帧）
     const shots = project.shots;
-    const shot = shots[idx];
+    const idx = _tlDrag.shotIndex;
     const totalPxPerSec = _tlDrag.trackWidthPx / total;
-    const secDelta = dx / totalPxPerSec;
-    // 把当前 shot 从序列里"抠出来"，算新的 offset
-    // 先算所有 shots 的原始 offsets
+    // 重新算 offsets（因为数组可能在连续 swap 中改变）
     const offsets = [0];
     for (let i = 0; i < shots.length - 1; i++) offsets.push(offsets[i] + shots[i].duration);
-    let newOffset = offsets[idx] + secDelta;
-    // 限制：不能 < 0，不能让 shot 和前后重叠
-    newOffset = Math.max(0, newOffset);
-    // 吸附到相邻 shot 边界
-    const edges = _collectSnapEdges();
-    const edgesSec = edges.map(p => (p / 100) * total);
-    const snappedOffset = _snap(newOffset, edgesSec.map(e => Math.round(e * 10) / 10), 0.5);
-    newOffset = snappedOffset;
-    // 现在更新 shots 序列：shot[idx] 的新 start = newOffset
-    // 后面 shots 的 offset 自动顺延（通过 duration 累加）
-    // 但我们要保证不重叠：shot[idx].start >= shot[idx-1].start + shot[idx-1].duration
-    if (idx > 0) {
-      const prevEnd = offsets[idx - 1] + shots[idx - 1].duration;
-      newOffset = Math.max(newOffset, prevEnd);
-    }
-    if (idx < shots.length - 1) {
-      const nextStart = offsets[idx + 1];
-      const newEnd = newOffset + shot.duration;
-      if (newEnd > nextStart) newOffset = nextStart - shot.duration;
-    }
-    // ripple: 改 duration → 改序列后重算 offsets → 但我们现在是平移 shot，不是改 duration
-    // 所以：把当前 shot 从原位"移"到 newOffset，中间 gap 要填上——用前一个 shot 伸缩？
-    // 更干净的做法：直接改 shots[idx].duration 让 total 跟着变？不行，那 total 就不固定了
-    // 
-    // 简化策略：只允许相邻 shot 交换位置（drag 到相邻 shot 的 gap 区域里 → 交换两 shot）
-    // 或者最保守：限制 newOffset 只能在 [offsets[idx-1].end, offsets[idx+1].start - shot.duration]
-    // 
-    // 先做保守版：限制边界 + 吸附
-    // 把 newOffset 写回 shots 数据模型（我们通过 duration 累加得到 offset，所以要改 duration 之前 shots 的 durations）
-    // 其实更简单：只允许平移前后 gap 里的 shot——gap = offsets[idx+1].start - offsets[idx].end
-    // 如果没有 gap（两个 shot 紧挨着），就只能交换位置
-    // 
-    // 为了实现简单，我们换个模型：给每个 shot 加 startSec 字段
-    // 但现在 shots 只有 duration，我们通过累加算 offset——不破坏数据结构
-    // 就简单做：当前 shot 移到 newOffset，通过修改 shot[idx-1].duration 来吸收 gap
-    if (idx > 0) {
-      const prevOffset = offsets[idx - 1];
-      const newPrevDur = newOffset - prevOffset;
-      if (newPrevDur >= 0.5 && newPrevDur <= 60) { // 限 0.5s ~ 60s
-        shots[idx - 1].duration = Math.round(newPrevDur * 10) / 10;
+    const shot = shots[idx];
+
+    // 预览 ghost 位置：用一个动态元素（首次出现时创建）
+    _ensureDragGhost();
+    const ghost = $('#tlDragGhost');
+    ghost.style.display = 'block';
+    ghost.style.top = '0';
+    ghost.style.bottom = '0';
+
+    // 检查是否跨相邻中心 → swap
+    // 向右拖：如果当前 shot 起点 + dx 已经越过了右侧 shot 的中心 → swap 右
+    // 向左拖：如果当前 shot 起点 + dx 已经落到左侧 shot 中心以左 → swap 左
+    let swapped = false;
+    if (idx < shots.length - 1 && dx > 0) {
+      // 右移：shot[idx].start + dx > shot[idx+1].start + shot[idx+1].duration / 2
+      const centerRight = offsets[idx + 1] + shots[idx + 1].duration / 2;
+      if (offsets[idx] + dx / totalPxPerSec > centerRight) {
+        // swap shots[idx] ↔ shots[idx+1]
+        [shots[idx], shots[idx + 1]] = [shots[idx + 1], shots[idx]];
+        _tlDrag.shotIndex = idx + 1; // 当前"被拖的"shot 现在在 idx+1 了
+        swapped = true;
+      }
+    } else if (idx > 0 && dx < 0) {
+      // 左移：shot[idx].start + dx < shot[idx-1].start + shot[idx-1].duration / 2
+      const centerLeft = offsets[idx - 1] + shots[idx - 1].duration / 2;
+      if (offsets[idx] + dx / totalPxPerSec < centerLeft) {
+        [shots[idx - 1], shots[idx]] = [shots[idx], shots[idx - 1]];
+        _tlDrag.shotIndex = idx - 1;
+        swapped = true;
       }
     }
+
+    // 更新 DOM（每次 swap 后 shots 数组变了，_writeClipsDOM 会重新渲染 left/width）
     _tlMarkDirty();
+
+    // 画 ghost 预览：ghost 始终跟着鼠标，宽度 = shot.duration 对应的 %
+    const ghostLeftPct = Math.max(0, Math.min(100, ((offsets[idx] + dx / totalPxPerSec) / total) * 100));
+    ghost.style.left = ghostLeftPct + '%';
+    ghost.style.width = (shot.duration / total) * 100 + '%';
+
+    // 目标高亮：找到 ghost 中心落在哪个 clip 区域里，给加 'swap-target' 类
+    const centerPct = ghostLeftPct + (shot.duration / total) * 100 / 2;
+    const videoTrack = $('#tlTrackVideo');
+    videoTrack.querySelectorAll('.tl-clip.tl-clip-video').forEach(el => el.classList.remove('swap-target'));
+    // 找目标 clip index
+    let targetIdx = -1, cum = 0;
+    for (let i = 0; i < shots.length; i++) {
+      cum += shots[i].duration;
+      if ((cum / total) * 100 > centerPct) { targetIdx = i; break; }
+    }
+    if (targetIdx >= 0 && targetIdx !== _tlDrag.shotIndex) {
+      const targetEl = videoTrack.querySelector(`[data-shot="${targetIdx}"]`);
+      if (targetEl) targetEl.classList.add('swap-target');
+    }
   } else if (_tlDrag.type === 'resize') {
     const idx = _tlDrag.shotIndex;
     const shots = project.shots;
@@ -2466,7 +2527,7 @@ document.body.addEventListener('pointermove', (e) => {
   }
 });
 
-// pointerup: commit + autosave + 清状态
+// pointerup: commit + autosave + 清状态 + G6 swap 后全链路刷新
 document.body.addEventListener('pointerup', () => {
   if (!_tlDrag.type) return;
   const project = getActiveProject();
@@ -2478,16 +2539,29 @@ document.body.addEventListener('pointerup', () => {
     playheadT = (_tlDrag._curPct / 100) * total;
     $('#tlPlayhead').style.left = _tlDrag._curPct + '%';
     $('#tlTime').textContent = `${fmtTime(playheadT)} / ${fmtTime(total)}`;
+  } else if (_tlDrag.type === 'clip') {
+    // G6: swap 后 renumber + 全链路重渲染 + autosave
+    _renumberShots(project.shots);
+    _writeClipsDOM();
+    // 清 ghost + swap-target 高亮
+    const ghost = $('#tlDragGhost');
+    if (ghost) ghost.style.display = 'none';
+    $('#tlTrackVideo').querySelectorAll('.swap-target').forEach(el => el.classList.remove('swap-target'));
+    // 分镜卡 + inspector 也要刷新（shot 编号变了）
+    renderStoryboard();
+    renderInspector();
+    _debounceAutosave();
   } else {
-    // clip/resize commit totalDuration + autosave
+    // resize commit totalDuration + autosave
     let newTotal = 0;
     project.shots.forEach(s => { newTotal += s.duration; });
     project.totalDuration = Math.round(newTotal * 10) / 10;
     _writeClipsDOM();
     _debounceAutosave();
   }
-  // 清
+  // 清 drag 状态
   _tlDrag.type = null;
+  _tlDrag.shotIndex = -1;
   document.body.releasePointerCapture?.();
 });
 
