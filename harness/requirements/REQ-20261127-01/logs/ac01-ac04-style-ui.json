@@ -1,0 +1,34 @@
+{
+ "styleCount": 6,
+ "styles": [
+  {
+   "v": "cinematic",
+   "t": "电影感 · Cinematic"
+  },
+  {
+   "v": "cyberpunk",
+   "t": "赛博朋克 · Cyberpunk"
+  },
+  {
+   "v": "anime",
+   "t": "日系动画 · Anime"
+  },
+  {
+   "v": "documentary",
+   "t": "写实纪录片 · Doc"
+  },
+  {
+   "v": "product",
+   "t": "产品广告 · Product"
+  },
+  {
+   "v": "vertical",
+   "t": "竖屏短视频 · Vertical"
+  }
+ ],
+ "desc1": "冷暖对比、浅景深、缓慢运镜，适合剧情向短片。 · 建议每镜约 6s",
+ "shots60": "10",
+ "shotsVert": "12",
+ "descVert": "9:16 构图、顶部字幕安全区、开头强钩子。 · 建议每镜约 5s",
+ "errors": []
+}

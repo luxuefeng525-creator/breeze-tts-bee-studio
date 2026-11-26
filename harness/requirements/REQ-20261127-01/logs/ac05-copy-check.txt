@@ -1,0 +1,2 @@
+2354: showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。视频不会用 Mock 冒充成功：可把该镜头切成「本地 ComfyUI · 免费」直接出片，或在右侧密钥管理配置真实 Key`, 'warn');
+3410: showToast(`🎬 批量视频生成 · ${shots.length} 镜头排队中（仅本地 ComfyUI 立即可用；云端需真实 Key）`, 'info');
