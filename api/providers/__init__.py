@@ -17,6 +17,9 @@ class GenRequest:
     duration: float = 5.0        # 输出秒数
     resolution: str = "720p"     # 720p / 1080p
     seed: Optional[int] = None
+    # 本地 ComfyUI 的第二个动作方案："" = 默认（5B 稳定档），"svd" = SVD 快出档。
+    # 只对本机 provider 有意义，云端 provider 忽略。
+    engine: str = ""
 
 
 @dataclass

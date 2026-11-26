@@ -86,6 +86,12 @@ def _db_init() -> None:
             conn.execute("ALTER TABLE export_jobs ADD COLUMN zip_path TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # 已经有了
+        # 迁移：上传进 ComfyUI input 的参考图副本名。轮询线程活在内存里，
+        # 面板一重启就丢了名字，那张副本会永久留在 input 目录（实测漏过一张）。
+        try:
+            conn.execute("ALTER TABLE video_jobs ADD COLUMN staged_image TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # 已经有了
         conn.commit()
     _db_ready = True
 
@@ -95,15 +101,17 @@ def _video_job_write(job: dict) -> None:
     _db_init()
     job = dict(job)
     job.setdefault("created_at", datetime.datetime.now().isoformat())
+    job.setdefault("staged_image", "")
     job["updated_at"] = datetime.datetime.now().isoformat()
     with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
         conn.execute("""
-            INSERT INTO video_jobs(job_id,provider,provider_label,status,video_url,actual_cost,error,prompt,resolution,duration,created_at,updated_at,poll_count)
-            VALUES(:job_id,:provider,:provider_label,:status,:video_url,:actual_cost,:error,:prompt,:resolution,:duration,:created_at,:updated_at,:poll_count)
+            INSERT INTO video_jobs(job_id,provider,provider_label,status,video_url,actual_cost,error,prompt,resolution,duration,created_at,updated_at,poll_count,staged_image)
+            VALUES(:job_id,:provider,:provider_label,:status,:video_url,:actual_cost,:error,:prompt,:resolution,:duration,:created_at,:updated_at,:poll_count,:staged_image)
             ON CONFLICT(job_id) DO UPDATE SET
               status=excluded.status, video_url=excluded.video_url,
               actual_cost=excluded.actual_cost, error=excluded.error,
-              updated_at=excluded.updated_at, poll_count=excluded.poll_count
+              updated_at=excluded.updated_at, poll_count=excluded.poll_count,
+              staged_image=excluded.staged_image
         """, job)
         conn.commit()
 
@@ -243,6 +251,19 @@ def _poll_video_job(prov, job_id: str, result, budget: float) -> None:
         j["status"] = "failed"
         j["error"] = f"轮询超时（{int(budget)}s）"
         _video_job_write(j)
+        # 超时也是终态：参考图副本要删、显存要还，否则残留 + 语音合成被迫换页
+        name = str(j.get("staged_image") or "")
+        if name:
+            try:
+                prov.drop_staged(name)
+            except Exception:
+                pass
+            j["staged_image"] = ""
+            _video_job_write(j)
+        try:
+            prov.release_if_idle()
+        except Exception:
+            pass
 
 
 def resume_pending_video_jobs() -> None:
@@ -275,6 +296,8 @@ def resume_pending_video_jobs() -> None:
             continue
         from api.providers import GenResult
         result = GenResult(job_id=jid, status="running")
+        # 把重启前上传的参考图副本名接回来，任务收尾时才能删干净
+        result._bee_staged_image = str(job.get("staged_image") or "")
         threading.Thread(target=_poll_video_job,
                          args=(prov, jid, result, budget), daemon=True).start()
 
@@ -351,6 +374,21 @@ def _new_export_job_id() -> str:
 
 def _new_job_id() -> str:
     return f"vj_{int(time.time())}_{os.getpid()}"
+
+
+def _data_media_path(rel: str) -> Path | None:
+    """把 data 目录内的相对路径（如 images/x.png）解析成真实文件，越界返回 None。"""
+    s = str(rel or "").strip().replace("\\", "/")
+    if not s or s.startswith("/") or ":" in s or ".." in s.split("/"):
+        return None
+    base = Path(os.environ.get("BREEZE_DATA") or (_ROOT / "data")).resolve()
+    try:
+        target = (base / s).resolve()
+    except (OSError, ValueError):
+        return None
+    if target != base and not target.is_relative_to(base):
+        return None
+    return target if target.is_file() else None
 
 
 def _media_local_path(raw: str) -> str:
@@ -678,6 +716,63 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         _h_json(h, _all_models(mtype))
         return True
 
+    # ---- GET /api/videos/list —— 本机成片列表（超分选片用）----
+    if parts == ["api", "videos", "list"]:
+        from api import video_upscale
+        _h_json(h, {"ok": True, "items": video_upscale.list_videos()})
+        return True
+
+    # ---- GET /api/video/upscale/{job_id} —— 超分进度 ----
+    if len(parts) == 4 and parts[0:3] == ["api", "video", "upscale"]:
+        from api import video_upscale
+        try:
+            _h_json(h, {"ok": True, **video_upscale.status(parts[3])})
+        except video_upscale.UpscaleError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 404)
+        return True
+
+    # ---- GET /api/image/capabilities —— ControlNet / IP-Adapter 是否真可用 ----
+    if parts == ["api", "image", "capabilities"]:
+        from api import image_gen
+        try:
+            _h_json(h, {"ok": True, **image_gen.capabilities()})
+        except Exception as e:
+            _h_json(h, {"ok": False, "error": f"能力探测失败：{e}"}, 502)
+        return True
+
+    # ---- GET /api/images —— SD1.5 出图相册（最新在前）----
+    if parts == ["api", "images"]:
+        from api import image_gen
+        try:
+            limit = int(qs.get("limit", ["24"])[0])
+        except ValueError:
+            limit = 24
+        _h_json(h, {"ok": True, "items": image_gen.list_images(limit)})
+        return True
+
+    # ---- GET /api/comfy/templates/local —— 本机 ComfyUI 已有的工作流 ----
+    if parts == ["api", "comfy", "templates", "local"]:
+        from api import comfy_templates
+        _h_json(h, {"ok": True, "items": comfy_templates.local_list(),
+                    "workflows_dir": str(comfy_templates.workflows_dir())})
+        return True
+
+    # ---- GET /api/comfy/templates —— 官方模板库（本地索引缓存，可按关键词搜）----
+    if parts == ["api", "comfy", "templates"]:
+        from api import comfy_templates
+        try:
+            limit = int(qs.get("limit", ["60"])[0])
+        except ValueError:
+            limit = 60
+        try:
+            items = comfy_templates.search(qs.get("q", [""])[0], limit,
+                                           qs.get("media", [""])[0])
+            _h_json(h, {"ok": True, "count": len(items), "items": items,
+                        "workflows_dir": str(comfy_templates.workflows_dir())})
+        except comfy_templates.TemplateError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 502)
+        return True
+
     # ---- GET /api/routes (调试用) ----
     if parts == ["api", "routes"]:
         _h_json(h, {
@@ -841,6 +936,78 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             body = {}
     parts = [p for p in path.split("/") if p]
 
+    # ---- POST /api/video/upscale —— 视频超分（后台任务，逐帧进度）----
+    if parts == ["api", "video", "upscale"]:
+        from api import video_upscale
+        try:
+            job = video_upscale.start(str(body.get("file") or ""),
+                                      int(body.get("scale") or 2))
+            _h_json(h, {"ok": True, **job})
+        except video_upscale.UpscaleError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            _h_json(h, {"ok": False, "error": f"启动超分失败：{e}"}, 500)
+        return True
+
+    # ---- POST /api/image/reference —— 上传 ControlNet / IP-Adapter 参考图 ----
+    if parts == ["api", "image", "reference"]:
+        import panel as _panel
+        from api import image_gen
+        try:
+            _fields, files = _panel.parse_multipart(body_bytes, ctype)
+        except Exception as e:
+            _h_json(h, {"ok": False, "error": f"表单解析失败：{e}"}, 400)
+            return True
+        item = files.get("file") or (next(iter(files.values())) if files else None)
+        if not item:
+            _h_json(h, {"ok": False, "error": "没有收到文件（字段名用 file）"}, 400)
+            return True
+        fname, data = item
+        try:
+            _h_json(h, {"ok": True, **image_gen.save_reference(fname, data)})
+        except image_gen.ImageGenError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 400)
+        return True
+
+    # ---- POST /api/image/generate —— SD1.5 文生图（同步，单张约 30~60 秒）----
+    if parts == ["api", "image", "generate"]:
+        from api import image_gen
+        try:
+            meta = image_gen.generate(
+                prompt=str(body.get("prompt") or ""),
+                negative=str(body.get("negative") or ""),
+                width=body.get("width", 512),
+                height=body.get("height", 512),
+                steps=body.get("steps", 20),
+                cfg=body.get("cfg", 7.0),
+                seed=(body.get("seed") or None),
+                sampler=str(body.get("sampler") or "euler"),
+                scheduler=str(body.get("scheduler") or "normal"),
+                control_path=str(body.get("control_path") or ""),
+                control_strength=body.get("control_strength", 0.8),
+                control_low=body.get("control_low", 0.4),
+                control_high=body.get("control_high", 0.8),
+                ip_path=str(body.get("ip_path") or ""),
+                ip_weight=body.get("ip_weight", 0.8),
+            )
+            _h_json(h, {"ok": True, **meta})
+        except image_gen.ImageGenError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 400)
+        except Exception as e:
+            _h_json(h, {"ok": False, "error": f"出图失败：{e}"}, 500)
+        return True
+
+    # ---- POST /api/comfy/templates/{name}/download —— 单模板拉到本机 ----
+    if len(parts) == 5 and parts[0:3] == ["api", "comfy", "templates"] \
+            and parts[4] == "download":
+        from api import comfy_templates
+        try:
+            info = comfy_templates.download(parts[3])
+            _h_json(h, {"ok": True, **info})
+        except comfy_templates.TemplateError as e:
+            _h_json(h, {"ok": False, "error": str(e)}, 400)
+        return True
+
     # ---- POST /api/models —— 添加自定义模型 ----
     if parts == ["api", "models"]:
         name = str(body.get("name", "")).strip()
@@ -943,11 +1110,63 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
     if parts == ["api", "video", "generate"]:
         provider = body.get("provider", "jimeng")
         resolution = body.get("resolution", "720p")
-        duration = float(body.get("duration", 5))
+        try:
+            duration = float(body.get("duration", 5))
+        except (TypeError, ValueError):
+            _h_json(h, {"error": "duration 必须是数字（秒）"}, 400)
+            return True
         prompt = str(body.get("prompt", ""))
         image_url = str(body.get("image_url", ""))
         role_id = str(body.get("role_id") or "").strip()
+        image_path = str(body.get("image_path") or "").strip()
+        engine = str(body.get("engine") or "").strip().lower()
         from api.providers import GenRequest, ProviderError
+        # 本地免费通道的硬上限：Wan2.2 5B 121 帧 @24fps ≈ 5.04 秒，SVD 25 帧，
+        # 请求更长只会被静默截断（用户以为要了 20 秒，拿到的还是 5 秒），
+        # 所以在这里直接拒绝，而不是骗过去。
+        if not (0 < duration < 1e6):
+            _h_json(h, {"error": "duration 必须是大于 0 的有限秒数"}, 400)
+            return True
+        if provider != "comfyui" and engine:
+            _h_json(h, {"error": f"出片方案「{engine}」只用于本地免费通道（provider=comfyui）"}, 400)
+            return True
+        if provider == "comfyui":
+            if duration > 5.0:
+                _h_json(h, {
+                    "error": f"本地免费通道时长必须在 0–5 秒之间（这次请求 {duration:g} 秒）。"
+                             "要更长的片子，请用云端 provider，或把这段拆成多个镜头。"
+                }, 400)
+                return True
+            if engine not in ("", "svd"):
+                _h_json(h, {"error": f"未知的出片方案「{engine}」，目前只有默认（Wan2.2 5B）和 svd"}, 400)
+                return True
+            # SVD 只有 25 帧、播放帧率上限 24fps，最短只能 honest 地出 25/24≈1.04 秒；
+            # 更短的请求若放行会被静默拉成 1 秒以上（时长口径货不对板），所以直接拒绝。
+            if engine == "svd" and duration < 1.0:
+                _h_json(h, {"error": f"SVD 快出档最短 1 秒（25 帧 / 最高 24fps，这次请求 {duration:g} 秒）。"
+                                     "要更短的片段请用默认 5B 档。"}, 400)
+                return True
+            # image_url 直传 file: 也是合法首帧来源（批量与老调用方用它），别误拒
+            if engine == "svd" and not (image_path or role_id or image_url.startswith("file:")):
+                _h_json(h, {"error": "SVD 快出档是图生视频，需要先选一张首帧图"}, 400)
+                return True
+        # 图片工坊出的图直接当首帧：本地 5B 只认本机文件，这里把 data 相对路径
+        # 换成 file: 绝对路径，前端不用知道磁盘布局。
+        if image_path:
+            if role_id:
+                _h_json(h, {"error": "role_id 与 image_path 只能二选一"}, 400)
+                return True
+            if provider != "comfyui":
+                _h_json(h, {"error": "图片首帧目前只支持本地 ComfyUI（免费通道）"}, 400)
+                return True
+            src = _data_media_path(image_path)
+            if not src:
+                _h_json(h, {"error": "首帧图片不存在或路径非法（只接受 data 目录内文件）"}, 404)
+                return True
+            if src.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                _h_json(h, {"error": "首帧只接受 PNG / JPG / WEBP"}, 400)
+                return True
+            image_url = "file:" + str(src)
         # 角色参考图：传 role_id 即可，服务端从 roles.json 解析，
         # 前端不必自己拼 URL，也避免绕开授权校验。
         if role_id:
@@ -984,6 +1203,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             result = prov.generate(GenRequest(
                 prompt=prompt, image_url=image_url,
                 duration=duration, resolution=resolution,
+                engine=engine,
             ))
         except ProviderError as e:
             _h_json(h, {"error": str(e)}, 400)
@@ -1007,6 +1227,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             "prompt": prompt[:200],
             "resolution": resolution,
             "duration": duration,
+            "staged_image": getattr(result, "_bee_staged_image", ""),
         }
         _video_job_write(initial_job)
         # 后台线程：阻塞轮询。本地 ComfyUI 单卡跑 5 秒片子要几分钟，给 30 分钟；
@@ -1375,6 +1596,25 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         if provider != "comfyui" and not _get_key(provider):
             _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
             return True
+        # 批量端点也必须守同一条时长红线，否则 10 秒镜头会被 5B 静默截成 5 秒
+        if provider == "comfyui":
+            for i, shot in enumerate(shot_list):
+                # 必须显式取键：`x or 默认` 会把 0 / "" 当没传，静默改成 5 秒，
+                # 这正是单端点明令禁止的货不对板（单端点 0 会 400）。
+                raw = (shot or {}).get("duration")
+                if raw is None:
+                    raw = (shot or {}).get("duration_sec")
+                if raw is None:
+                    raw = 5
+                try:
+                    d = float(raw)
+                except (TypeError, ValueError):
+                    _h_json(h, {"error": f"第 {i + 1} 个镜头的 duration 不是数字"}, 400)
+                    return True
+                if not (0 < d <= 5.0):
+                    _h_json(h, {"error": f"本地免费通道单个镜头时长必须在 0–5 秒之间"
+                                        f"（第 {i + 1} 个镜头要了 {d:g} 秒）"}, 400)
+                    return True
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from api.providers import GenRequest, ProviderError
@@ -1395,10 +1635,15 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     _require_ref_consent(role)
                     img = (_ref_image_local(role) if provider == "comfyui"
                            else _ref_image_for_cloud(role))
+                raw_d = shot.get("duration")
+                if raw_d is None:
+                    raw_d = shot.get("duration_sec")
+                if raw_d is None:
+                    raw_d = 5
                 req = GenRequest(
                     prompt=str(shot.get("prompt") or ""),
                     image_url=img,
-                    duration=float(shot.get("duration") or shot.get("duration_sec") or 5),
+                    duration=float(raw_d),
                     resolution=str(shot.get("resolution") or "720p"),
                 )
                 result = prov.generate(req)
@@ -1410,6 +1655,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "created_at": datetime.datetime.now().isoformat(),
                     "poll_count": 0, "prompt": req.prompt[:200],
                     "resolution": req.resolution, "duration": req.duration,
+                    "staged_image": getattr(result, "_bee_staged_image", ""),
                     "shot_index": idx,
                 }
                 _video_job_write(initial)
@@ -1459,6 +1705,15 @@ def handle(h: BaseHTTPRequestHandler, method: str, path: str,
 # ------------------------------------------------------------------
 def handle_delete(h: BaseHTTPRequestHandler, path: str) -> bool:
     parts = [p for p in path.split("/") if p]
+
+    # ---- DELETE /api/images/{name} —— 删掉一张出图（含侧车元数据）----
+    if len(parts) == 3 and parts[0:2] == ["api", "images"]:
+        from api import image_gen
+        if not image_gen.delete_image(parts[2]):
+            _h_json(h, {"ok": False, "error": "图片不存在"}, 404)
+            return True
+        _h_json(h, {"ok": True})
+        return True
 
     # ---- DELETE /api/models/{id} ----
     if len(parts) == 3 and parts[0:2] == ["api", "models"]:

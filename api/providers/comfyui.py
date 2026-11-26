@@ -61,10 +61,22 @@ _MIN_FREE_VRAM_MB = 700
 # 永远装不进 8151MB，ComfyUI 靠 DynamicVRAM 换页跑。
 # 实测（2026-11-26）：
 #   空闲 5742MB → 稳定 2.03 秒/步；
-#   空闲 1154MB → 首步 117 秒、之后 8 秒/步，端到端 307 秒（可用）。
-# 所以门槛不能按「装得下」来卡（那 8GB 卡永远点不动），只拦「真的快没空间」。
-# 900MB 是实测可用值（1154MB）往下留的余量。
-_MIN_FREE_VRAM_MB_22 = 900
+#   空闲 1154MB → 8 秒/步，端到端 307 秒（可用）；
+#   空闲  742MB → 33.6 秒/步，30 分钟都跑不完 VAE 解码（实测失败）。
+# 所以门槛不能按「装得下」来卡（那 8GB 卡永远点不动），但也绝不能低到 742MB 以下
+# 那种必然换页卡死的区间。2500MB 在「已知可用值 1154MB」之上留足余量。
+_MIN_FREE_VRAM_MB_I2V = 2500
+
+# ---- SVD XT 1.1（快出档，第二个动作方案）----
+# 单文件 4.56GB（UNet 1428 / VAE 372 / CLIP-Vision 646 个张量，全 F16），
+# 8GB 卡能整份驻留，不用像 5B 那样全程换页。官方 video_svd 模板参数：
+# 25 帧（模型训练上限）/ motion_bucket_id=127 / steps=20 / cfg=2.5 /
+# euler+karras / VideoLinearCFGGuidance min_cfg=1.0。
+_SVD_CKPT = os.environ.get("BREEZE_COMFYUI_SVD", "svd_xt_1_1.safetensors")
+_SVD_FRAMES = 25
+_SVD_STEPS = int(os.environ.get("BREEZE_COMFYUI_SVD_STEPS") or 20)
+_SVD_CFG = float(os.environ.get("BREEZE_COMFYUI_SVD_CFG") or 2.5)
+_SVD_MOTION = int(os.environ.get("BREEZE_COMFYUI_SVD_MOTION") or 127)
 # 语音合成服务（7860）的「卸下模型」接口：8GB 卡上 TTS 常驻约 5.9GB，
 # 出片前先让它卸卡，出完片用户的下一句合成会自动重载。
 _TTS_UNLOAD_URL = (os.environ.get("BREEZE_TTS_UNLOAD_URL")
@@ -141,23 +153,35 @@ class ComfyUIProvider(BaseProvider):
     # 对外接口
     # ------------------------------------------------------------------
     def generate(self, req: GenRequest) -> GenResult:
-        if not req.prompt.strip():
-            raise ProviderError("提示词不能为空")
-
         raw_img = str(getattr(req, "image_url", "") or "").strip()
         is_i2v = raw_img.startswith("file:")
-        # 带图走 5B（fp8 UNET 5GB + VAE 1.4GB），显存门槛比 1.3B 高得多
-        self._require_online(_MIN_FREE_VRAM_MB_22 if is_i2v else _MIN_FREE_VRAM_MB)
+        engine = str(getattr(req, "engine", "") or "").strip().lower()
+        use_svd = is_i2v and engine == "svd"
+        # SVD 没有文本条件：空提示词是合法的，别拿 5B 的规则拦它
+        if not req.prompt.strip() and not use_svd:
+            raise ProviderError("提示词不能为空")
+        if is_i2v:
+            # 图生视频要独占大半张卡：先清掉 ComfyUI 自己缓存的上一单权重（去掉
+            # --disable-smart-memory 后它会一直把模型留在显存里）。不清的话
+            # 实测提交时只剩 742MB，5B 全程换页、30 分钟都出不来。
+            self._flush_comfy_cache()
+        # 带图走 5B/SVD，显存门槛比 1.3B 高得多
+        self._require_online(_MIN_FREE_VRAM_MB_I2V if is_i2v else _MIN_FREE_VRAM_MB)
 
         if is_i2v:
-            # 带参考图：Wan2.2 TI2V-5B 真图生视频。慢但脸固定。
+            # 带参考图：默认 Wan2.2 TI2V-5B（慢但脸稳定），
+            # 或 engine=svd 走 SVD XT 1.1（快出档，4.56GB 整份驻留）。
             src = Path(raw_img[5:])
             if not src.is_file():
                 raise ProviderError(f"参考图文件不存在：{src}")
-            w, h = self._size_for_22(req.resolution)
+            w, h = (1024, 576) if use_svd else self._size_for_22(req.resolution)
             prepared = self._prepare_image(src, w, h)
-            image_name = self._upload_image(prepared)
-            wf = self._build_workflow_22(req, image_name)
+            try:
+                image_name = self._upload_image(prepared)
+            finally:
+                prepared.unlink(missing_ok=True)   # 临时裁剪图用完即删
+            wf = (self._build_workflow_svd(req, image_name) if use_svd
+                  else self._build_workflow_22(req, image_name))
         elif raw_img:
             raise ProviderError(
                 "本地出片只接受本机参考图（file: 路径）；外链图片请先下载并上传到角色库")
@@ -177,7 +201,11 @@ class ComfyUIProvider(BaseProvider):
         pid = data.get("prompt_id")
         if not pid:
             raise ProviderError(f"ComfyUI 没返回 prompt_id：{data}")
-        return GenResult(job_id=str(pid), status="running")
+        result = GenResult(job_id=str(pid), status="running")
+        if is_i2v:
+            # 记下塞进 ComfyUI input 的参考图副本名，出片结束后删掉（零残留）
+            result._bee_staged_image = image_name
+        return result
 
     def poll(self, result, job_id: str) -> GenResult:
         try:
@@ -193,6 +221,8 @@ class ComfyUIProvider(BaseProvider):
             # 我们提交的 prompt 就彻底没了，/history 永远为空。
             # 不识别这种情况的话，前端会傻等满 30 分钟才报超时——用户以为卡死。
             if self._lost(result, job_id):
+                self._drop_staged_image(result)
+                self._release_if_idle()
                 return GenResult(job_id=job_id, status="failed",
                                  error="本地出片服务中途重启过，这次任务已经丢失（不会自动续跑）。"
                                        "请重新点生成。")
@@ -205,18 +235,59 @@ class ComfyUIProvider(BaseProvider):
             for m in msgs:
                 if isinstance(m, (list, tuple)) and len(m) > 1 and m[0] == "execution_error":
                     detail = str((m[1] or {}).get("exception_message") or "")[:300]
+            self._drop_staged_image(result)
+            self._release_if_idle()
             return GenResult(job_id=job_id, status="failed", error=detail or "ComfyUI 执行出错")
 
         outputs = entry.get("outputs") or {}
         info = self._pick_video(outputs)
         if not info:
             # 完成了但没产物：把 outputs 结构带出来，便于定位
+            self._drop_staged_image(result)
+            self._release_if_idle()
             return GenResult(job_id=job_id, status="failed",
                              error=f"任务完成但没有视频产物：{str(outputs)[:200]}")
 
         local_url = self._download(job_id, info)
+        self._drop_staged_image(result)
         self._release_if_idle()
         return GenResult(job_id=job_id, status="succeeded", video_url=local_url, actual_cost=0.0)
+
+    def drop_staged(self, name: str) -> None:
+        """按文件名删掉上传进 ComfyUI input 的参考图副本（面板侧超时收尾也要用）。"""
+        name = str(name or "")
+        if not name:
+            return
+        root = Path(os.environ.get("BREEZE_COMFYUI_INPUT") or "F:/ComfyUI-core/input")
+        try:
+            (root / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _drop_staged_image(self, result) -> None:
+        """删掉上传进 ComfyUI input 目录的参考图副本（出片终态后调用，零残留）。"""
+        name = getattr(result, "_bee_staged_image", "")
+        if not name:
+            return
+        result._bee_staged_image = ""
+        self.drop_staged(name)
+
+    def release_if_idle(self) -> None:
+        """供面板侧在轮询超时等收尾场景调用：队列空了就请 ComfyUI 卸模型。"""
+        self._release_if_idle()
+
+    def _flush_comfy_cache(self) -> None:
+        """清空 ComfyUI 自己缓存/占用的显存（卸模型 + 释放显存池）。
+
+        去掉 --disable-smart-memory 之后，ComfyUI 会把上一单（如 SD1.5 图片链）
+        的权重一直留在显存里；5B 带图出片前不清，提交时只剩几百 MB，
+        每步从 2 秒恶化到 33 秒。
+        """
+        try:
+            requests.post(f"{self.base_url}/free",
+                          json={"unload_models": True, "free_memory": True}, timeout=60)
+        except requests.RequestException:
+            pass
 
     def _release_if_idle(self) -> None:
         """出片完就把 ComfyUI 的模型请出显存。
@@ -231,11 +302,7 @@ class ComfyUIProvider(BaseProvider):
             return
         if (q.get("queue_running") or []) or (q.get("queue_pending") or []):
             return
-        try:
-            requests.post(f"{self.base_url}/free",
-                          json={"unload_models": True, "free_memory": True}, timeout=30)
-        except requests.RequestException:
-            pass
+        self._flush_comfy_cache()
 
     # ------------------------------------------------------------------
     # 内部
@@ -469,6 +536,45 @@ class ComfyUIProvider(BaseProvider):
             "11": {"class_type": "SaveVideo",
                    "inputs": {"video": ["10", 0], "filename_prefix": "bee-studio-5b",
                               "format": "mp4", "codec": "h264"}},
+        }
+
+    def _build_workflow_svd(self, req: GenRequest, image_name: str) -> dict:
+        """SVD XT 1.1 快出档（官方 video_svd 模板）。
+
+        25 帧是 SVD 的训练上限，播放帧率按请求时长反推（5 秒 → 5fps），
+        避免「要 5 秒只给 4.17 秒」的货不对板。SVD 没有文本条件，
+        prompt 只用于界面展示，不进工作流。
+        """
+        # 上限与路由器的 5 秒红线保持一致：真放进来超 5 秒的请求，也不许静默改短
+        dur = max(1.0, min(float(req.duration or 5.0), 5.0))
+        # 25 帧 / 时长 = 播放帧率；上限 24fps，否则 1 秒的请求会被拉成 3 秒
+        fps = max(1, min(24, int(round(_SVD_FRAMES / dur))))
+        seed = int(req.seed if req.seed is not None else time.time()) % (2 ** 31)
+        return {
+            "1": {"class_type": "ImageOnlyCheckpointLoader",
+                  "inputs": {"ckpt_name": _SVD_CKPT}},
+            "2": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+            # clip_vision / vae 都从同一个 checkpoint 拆出来（槽位 1 / 2）
+            "3": {"class_type": "SVD_img2vid_Conditioning",
+                  "inputs": {"clip_vision": ["1", 1], "init_image": ["2", 0],
+                             "vae": ["1", 2], "width": 1024, "height": 576,
+                             "video_frames": _SVD_FRAMES,
+                             "motion_bucket_id": _SVD_MOTION,
+                             "fps": fps, "augmentation_level": 0.0}},
+            "4": {"class_type": "VideoLinearCFGGuidance",
+                  "inputs": {"model": ["1", 0], "min_cfg": 1.0}},
+            "5": {"class_type": "KSampler",
+                  "inputs": {"model": ["4", 0], "seed": seed, "steps": _SVD_STEPS,
+                             "cfg": _SVD_CFG, "sampler_name": "euler",
+                             "scheduler": "karras",
+                             "positive": ["3", 0], "negative": ["3", 1],
+                             "latent_image": ["3", 2], "denoise": 1.0}},
+            "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+            "7": {"class_type": "CreateVideo",
+                  "inputs": {"images": ["6", 0], "fps": float(fps)}},
+            "8": {"class_type": "SaveVideo",
+                  "inputs": {"video": ["7", 0], "filename_prefix": "bee-studio-svd",
+                             "format": "mp4", "codec": "h264"}},
         }
 
     @staticmethod

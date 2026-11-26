@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小蜜蜂 · 图片工坊 — SD1.5 出图与 ComfyUI 工作流</title>
+<link rel="stylesheet" href="/shared/tokens.css">
+<script src="/shared/ui.js"></script>
+<script src="/shared/topbar.js" defer></script>
+<style>
+/* 页面私有样式；令牌 / 顶栏 / 卡片 / 按钮 / toast 均由 shared 提供 */
+body { overflow: hidden; }
+.app {
+  height: calc(100vh - var(--h-topbar));
+  display: grid; grid-template-columns: 392px minmax(0, 1fr);
+  gap: var(--space-4); padding: var(--space-4) var(--space-5);
+  overflow: hidden; position: relative; z-index: 1;
+}
+@media (max-width: 1100px) { .app { grid-template-columns: 1fr; overflow: auto; height: auto; } }
+
+.rail { display: flex; flex-direction: column; overflow: hidden; animation: rise 260ms cubic-bezier(.2,.8,.2,1) both; }
+.rail-head { padding: var(--space-4) var(--space-5) var(--space-3); border-bottom: 1px solid var(--border); }
+.rail-head h1 { font-size: var(--font-lg); font-weight: 650; letter-spacing: .2px; }
+.rail-head p { color: var(--text-faint); font-size: var(--font-xs); margin-top: 2px; }
+.rail-body { padding: var(--space-4) var(--space-5) var(--space-5); overflow-y: auto; }
+
+.field { margin-bottom: var(--space-4); }
+.field > label, .field-label {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: var(--font-sm); font-weight: 600; margin-bottom: var(--space-2);
+}
+.field-label .tip { font-weight: 400; color: var(--text-faint); font-size: var(--font-xs); }
+textarea, input[type="text"], input[type="number"] {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 10px 12px; resize: vertical;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+textarea { min-height: 104px; line-height: 1.55; }
+textarea::placeholder, input::placeholder { color: var(--text-faint); }
+textarea:focus, input:focus {
+  outline: none; border-color: var(--primary); background: var(--panel);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.counter { text-align: right; color: var(--text-faint); font-size: var(--font-xs); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  padding: 6px 10px; font-size: var(--font-xs);
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: var(--panel); color: var(--text-muted); position: relative; overflow: hidden;
+  transition: background var(--transition), border-color var(--transition), color var(--transition), transform 120ms ease;
+}
+.chip:hover { background: var(--panel-2); color: var(--text); }
+.chip:active { transform: scale(.96); }
+.chip[aria-pressed="true"] { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); font-weight: 600; }
+
+.segmented { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; background: var(--panel-2); padding: 4px; border-radius: var(--radius-md); }
+.segmented button {
+  border: none; background: transparent; border-radius: 6px; padding: 8px 4px;
+  font-size: var(--font-xs); color: var(--text-muted);
+  transition: background var(--transition), color var(--transition), box-shadow var(--transition), transform 120ms ease;
+}
+.segmented button:active { transform: scale(.97); }
+.segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+
+.slider-row { display: flex; align-items: center; gap: var(--space-3); }
+input[type="range"] { flex: 1; accent-color: var(--primary); height: 4px; cursor: pointer; }
+.slider-val { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-size: var(--font-sm); color: var(--text-muted); }
+.seed-row { display: flex; gap: 8px; }
+.seed-row input { flex: 1; font-variant-numeric: tabular-nums; }
+
+details.advanced { border-top: 1px solid var(--border); padding-top: var(--space-3); margin-bottom: var(--space-4); }
+details.advanced summary {
+  cursor: pointer; font-size: var(--font-sm); font-weight: 600; color: var(--text-muted);
+  list-style: none; display: flex; align-items: center; gap: 6px;
+}
+details.advanced summary::-webkit-details-marker { display: none; }
+details.advanced summary::before { content: "›"; display: inline-block; transition: transform var(--transition); color: var(--text-faint); }
+details.advanced[open] summary::before { transform: rotate(90deg); }
+details.advanced .inner { padding-top: var(--space-3); }
+
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; animation: spin .8s linear infinite; }
+.hint-line { margin-top: var(--space-3); font-size: var(--font-xs); color: var(--text-faint); display: flex; gap: 6px; align-items: flex-start; line-height: 1.5; }
+#genBtn { width: 100%; }
+
+.main { min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); overflow: hidden; animation: rise 320ms cubic-bezier(.2,.8,.2,1) both; }
+.main-head { display: flex; align-items: center; gap: var(--space-3); }
+.view-switch {
+  display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border);
+  padding: 4px; border-radius: var(--radius-pill); box-shadow: var(--shadow);
+}
+.view-switch button {
+  border: none; background: transparent; border-radius: var(--radius-pill);
+  padding: 7px 16px; font-size: var(--font-sm); color: var(--text-muted);
+  transition: background var(--transition), color var(--transition), transform 120ms ease;
+}
+.view-switch button:active { transform: scale(.97); }
+.view-switch button[aria-pressed="true"] { background: var(--primary-soft); color: var(--primary); font-weight: 650; }
+.main-status { margin-left: auto; font-size: var(--font-xs); color: var(--text-faint); display: flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+.dot.busy { background: var(--primary); animation: pulse 1.4s ease-in-out infinite; }
+
+.view { display: none; flex: 1; min-height: 0; }
+.view.active { display: flex; flex-direction: column; gap: var(--space-4); }
+
+/* 画布 */
+.stage-wrap { flex: 1; min-height: 240px; display: flex; align-items: center; justify-content: center; padding: var(--space-4); position: relative; overflow: hidden; }
+.stage {
+  position: relative; aspect-ratio: 1 / 1; max-height: 100%;
+  max-width: min(100%, 560px); width: auto; height: 100%;
+  display: grid; place-items: center; border-radius: var(--radius-lg); overflow: hidden;
+  background:
+    linear-gradient(45deg, var(--panel-2) 25%, transparent 25%) 0 0/22px 22px,
+    linear-gradient(-45deg, var(--panel-2) 25%, transparent 25%) 0 11px/22px 22px,
+    linear-gradient(45deg, transparent 75%, var(--panel-2) 75%) 11px -11px/22px 22px,
+    linear-gradient(-45deg, transparent 75%, var(--panel-2) 75%) -11px 0/22px 22px,
+    var(--panel-3);
+}
+.stage img { width: 100%; height: 100%; object-fit: contain; display: block; animation: reveal 340ms cubic-bezier(.2,.8,.2,1) both; }
+.stage-empty { text-align: center; color: var(--text-faint); padding: var(--space-6); display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
+.stage-empty .glyph {
+  width: 56px; height: 56px; border-radius: var(--radius-lg); display: grid; place-items: center;
+  font-size: 26px; background: var(--panel); border: 1px solid var(--border);
+  transition: transform 260ms cubic-bezier(.2,.8,.2,1);
+}
+.stage-empty:hover .glyph { transform: translateY(-2px) rotate(-3deg); }
+.stage-empty strong { color: var(--text-muted); font-weight: 600; font-size: var(--font-sm); }
+
+.generating { position: absolute; inset: 0; display: grid; place-items: center; background: var(--panel-2); }
+.generating::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.55) 50%, transparent 70%);
+  transform: translateX(-100%); animation: sweep 1.6s ease-in-out infinite;
+}
+[data-theme="dark"] .generating::after { background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.08) 50%, transparent 70%); }
+.aperture { position: relative; width: 64px; height: 64px; z-index: 1; }
+.aperture span { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--primary); animation: spin 1.1s linear infinite; }
+.aperture span:nth-child(2) { inset: 9px; animation-duration: 1.6s; animation-direction: reverse; opacity: .7; }
+.aperture span:nth-child(3) { inset: 18px; animation-duration: 2.1s; opacity: .45; }
+.gen-text { position: absolute; bottom: 16px; left: 0; right: 0; text-align: center; z-index: 1; }
+.gen-text b { display: block; font-size: var(--font-sm); font-weight: 600; }
+.gen-text small { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+.stage-error { padding: var(--space-6); text-align: center; max-width: 420px; }
+.stage-error .badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(179,38,30,.10); color: var(--danger); padding: 4px 10px; border-radius: var(--radius-pill); font-size: var(--font-xs); font-weight: 600; margin-bottom: var(--space-3); }
+.stage-error p { color: var(--text-muted); font-size: var(--font-sm); line-height: 1.6; margin-bottom: var(--space-4); }
+
+.result-bar { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; padding: var(--space-3) var(--space-4); }
+.result-meta { min-width: 0; flex: 1; }
+.result-meta .prompt { font-size: var(--font-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-meta .nums { font-size: var(--font-xs); color: var(--text-faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.result-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+.gallery-card { flex-shrink: 0; }
+.gallery-head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-4) var(--space-2); }
+.gallery-head h2 { font-size: var(--font-sm); font-weight: 650; }
+.gallery-head .count { color: var(--text-faint); font-size: var(--font-xs); font-weight: 400; margin-left: 6px; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; padding: 0 var(--space-4) var(--space-4); max-height: 190px; overflow-y: auto; }
+.thumb {
+  position: relative; aspect-ratio: 1 / 1; border-radius: var(--radius-md); overflow: hidden;
+  border: 1px solid var(--border); background: var(--panel-2); cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition), border-color var(--transition);
+}
+.thumb:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--border-strong); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 320ms cubic-bezier(.2,.8,.2,1); }
+.thumb:hover img { transform: scale(1.05); }
+.thumb::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(to top, rgba(0,0,0,.28), transparent 45%);
+  opacity: 0; transition: opacity var(--transition);
+}
+.thumb:hover::after { opacity: 1; }
+.thumb .del {
+  position: absolute; top: 4px; right: 4px; width: 24px; height: 24px; z-index: 2;
+  display: grid; place-items: center; border: none; border-radius: 50%;
+  background: rgba(0,0,0,.62); color: #fff; font-size: 12px;
+  opacity: 0; transition: opacity var(--transition), background var(--transition);
+}
+.thumb:hover .del, .thumb .del:focus-visible { opacity: 1; }
+.thumb .del.confirm { background: var(--danger); opacity: 1; width: auto; border-radius: var(--radius-pill); padding: 0 8px; font-size: 11px; }
+.gallery-empty { grid-column: 1 / -1; color: var(--text-faint); font-size: var(--font-xs); padding: var(--space-4); text-align: center; }
+
+/* 参考图（ControlNet / IP-Adapter） */
+.ref-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ref-card {
+  position: relative; display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md);
+  background: var(--panel); cursor: pointer; text-align: left;
+  transition: border-color var(--transition), background var(--transition), transform 120ms ease;
+}
+.ref-card:hover { background: var(--panel-2); }
+.ref-card:active { transform: scale(.99); }
+.ref-card.has-file { border-style: solid; border-color: var(--primary); background: var(--primary-soft); }
+.ref-card[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.ref-thumb {
+  height: 60px; border-radius: var(--radius-sm); background: var(--panel-2);
+  display: grid; place-items: center; overflow: hidden;
+  font-size: 20px; color: var(--text-faint);
+}
+.ref-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ref-info b { display: block; font-size: var(--font-xs); font-weight: 650; }
+.ref-info span { font-size: 11px; color: var(--text-faint); }
+.ref-clear {
+  position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
+  border: none; border-radius: 50%; background: rgba(0,0,0,.62); color: #fff;
+  font-size: 11px; display: grid; place-items: center; opacity: 0;
+  transition: opacity var(--transition);
+}
+.ref-card:hover .ref-clear, .ref-clear:focus-visible { opacity: 1; }
+.ref-opts { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: var(--font-xs); color: var(--text-muted); }
+.ref-opts input[type="range"] { flex: 1; }
+.ref-opts .v { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.cap-note { margin-top: 6px; font-size: 11px; color: var(--text-faint); line-height: 1.5; }
+
+/* 首帧生成视频对话框 */
+.dlg { border: none; padding: 0; border-radius: var(--radius-xl); background: var(--panel);
+  color: var(--text); box-shadow: 0 18px 60px rgba(0,0,0,.35);
+  width: min(560px, 92vw);
+  /* 窗口矮时不能把操作区顶出可视范围：整体限高，内容区自己滚，操作条贴底 */
+  max-height: min(88vh, 760px); display: flex; flex-direction: column; }
+.dlg::backdrop { background: rgba(15,16,19,.55); backdrop-filter: blur(3px); }
+.dlg-head { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); }
+.dlg-head h3 { font-size: var(--font-base); font-weight: 650; }
+.dlg-main { padding: 14px 18px 0; display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto; min-height: 0; }
+.dlg-preview { display: flex; gap: 12px; align-items: center; }
+.dlg-preview img { width: 84px; height: 84px; object-fit: cover; border-radius: var(--radius-md); border: 1px solid var(--border); }
+.dlg-preview .meta { font-size: var(--font-xs); color: var(--text-faint); line-height: 1.6; }
+.dlg-main label { font-size: var(--font-sm); font-weight: 600; }
+.dlg-main textarea { min-height: 72px; }
+.dlg-row { display: flex; align-items: center; gap: 10px; font-size: var(--font-xs); color: var(--text-faint); }
+.dlg-row select { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 6px 8px; }
+.dlg-status { font-size: var(--font-xs); color: var(--text-muted); min-height: 18px; font-variant-numeric: tabular-nums; }
+.dlg-status.err { color: var(--danger); }
+.dlg-main video { width: 100%; border-radius: var(--radius-md); background: #000; max-height: 300px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap;
+  position: sticky; bottom: 0; margin-top: 2px; padding: 10px 0 14px;
+  background: var(--panel); border-top: 1px solid var(--border); }
+/* 方案分段控件：互斥两选一，就地切换，选中态靠背景与字重而不是只靠颜色 */
+.seg2 { display: inline-grid; grid-auto-flow: column; gap: 2px; padding: 3px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.seg2 button { min-height: 30px; padding: 0 12px; border: none; border-radius: 6px;
+  background: transparent; color: var(--text-muted); font-size: var(--font-xs);
+  transition: background var(--transition), color var(--transition), box-shadow var(--transition); }
+.seg2 button:hover { color: var(--text); }
+.seg2 button[aria-pressed="true"] { background: var(--panel); color: var(--text);
+  font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.10); }
+.seg2 button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+/* 暗色下白色卡片换不来层次（#17181C 压在 #1E2025 上只有 1.09:1），
+   改用抬升面 + 描边，让选中态照样一眼可见 */
+[data-theme="dark"] .seg2 button[aria-pressed="true"] {
+  background: var(--panel-3);
+  box-shadow: 0 1px 2px rgba(0,0,0,.45), inset 0 0 0 1px var(--border-strong);
+}
+.dur-chip { padding: 3px 9px; border-radius: var(--radius-pill); background: var(--panel-2);
+  border: 1px solid var(--border); color: var(--text-muted); }
+.dlg-note { margin: -2px 0 0; font-size: 11px; color: var(--text-faint); line-height: 1.55; }
+/* Stability AI Community License 要求在产品界面标注来源，SVD 档才显示 */
+.dlg-attr { margin: -6px 0 0; font-size: 11px; color: var(--text-faint); opacity: .85; }
+/* 不确定进度：本地出片不知道第几步，用循环条而不是假百分比 */
+.dlg-progress { display: none; height: 3px; border-radius: 2px; background: var(--panel-2); overflow: hidden; }
+.dlg-progress.on { display: block; }
+.dlg-progress span { display: block; width: 38%; height: 100%; border-radius: 2px;
+  background: var(--primary); animation: dlg-slide 1.4s cubic-bezier(.4,0,.2,1) infinite; }
+@keyframes dlg-slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+@media (prefers-reduced-motion: reduce) {
+  .dlg-progress span { animation: none; width: 100%; opacity: .45; }
+  .dlg, .dlg * { animation: none !important; transition: none !important; }
+}
+
+/* 工作流模板库 */
+.tpl-toolbar { display: flex; gap: var(--space-3); align-items: center; padding: var(--space-4); flex-wrap: wrap; }
+.tpl-search { flex: 1; min-width: 220px; position: relative; }
+.tpl-search input { padding-left: 34px; }
+.tpl-search .mag { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--text-faint); font-size: 13px; }
+.tpl-local { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 0 var(--space-4) var(--space-3); font-size: var(--font-xs); color: var(--text-faint); }
+.tpl-local .pill { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 3px 9px; color: var(--text-muted); }
+.tpl-dir { padding: 0 var(--space-4) var(--space-3); font-size: 11px; color: var(--text-faint); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; word-break: break-all; }
+.tpl-list { overflow-y: auto; padding: 0 var(--space-4) var(--space-4); display: flex; flex-direction: column; gap: 8px; }
+.tpl-item {
+  display: grid; grid-template-columns: 1fr auto; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); background: var(--panel);
+  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+  animation: rise 220ms cubic-bezier(.2,.8,.2,1) both;
+}
+.tpl-item:hover { border-color: var(--border-strong); background: var(--panel-2); transform: translateY(-1px); }
+.tpl-item h3 { font-size: var(--font-sm); font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tpl-item .desc { font-size: var(--font-xs); color: var(--text-faint); margin-top: 4px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tpl-badges { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+.tag { font-size: 11px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--panel-2); color: var(--text-muted); border: 1px solid var(--border); }
+.tag.ok { background: rgba(27,110,75,.10); color: var(--success); border-color: transparent; }
+.tag.warn { background: rgba(var(--accent-rgb), .12); color: var(--primary); border-color: transparent; }
+.tpl-action { display: flex; align-items: center; }
+.tpl-action .done { color: var(--success); font-size: var(--font-xs); display: flex; align-items: center; gap: 4px; }
+</style>
+</head>
+<body class="ambient">
+
+<bee-topbar active="image"></bee-topbar>
+
+<div class="app">
+  <aside class="rail card">
+    <div class="rail-head">
+      <h1>SD1.5 文生图</h1>
+      <p>本机显卡出图 · 零单价 · 单张约 30–60 秒</p>
+    </div>
+    <div class="rail-body">
+      <div class="field">
+        <label for="prompt">提示词 <span class="tip">英文更准</span></label>
+        <textarea id="prompt" maxlength="1200" placeholder="a honey bee hovering over a sunflower, macro photo, golden hour, shallow depth of field"></textarea>
+        <div class="counter"><span id="promptCount">0</span>/1200</div>
+        <div class="chips" id="presets" style="margin-top:8px">
+          <button class="chip" data-prompt="portrait of a young woman, natural window light, 85mm lens, soft bokeh, film grain, highly detailed">人像</button>
+          <button class="chip" data-prompt="minimal product photography of a ceramic coffee cup on a stone pedestal, soft studio lighting, clean background, high detail">产品</button>
+          <button class="chip" data-prompt="misty mountain valley at sunrise, layered ridges, warm light, ultra detailed landscape photograph">风景</button>
+          <button class="chip" data-prompt="storybook illustration of a fox reading under a lantern, warm palette, clean line art, textured paper">插画</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">画面尺寸 <span class="tip">SD1.5 最佳 512</span></span>
+        <div class="segmented" id="sizes" role="group" aria-label="画面尺寸">
+          <button data-w="512" data-h="512" aria-pressed="true">512²</button>
+          <button data-w="512" data-h="768" aria-pressed="false">竖版</button>
+          <button data-w="768" data-h="512" aria-pressed="false">横版</button>
+          <button data-w="640" data-h="640" aria-pressed="false">640²</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">参考图 <span class="tip">可选 · 本机模型</span></span>
+        <div class="ref-grid">
+          <label class="ref-card" id="ctrlCard" for="ctrlFile" aria-disabled="false">
+            <input type="file" id="ctrlFile" accept="image/png,image/jpeg,image/webp" hidden>
+            <div class="ref-thumb" id="ctrlThumb">＋</div>
+            <div class="ref-info"><b>结构参考</b><span>ControlNet · Canny</span></div>
+            <button class="ref-clear" id="ctrlClear" type="button" title="移除" hidden>✕</button>
+          </label>
+          <label class="ref-card" id="ipCard" for="ipFile" aria-disabled="false">
+            <input type="file" id="ipFile" accept="image/png,image/jpeg,image/webp" hidden>
+            <div class="ref-thumb" id="ipThumb">＋</div>
+            <div class="ref-info"><b>人物 / 风格</b><span>IP-Adapter 参考</span></div>
+            <button class="ref-clear" id="ipClear" type="button" title="移除" hidden>✕</button>
+          </label>
+        </div>
+        <div class="ref-opts" id="ctrlOpts" hidden>
+          <span>结构强度</span>
+          <input type="range" id="ctrlStrength" min="0.2" max="1.5" step="0.05" value="0.8" aria-label="ControlNet 强度">
+          <span class="v" id="ctrlStrengthVal">0.8</span>
+        </div>
+        <div class="ref-opts" id="ipOpts" hidden>
+          <span>参考权重</span>
+          <input type="range" id="ipWeight" min="0.2" max="1.4" step="0.05" value="0.8" aria-label="IP-Adapter 权重">
+          <span class="v" id="ipWeightVal">0.8</span>
+        </div>
+        <div class="cap-note" id="capNote">正在检查本机模型…</div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">采样步数 <span class="tip" id="stepsTip">20 步，质量与速度平衡</span></span>
+        <div class="slider-row">
+          <input type="range" id="steps" min="8" max="40" step="1" value="20" aria-label="采样步数">
+          <span class="slider-val" id="stepsVal">20</span>
+        </div>
+      </div>
+
+      <details class="advanced">
+        <summary>高级参数</summary>
+        <div class="inner">
+          <div class="field">
+            <span class="field-label">提示词引导强度 CFG <span class="tip" id="cfgTip">7.0</span></span>
+            <div class="slider-row">
+              <input type="range" id="cfg" min="2" max="15" step="0.5" value="7" aria-label="CFG 引导强度">
+              <span class="slider-val" id="cfgVal">7.0</span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="seed">随机种子</label>
+            <div class="seed-row">
+              <input type="number" id="seed" placeholder="留空 = 每次随机" min="0" step="1">
+              <button class="btn-ghost" id="diceBtn" title="随机种子" aria-label="随机种子">🎲</button>
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label for="negative">负面提示词</label>
+            <textarea id="negative" style="min-height:72px" placeholder="留空使用默认负面词（压制畸形、水印、文字）"></textarea>
+          </div>
+        </div>
+      </details>
+
+      <button class="btn-primary" id="genBtn"><span id="genLabel">开始生成</span></button>
+      <div class="hint-line">
+        <span>ⓘ</span>
+        <span>生成前后会自动让语音模型让出显存；本机 ComfyUI 未启动时会直接报错，不会空转。</span>
+      </div>
+    </div>
+  </aside>
+
+  <section class="main">
+    <div class="main-head">
+      <div class="view-switch" role="tablist" aria-label="视图">
+        <button id="tabCreate" role="tab" aria-selected="true" aria-pressed="true">出图</button>
+        <button id="tabTemplates" role="tab" aria-selected="false" aria-pressed="false">ComfyUI 工作流</button>
+      </div>
+      <div class="main-status"><span class="dot" id="statusDot"></span><span id="statusText">就绪</span></div>
+    </div>
+
+    <div class="view active" id="viewCreate">
+      <div class="card stage-wrap">
+        <div class="stage" id="stage">
+          <div class="stage-empty" id="stageEmpty">
+            <div class="glyph">🖼️</div>
+            <strong>描述你想看到的画面</strong>
+            <span>在左侧写提示词，点「开始生成」</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card result-bar" id="resultBar" style="display:none">
+        <div class="result-meta">
+          <div class="prompt" id="resultPrompt"></div>
+          <div class="nums" id="resultNums"></div>
+        </div>
+        <div class="result-actions">
+          <button class="btn-ghost" id="videoBtn">🎬 生成视频</button>
+          <a class="btn-ghost" id="downloadBtn" download>⬇️ 下载</a>
+          <button class="btn-ghost" id="reuseBtn">↺ 复用参数</button>
+          <button class="btn-ghost danger" id="deleteBtn">🗑 删除</button>
+        </div>
+      </div>
+
+      <div class="card gallery-card">
+        <div class="gallery-head">
+          <h2>相册 <span class="count" id="galleryCount">0 张</span></h2>
+          <button class="btn-ghost" id="refreshBtn" title="刷新相册">⟳ 刷新</button>
+        </div>
+        <div class="gallery" id="gallery"></div>
+      </div>
+    </div>
+
+    <div class="view" id="viewTemplates">
+      <div class="card" style="display:flex;flex-direction:column;flex:1;min-height:0">
+        <div class="tpl-toolbar">
+          <div class="tpl-search">
+            <span class="mag">🔍</span>
+            <input type="text" id="tplQuery" placeholder="搜索工作流：upscale / sdxl / controlnet / video…" aria-label="搜索工作流">
+          </div>
+          <div class="view-switch" id="mediaFilter" style="box-shadow:none">
+            <button data-media="" aria-pressed="true">全部</button>
+            <button data-media="image" aria-pressed="false">图片</button>
+            <button data-media="video" aria-pressed="false">视频</button>
+          </div>
+        </div>
+        <div class="tpl-local" id="tplLocal">本机已有：加载中…</div>
+        <div class="tpl-dir" id="tplDir"></div>
+        <div class="tpl-list" id="tplList"></div>
+        <div class="hint-line" style="padding:0 16px 14px">
+          <span>ⓘ</span>
+          <span>工作流来自 Comfy-Org 官方仓库（781 条）。点「下载到本地」会存进本机 ComfyUI 的 workflows 目录，可直接在 ComfyUI 界面打开；「8GB 可跑」按模型体积估算，实际仍受显存占用影响。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="toast-host" aria-live="polite"></div>
+
+<dialog id="videoDlg" class="dlg" aria-labelledby="videoDlgTitle">
+  <div class="dlg-head">
+    <h3 id="videoDlgTitle">用这张图生成视频</h3>
+    <button class="icon-btn" id="videoClose" type="button" aria-label="关闭">✕</button>
+  </div>
+  <div class="dlg-main">
+    <div class="dlg-preview">
+      <img id="videoSrc" alt="首帧预览">
+      <div class="meta">本地免费通道 · 不上传云端<br>首帧按目标画幅居中裁剪<br>期间请勿合成语音</div>
+    </div>
+    <label for="videoPrompt">画面提示词</label>
+    <textarea id="videoPrompt" maxlength="600"></textarea>
+    <div class="dlg-row">
+      <span>方案</span>
+      <div class="seg2" id="engineSeg" role="group" aria-label="出片方案">
+        <button type="button" data-engine="" aria-pressed="true">稳定 · 5B</button>
+        <button type="button" data-engine="svd" aria-pressed="false">快速 · SVD</button>
+      </div>
+      <span class="dur-chip">5 秒</span>
+    </div>
+    <p class="dlg-note" id="engineMeta">832×480 · 约 6–10 分钟 · 画面与人脸最稳</p>
+    <p class="dlg-attr" id="svdAttr" hidden>Powered by Stability AI · Stability AI Community License</p>
+    <div class="dlg-status" id="videoStatus"></div>
+    <div class="dlg-progress" id="videoProg" aria-hidden="true"><span></span></div>
+    <video id="videoResult" controls hidden></video>
+    <div class="dlg-actions">
+      <a class="btn-ghost" id="videoMore" href="/video-enhance.html" target="_blank" hidden>去视频超分 →</a>
+      <button class="btn-ghost" id="videoCancel" type="button">关闭</button>
+      <button class="btn-primary" id="videoStart" type="button">开始生成</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const toast = window.BeeUI.toast;
+
+const state = { width: 512, height: 512, steps: 20, cfg: 7, busy: false, current: null,
+                ctrlFile: null, ipFile: null };
+
+const promptEl = $("#prompt");
+promptEl.addEventListener("input", () => { $("#promptCount").textContent = promptEl.value.length; });
+$$("#presets .chip").forEach(btn => {
+  btn.addEventListener("click", () => {
+    promptEl.value = btn.dataset.prompt;
+    promptEl.dispatchEvent(new Event("input"));
+    $$("#presets .chip").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+    promptEl.focus();
+  });
+});
+
+$("#sizes").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-w]");
+  if (!btn) return;
+  state.width = +btn.dataset.w;
+  state.height = +btn.dataset.h;
+  $$("#sizes button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+});
+
+$("#steps").addEventListener("input", e => {
+  state.steps = +e.target.value;
+  $("#stepsVal").textContent = state.steps;
+  $("#stepsTip").textContent = state.steps <= 12 ? "偏快，细节略少"
+    : state.steps >= 32 ? "偏慢，细节更多" : "20 步，质量与速度平衡";
+});
+$("#cfg").addEventListener("input", e => {
+  state.cfg = +e.target.value;
+  $("#cfgVal").textContent = state.cfg.toFixed(1);
+  $("#cfgTip").textContent = state.cfg.toFixed(1);
+});
+$("#diceBtn").addEventListener("click", () => {
+  const seed = Math.floor(Math.random() * 2147483647);
+  $("#seed").value = seed;
+  toast("种子：" + seed);
+});
+
+/* ---------- 参考图（ControlNet / IP-Adapter） ---------- */
+async function loadCaps() {
+  const note = $("#capNote");
+  try {
+    const r = await fetch("/api/image/capabilities");
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || ("HTTP " + r.status));
+    const cn = d.controlnet || {}, ip = d.ipadapter || {};
+    $("#ctrlCard").setAttribute("aria-disabled", String(!cn.available));
+    $("#ipCard").setAttribute("aria-disabled", String(!ip.available));
+    $("#ctrlFile").disabled = !cn.available;
+    $("#ipFile").disabled = !ip.available;
+    const parts = [
+      cn.available ? "ControlNet 就绪（Canny）" : "ControlNet 未就绪",
+      ip.available ? "IP-Adapter 就绪" : "IP-Adapter 未就绪",
+    ];
+    note.textContent = parts.join(" · ")
+      + (cn.available && ip.available ? " · 可同时开，显存占用更高" : "");
+  } catch (err) {
+    note.textContent = "模型状态读取失败：" + (err.message || err);
+  }
+}
+
+async function uploadRef(file) {
+  const fd = new FormData();
+  fd.append("file", file, file.name || "ref.png");
+  const r = await fetch("/api/image/reference", { method: "POST", body: fd });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.ok) throw new Error(d.error || ("参考图上传失败 HTTP " + r.status));
+  return d;
+}
+
+function wireRef(kind) {
+  const fileEl = kind === "ctrl" ? $("#ctrlFile") : $("#ipFile");
+  const card = kind === "ctrl" ? $("#ctrlCard") : $("#ipCard");
+  const thumb = kind === "ctrl" ? $("#ctrlThumb") : $("#ipThumb");
+  const clear = kind === "ctrl" ? $("#ctrlClear") : $("#ipClear");
+  const opts = kind === "ctrl" ? $("#ctrlOpts") : $("#ipOpts");
+  const key = kind === "ctrl" ? "ctrlFile" : "ipFile";
+  fileEl.addEventListener("change", () => {
+    const f = fileEl.files && fileEl.files[0];
+    if (!f) return;
+    if (f.size > 12 * 1024 * 1024) { toast("参考图超过 12MB，请压缩后再传", true); fileEl.value = ""; return; }
+    state[key] = f;
+    const img = new Image();
+    img.onload = () => URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(f);
+    thumb.innerHTML = "";
+    thumb.appendChild(img);
+    card.classList.add("has-file");
+    clear.hidden = false;
+    opts.hidden = false;
+  });
+  clear.addEventListener("click", e => {
+    e.preventDefault();
+    e.stopPropagation();
+    state[key] = null;
+    fileEl.value = "";
+    thumb.textContent = "＋";
+    card.classList.remove("has-file");
+    clear.hidden = true;
+    opts.hidden = true;
+  });
+}
+wireRef("ctrl");
+wireRef("ip");
+$("#ctrlStrength").addEventListener("input", e => {
+  $("#ctrlStrengthVal").textContent = (+e.target.value).toFixed(2);
+});
+$("#ipWeight").addEventListener("input", e => {
+  $("#ipWeightVal").textContent = (+e.target.value).toFixed(2);
+});
+
+/* ---------- 视图切换（支持 #templates 直达） ---------- */
+function showView(name, push) {
+  const create = name !== "templates";
+  const paint = () => {
+    $("#viewCreate").classList.toggle("active", create);
+    $("#viewTemplates").classList.toggle("active", !create);
+    $("#tabCreate").setAttribute("aria-pressed", String(create));
+    $("#tabCreate").setAttribute("aria-selected", String(create));
+    $("#tabTemplates").setAttribute("aria-pressed", String(!create));
+    $("#tabTemplates").setAttribute("aria-selected", String(!create));
+  };
+  window.BeeUI.viewTransition(paint);
+  if (!create && !tpl.loaded) loadTemplates();
+  if (push !== false) {
+    const hash = create ? "" : "#templates";
+    if (location.hash !== hash) history.replaceState(null, "", location.pathname + hash);
+  }
+}
+$("#tabCreate").addEventListener("click", () => showView("create"));
+$("#tabTemplates").addEventListener("click", () => showView("templates"));
+window.addEventListener("hashchange", () => {
+  if (location.hash === "#templates") showView("templates", false);
+});
+
+function setStatus(text, busy = false) {
+  $("#statusText").textContent = text;
+  $("#statusDot").classList.toggle("busy", busy);
+}
+
+/* ---------- 画布 ---------- */
+const stage = $("#stage");
+function renderEmpty() {
+  stage.innerHTML = '<div class="stage-empty"><div class="glyph">🖼️</div><strong>描述你想看到的画面</strong><span>在左侧写提示词，点「开始生成」</span></div>';
+}
+function renderGenerating() {
+  stage.innerHTML = '<div class="generating"><div class="aperture"><span></span><span></span><span></span></div>'
+    + '<div class="gen-text"><b>正在生成</b><small id="genElapsed">已用时 0 秒 · 通常 30–60 秒</small></div></div>';
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    const el = $("#genElapsed");
+    if (!el) return clearInterval(timer);
+    el.textContent = "已用时 " + Math.round((Date.now() - t0) / 1000) + " 秒 · 通常 30–60 秒";
+  }, 1000);
+  return () => clearInterval(timer);
+}
+function renderImage(meta) {
+  stage.innerHTML = "";
+  const img = new Image();
+  img.src = meta.url;
+  img.alt = meta.prompt || "生成的图片";
+  stage.appendChild(img);
+  state.current = meta;
+  $("#resultBar").style.display = "flex";
+  $("#resultPrompt").textContent = meta.prompt || "";
+  const kb = Math.round((meta.bytes || 0) / 102.4) / 10;
+  const extra = [];
+  if (meta.controlnet && meta.controlnet.enabled) extra.push("ControlNet " + meta.controlnet.strength);
+  if (meta.ipadapter && meta.ipadapter.enabled) extra.push("IP-Adapter " + meta.ipadapter.weight);
+  $("#resultNums").textContent =
+    `${meta.width}×${meta.height} · ${meta.steps} 步 · CFG ${meta.cfg} · 种子 ${meta.seed} · ${kb} KB · ${meta.seconds} 秒`
+    + (extra.length ? " · " + extra.join(" · ") : "");
+  $("#downloadBtn").href = meta.url;
+  $("#downloadBtn").setAttribute("download", meta.file || "bee-image.png");
+}
+function renderError(msg) {
+  stage.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "stage-error";
+  const badge = document.createElement("div");
+  badge.className = "badge";
+  badge.textContent = "⚠️ 这次没出图";
+  const p = document.createElement("p");
+  p.textContent = msg;
+  const retry = document.createElement("button");
+  retry.className = "btn-ghost";
+  retry.textContent = "重试";
+  retry.addEventListener("click", generate);
+  box.append(badge, p, retry);
+  stage.appendChild(box);
+}
+
+/* ---------- 出图 ---------- */
+async function generate() {
+  if (state.busy) return;
+  const prompt = promptEl.value.trim();
+  if (!prompt) { toast("先写一句提示词", true); promptEl.focus(); return; }
+  state.busy = true;
+  $("#genBtn").disabled = true;
+  $("#genLabel").innerHTML = '<span class="spinner"></span> 生成中…';
+  setStatus("正在出图", true);
+  const stopTimer = renderGenerating();
+  const payload = { prompt, negative: $("#negative").value.trim(), width: state.width, height: state.height, steps: state.steps, cfg: state.cfg };
+  if ($("#seed").value !== "") payload.seed = +$("#seed").value;
+  try {
+    // 参考图先落盘再出图：上传失败就不该白等 60 秒
+    if (state.ctrlFile) {
+      const up = await uploadRef(state.ctrlFile);
+      payload.control_path = up.path;
+      payload.control_strength = +$("#ctrlStrength").value;
+    }
+    if (state.ipFile) {
+      const up = await uploadRef(state.ipFile);
+      payload.ip_path = up.path;
+      payload.ip_weight = +$("#ipWeight").value;
+    }
+    const resp = await fetch("/api/image/generate", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await resp.json(); } catch (_) {}
+    if (!resp.ok || data.ok === false) throw new Error(data.error || `服务返回 HTTP ${resp.status}`);
+    renderImage(data);
+    prependGallery(data);
+    setStatus("就绪");
+    toast("出图完成 · " + data.seconds + " 秒");
+  } catch (err) {
+    renderError(err.message || String(err));
+    setStatus("出图失败");
+    toast("出图失败：" + (err.message || err), true);
+  } finally {
+    stopTimer();
+    state.busy = false;
+    $("#genBtn").disabled = false;
+    $("#genLabel").textContent = "开始生成";
+  }
+}
+$("#genBtn").addEventListener("click", generate);
+promptEl.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") generate(); });
+
+$("#reuseBtn").addEventListener("click", () => {
+  const m = state.current;
+  if (!m) return;
+  promptEl.value = m.prompt || "";
+  promptEl.dispatchEvent(new Event("input"));
+  $("#negative").value = m.negative || "";
+  $("#seed").value = m.seed != null ? m.seed : "";
+  state.steps = m.steps || 20;
+  $("#steps").value = state.steps;
+  $("#stepsVal").textContent = state.steps;
+  state.cfg = m.cfg || 7;
+  $("#cfg").value = state.cfg;
+  $("#cfgVal").textContent = Number(state.cfg).toFixed(1);
+  state.width = m.width || 512;
+  state.height = m.height || 512;
+  $$("#sizes button").forEach(b => b.setAttribute("aria-pressed",
+    String(+b.dataset.w === state.width && +b.dataset.h === state.height)));
+  toast("参数已回填");
+});
+
+$("#deleteBtn").addEventListener("click", async () => {
+  const m = state.current;
+  if (!m) return;
+  if (!confirm("删除这张图？删除后不可恢复。")) return;
+  if (await deleteImage(m.file)) {
+    state.current = null;
+    $("#resultBar").style.display = "none";
+    renderEmpty();
+    toast("已删除");
+  }
+});
+
+/* ---------- 用当前图生成视频首帧 ---------- */
+let videoTimer = null;
+let videoJobId = "";
+// 第二个动作方案："" = Wan2.2 5B 稳定档（默认），"svd" = SVD 快出档
+let videoEngine = "";
+let videoRunEngine = "";   // 提交时的方案快照：出片途中用户改选不影响状态文案
+const ENGINE = {
+  "":  { label: "本地 5B", meta: "832×480 · 约 6–10 分钟 · 画面与人脸最稳" },
+  svd: { label: "本地 SVD", meta: "1024×576 · 约 3–5 分钟 · 只延续首帧，提示词不生效" },
+};
+
+function setEngine(name) {
+  videoEngine = ENGINE[name] ? name : "";
+  $$("#engineSeg button").forEach(b => {
+    b.setAttribute("aria-pressed", String((b.dataset.engine || "") === videoEngine));
+  });
+  $("#engineMeta").textContent = ENGINE[videoEngine].meta;
+  // SVD 的许可协议要求界面标注来源，只在这个方案下露出
+  $("#svdAttr").hidden = videoEngine !== "svd";
+}
+let videoStartedAt = 0;
+let videoBusy = false;        // 有单在跑：重开弹窗不能再提交，否则单卡双跑
+let videoSubmitFile = "";     // 这一单用的是哪张图
+let lastVideo = null;         // { file, url, elapsed }：弹窗关着时完成的那条
+let pollErrors = 0;           // 连续读取失败次数：偶发抖动不能直接判死
+
+function showVideoResult(url, elapsed) {
+  const v = $("#videoResult");
+  v.hidden = false;
+  v.src = url;
+  v.load();
+  $("#videoMore").hidden = false;
+  $("#videoStart").disabled = false;
+  $("#videoStart").textContent = "再生成一条";
+  setVideoStatus("完成 · 用时 " + elapsed + " 秒 · 已存入本机成片库");
+}
+
+function setVideoStatus(text, isErr) {
+  const el = $("#videoStatus");
+  el.className = "dlg-status" + (isErr ? " err" : "");
+  el.textContent = text;
+}
+
+function stopVideoPolling() {
+  if (videoTimer) clearInterval(videoTimer);
+  videoTimer = null;
+}
+
+function openVideoDlg() {
+  const m = state.current;
+  if (!m) { toast("先出一张图，再用它生成视频", true); return; }
+  $("#videoSrc").src = m.url;
+  $("#videoPrompt").value = m.prompt || "";
+  setEngine(videoEngine);
+  const v = $("#videoResult");
+  v.hidden = true;
+  v.removeAttribute("src");
+  $("#videoMore").hidden = true;
+  if (videoBusy) {
+    // 上一单还在跑：不能装作空闲，否则用户会重复提交、白白多等一轮
+    $("#videoProg").classList.add("on");
+    setVideoStatus(ENGINE[videoRunEngine].label + " 正在出片 · 已用时 "
+      + Math.round((Date.now() - videoStartedAt) / 1000) + " 秒");
+    $("#videoStart").disabled = true;
+    $("#videoStart").textContent = "出片中…";
+  } else if (lastVideo && lastVideo.file === m.file) {
+    // 弹窗关着的时候这单已经出完了：重开直接把成片还给他，别让结果白白丢掉
+    $("#videoProg").classList.remove("on");
+    showVideoResult(lastVideo.url, lastVideo.elapsed);
+  } else {
+    $("#videoProg").classList.remove("on");
+    setVideoStatus("");
+    $("#videoStart").disabled = false;
+    $("#videoStart").textContent = "开始生成";
+  }
+  $("#videoDlg").showModal();
+}
+
+function failVideo(msg) {
+  stopVideoPolling();
+  videoBusy = false;
+  // 这单已经失败了：留着重开弹窗会走 lastVideo 分支，把上一条成片当成这单的结果显示
+  if (lastVideo && lastVideo.file === videoSubmitFile) lastVideo = null;
+  $("#videoProg").classList.remove("on");
+  setVideoStatus("失败：" + msg, true);
+  $("#videoStart").disabled = false;
+  $("#videoStart").textContent = "重试";
+  toast("视频生成失败：" + msg, true);
+}
+
+function pollVideo() {
+  stopVideoPolling();
+  const tick = async () => {
+    const elapsed = Math.round((Date.now() - videoStartedAt) / 1000);
+    try {
+      const r = await fetch("/api/video/poll/" + encodeURIComponent(videoJobId));
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || "状态读取失败");
+      pollErrors = 0;
+      if (d.status === "succeeded") {
+        stopVideoPolling();
+        videoBusy = false;
+        lastVideo = { file: videoSubmitFile, url: d.video_url, elapsed };
+        $("#videoProg").classList.remove("on");
+        showVideoResult(d.video_url, elapsed);
+        toast("视频已生成，可在「视频超分」里放大");
+        return;
+      }
+      if (d.status === "failed") {
+        failVideo(d.error || "本地出片失败");
+        return;
+      }
+      $("#videoProg").classList.add("on");
+      setVideoStatus((d.status === "running" ? ENGINE[videoRunEngine].label + " 正在出片" : "排队中")
+        + " · 已用时 " + elapsed + " 秒");
+    } catch (err) {
+      // 面板重启/网络抖动时读一次失败就判死，会让 ComfyUI 白跑但界面已失败；
+      // 连续失败 6 次（约 30 秒）才认定真的丢了。
+      pollErrors += 1;
+      if (pollErrors >= 6) {
+        failVideo(err.message || String(err));
+      } else {
+        setVideoStatus("状态读取失败，重试中（" + pollErrors + "/6）", true);
+      }
+    }
+  };
+  tick();
+  videoTimer = setInterval(tick, 5000);
+}
+
+$("#videoBtn").addEventListener("click", openVideoDlg);
+$("#videoClose").addEventListener("click", () => $("#videoDlg").close());
+$("#videoCancel").addEventListener("click", () => $("#videoDlg").close());
+$("#engineSeg").addEventListener("click", e => {
+  const b = e.target.closest("button[data-engine]");
+  if (b) setEngine(b.dataset.engine || "");
+});
+// 关闭对话框不取消任务：本地出片已经开跑，强行中断会让显卡白跑，
+// 后台继续轮询，完成后用 toast 告知。
+$("#videoDlg").addEventListener("close", () => { /* 保持轮询 */ });
+
+$("#videoStart").addEventListener("click", async () => {
+  const m = state.current;
+  if (!m) return;
+  const prompt = $("#videoPrompt").value.trim();
+  // SVD 没有文本条件，提示词对它不生效，所以只有 5B 才强制要求
+  if (!prompt && videoEngine !== "svd") { toast("先写一句视频提示词", true); return; }
+  $("#videoStart").disabled = true;
+  $("#videoStart").innerHTML = '<span class="spinner"></span> 生成中…';
+  videoStartedAt = Date.now();
+  videoRunEngine = videoEngine;
+  videoSubmitFile = m.file;
+  videoBusy = true;
+  pollErrors = 0;
+  setVideoStatus("正在提交到 " + ENGINE[videoRunEngine].label + "…");
+  try {
+    const r = await fetch("/api/video/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "comfyui",
+        image_path: "images/" + m.file,
+        prompt,
+        // 两个方案都按 5 秒出片：5B 是 121 帧@24fps，SVD 25 帧按 5fps 播放
+        duration: 5,
+        // 与弹窗文案保持一致：8GB 卡上 720p 换页严重，要更大画面请出片后超分
+        resolution: "480p",
+        engine: videoEngine || undefined,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || ("HTTP " + r.status));
+    videoJobId = d.job_id;
+    pollVideo();
+  } catch (err) {
+    failVideo(err.message || String(err));
+  }
+});
+
+/* ---------- 相册 ---------- */
+function thumbEl(meta, onOpen) {
+  const wrap = document.createElement("div");
+  wrap.className = "thumb";
+  wrap.tabIndex = 0;
+  wrap.setAttribute("role", "button");
+  wrap.setAttribute("aria-label", "查看：" + (meta.prompt || meta.file));
+  const img = document.createElement("img");
+  img.src = meta.url;
+  img.alt = meta.prompt || "历史图片";
+  img.loading = "lazy";
+  const del = document.createElement("button");
+  del.className = "del";
+  del.textContent = "✕";
+  del.title = "删除";
+  del.setAttribute("aria-label", "删除这张图");
+  let armed = false, timer = null;
+  del.addEventListener("click", async e => {
+    e.stopPropagation();
+    if (!armed) {
+      armed = true;
+      del.classList.add("confirm");
+      del.textContent = "确认删除";
+      timer = setTimeout(() => { armed = false; del.classList.remove("confirm"); del.textContent = "✕"; }, 3000);
+      return;
+    }
+    clearTimeout(timer);
+    if (await deleteImage(meta.file)) {
+      wrap.remove();
+      updateGalleryCount();
+      if (state.current && state.current.file === meta.file) {
+        state.current = null;
+        $("#resultBar").style.display = "none";
+        renderEmpty();
+      }
+    }
+  });
+  wrap.addEventListener("click", () => onOpen(meta));
+  wrap.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(meta); } });
+  wrap.append(img, del);
+  return wrap;
+}
+function prependGallery(meta) {
+  const g = $("#gallery");
+  const empty = g.querySelector(".gallery-empty");
+  if (empty) empty.remove();
+  g.prepend(thumbEl(meta, m => renderImage(m)));
+  updateGalleryCount();
+}
+function updateGalleryCount() {
+  const n = $("#gallery").querySelectorAll(".thumb").length;
+  $("#galleryCount").textContent = n + " 张";
+}
+async function deleteImage(file) {
+  if (!file) return false;
+  try {
+    const resp = await fetch("/api/images/" + encodeURIComponent(file), { method: "DELETE" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) throw new Error(data.error || "删除失败");
+    return true;
+  } catch (err) {
+    toast("删除失败：" + err.message, true);
+    return false;
+  }
+}
+async function loadGallery() {
+  const g = $("#gallery");
+  try {
+    const resp = await fetch("/api/images?limit=36");
+    const data = await resp.json();
+    const items = data.items || [];
+    g.innerHTML = "";
+    if (!items.length) {
+      g.innerHTML = '<div class="gallery-empty">还没有出过图，生成第一张后会出现在这里</div>';
+    } else {
+      items.forEach(m => g.appendChild(thumbEl(m, x => renderImage(x))));
+    }
+    updateGalleryCount();
+  } catch (err) {
+    g.innerHTML = '<div class="gallery-empty">相册加载失败：' + (err.message || err) + "</div>";
+  }
+}
+$("#refreshBtn").addEventListener("click", loadGallery);
+
+/* ---------- 工作流模板库 ---------- */
+const tpl = { loaded: false, media: "", query: "" };
+
+async function loadLocalTemplates() {
+  try {
+    const r = await fetch("/api/comfy/templates/local");
+    const d = await r.json();
+    const items = d.items || [];
+    const host = $("#tplLocal");
+    host.textContent = "本机已有：";
+    if (!items.length) host.append("（暂无，先从下面下载一个）");
+    items.forEach(it => {
+      const pill = document.createElement("span");
+      pill.className = "pill";
+      pill.textContent = it.title + " · " + it.name;
+      host.appendChild(pill);
+    });
+    $("#tplDir").textContent = "本机目录：" + (d.workflows_dir || "");
+  } catch (_) {
+    $("#tplLocal").textContent = "本机模板目录读取失败";
+  }
+}
+
+async function loadTemplates() {
+  const list = $("#tplList");
+  list.innerHTML = '<div class="gallery-empty">正在加载官方工作流索引（首次约 1–3 秒）…</div>';
+  const qs = new URLSearchParams({ limit: "60" });
+  if (tpl.query) qs.set("q", tpl.query);
+  if (tpl.media) qs.set("media", tpl.media);
+  try {
+    const resp = await fetch("/api/comfy/templates?" + qs.toString());
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error || "工作流索引不可用");
+    tpl.loaded = true;
+    renderTemplates(data.items || []);
+    loadLocalTemplates();
+  } catch (err) {
+    list.innerHTML = '<div class="gallery-empty">工作流库加载失败：' + (err.message || err) + "</div>";
+  }
+}
+
+function renderTemplates(items) {
+  const list = $("#tplList");
+  list.innerHTML = "";
+  if (!items.length) { list.innerHTML = '<div class="gallery-empty">没有匹配的工作流，换个关键词试试</div>'; return; }
+  items.forEach((t, i) => {
+    const row = document.createElement("div");
+    row.className = "tpl-item";
+    row.style.animationDelay = Math.min(i, 12) * 18 + "ms";
+    const left = document.createElement("div");
+    const h3 = document.createElement("h3");
+    h3.textContent = t.title;
+    const desc = document.createElement("div");
+    desc.className = "desc";
+    desc.textContent = t.description || "（官方未提供描述）";
+    const badges = document.createElement("div");
+    badges.className = "tpl-badges";
+    badges.appendChild(tag(t.fit, t.fit === "8GB 可跑" ? "ok" : "warn"));
+    if (t.size_gb) badges.appendChild(tag(t.size_gb + " GB 模型"));
+    if (t.custom_nodes) badges.appendChild(tag("需 " + t.custom_nodes + " 个自定义节点"));
+    if (t.kind) badges.appendChild(tag(t.kind === "video" ? "视频" : t.kind === "audio" ? "音频" : "图片"));
+    (t.models || []).slice(0, 2).forEach(m => badges.appendChild(tag(m)));
+    left.append(h3, desc, badges);
+    const action = document.createElement("div");
+    action.className = "tpl-action";
+    if (t.downloaded) {
+      const done = document.createElement("span");
+      done.className = "done";
+      done.textContent = "✓ 已在本机";
+      action.appendChild(done);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "btn-ghost";
+      btn.textContent = "下载到本地";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        btn.textContent = "下载中…";
+        try {
+          const r = await fetch("/api/comfy/templates/" + encodeURIComponent(t.name) + "/download", { method: "POST" });
+          const d = await r.json();
+          if (!r.ok || !d.ok) throw new Error(d.error || "下载失败");
+          btn.replaceWith(Object.assign(document.createElement("span"), { className: "done", textContent: "✓ 已在本机" }));
+          toast("已保存：" + d.path);
+          loadLocalTemplates();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "下载到本地";
+          toast("下载失败：" + err.message, true);
+        }
+      });
+      action.appendChild(btn);
+    }
+    row.append(left, action);
+    list.appendChild(row);
+  });
+}
+function tag(text, kind) {
+  const el = document.createElement("span");
+  el.className = "tag" + (kind ? " " + kind : "");
+  el.textContent = text;
+  return el;
+}
+let tplTimer = null;
+$("#tplQuery").addEventListener("input", e => {
+  clearTimeout(tplTimer);
+  const v = e.target.value.trim();
+  tplTimer = setTimeout(() => { tpl.query = v; loadTemplates(); }, 320);
+});
+$("#mediaFilter").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-media]");
+  if (!btn) return;
+  tpl.media = btn.dataset.media;
+  $$("#mediaFilter button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+  loadTemplates();
+});
+
+/* ---------- 启动 ---------- */
+loadGallery();
+loadCaps();
+if (location.hash === "#templates") showView("templates", false);
+</script>
+</body>
+</html>

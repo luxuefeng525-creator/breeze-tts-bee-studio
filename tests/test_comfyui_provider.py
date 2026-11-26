@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import time
 
-from api.providers import GenResult
+import pytest
+
+from api.providers import GenRequest, GenResult, ProviderError
 from api.providers.comfyui import ComfyUIProvider
 
 
@@ -239,29 +241,92 @@ def test_release_if_idle_skips_when_jobs_pending(monkeypatch):
     assert calls == []
 
 
-def test_vram_gate_matches_measured_reality(monkeypatch):
-    """显存门槛必须贴着实测，不能按「装得下」卡。
+def test_svd_workflow_uses_checkpoint_slots_and_25_frames():
+    """SVD 快出档：三段模型都从同一个 checkpoint 拆，槽位必须是 0/1/2。"""
+    p = _provider()
+    wf = p._build_workflow_svd(GenRequest(prompt="", duration=5), "ref.png")
 
-    实测（2026-11-26，桌面应用全开）：
-      * I2V 5B：空闲 1154MB 时端到端 307 秒，能出片；
+    assert wf["1"]["class_type"] == "ImageOnlyCheckpointLoader"
+    assert wf["1"]["inputs"]["ckpt_name"].startswith("svd_")
+    cond = wf["3"]["inputs"]
+    assert cond["clip_vision"] == ["1", 1]   # CLIP_VISION
+    assert cond["vae"] == ["1", 2]           # VAE
+    assert cond["init_image"] == ["2", 0]
+    assert cond["video_frames"] == 25        # SVD 训练上限
+    assert (cond["width"], cond["height"]) == (1024, 576)
+    assert cond["fps"] == 5                  # 25 帧 / 5 秒
+    ks = wf["5"]["inputs"]
+    assert ks["positive"] == ["3", 0]
+    assert ks["negative"] == ["3", 1]
+    assert ks["latent_image"] == ["3", 2]
+    assert wf["7"]["inputs"]["fps"] == 5.0
+
+
+def test_svd_fps_derived_from_duration_keeps_length_honest():
+    """播放帧率按时长反推：25 帧 / fps 必须接近请求时长，不能要 5 秒给 4.1 秒。"""
+    p = _provider()
+    for dur, fps in ((1.0, 24), (2.0, 12), (5.0, 5)):
+        wf = p._build_workflow_svd(GenRequest(prompt="", duration=dur), "ref.png")
+        assert wf["3"]["inputs"]["fps"] == fps, f"duration={dur}"
+        assert abs(25 / fps - dur) <= 0.4, f"duration={dur} 实际 {25 / fps:.2f}s"
+
+
+def test_svd_clamps_to_router_bounds_so_length_never_lies():
+    """上下限与路由器的 5 秒红线一致：超界请求被钳制，绝不静默改短/拉长。
+
+    短于 1 秒时 25 帧无法在 24fps 内 honest 还原（25/24≈1.04 秒），
+    所以路由器直接 400；这里只保证万一漏进来也不会给出翻倍的时长。
+    """
+    p = _provider()
+    short = p._build_workflow_svd(GenRequest(prompt="", duration=0.5), "ref.png")
+    assert short["3"]["inputs"]["fps"] == 24          # 25 / 24 ≈ 1.04s，是物理下限
+    long_ = p._build_workflow_svd(GenRequest(prompt="", duration=9), "ref.png")
+    assert long_["3"]["inputs"]["fps"] == 5           # 钳到 5 秒，不偷偷出 8 秒
+
+
+def test_svd_allows_empty_prompt_but_5b_does_not(monkeypatch):
+    """SVD 没有文本条件，空提示词合法；5B 仍然必须给提示词。"""
+    p = _provider()
+    _patch_get(monkeypatch, {"/system_stats": {}})
+    monkeypatch.setattr("api.providers.comfyui.requests.post",
+                        lambda *a, **kw: FakeResp({}))
+    monkeypatch.setattr("api.providers.comfyui._gpu_free_mb", lambda: 8000)
+
+    with pytest.raises(ProviderError) as e:
+        p.generate(GenRequest(prompt="  ", image_url="file:F:/nope/x.png"))
+    assert "提示词" in str(e.value)
+
+    with pytest.raises(ProviderError) as e:
+        p.generate(GenRequest(prompt="", image_url="file:F:/nope/x.png", engine="svd"))
+    assert "参考图文件不存在" in str(e.value)
+
+
+def test_vram_gate_matches_measured_reality(monkeypatch):
+    """显存门槛必须贴着实测，不能按「装得下」卡，也不能低到必然换页卡死。
+
+    实测（2026-11-26）：
+      * I2V 5B：空闲 5742MB → 2.03 秒/步；1154MB → 8 秒/步、307 秒出片；
+        742MB → 33.6 秒/步，30 分钟卡在 VAE 解码（失败）。
       * T2V 1.3B：空闲 808MB 时 25 帧 / 4 步 158.8 秒，能出片。
-    早期把门槛设成 5200 / 3500，结果 8GB 卡在当前桌面占用下永远点不动出片。
+    所以 I2V 门槛要落在「742MB 必然失败」之上，又不能高到清完缓存也点不动。
     """
     from api.providers import ProviderError
     from api.providers import comfyui as C
 
-    # 常量本身也要钉住：谁调回去谁就红
-    assert C._MIN_FREE_VRAM_MB_22 <= 1200, (
-        f"5B 门槛 {C._MIN_FREE_VRAM_MB_22}MB 高于实测可用值 1154MB")
+    # 常量本身也要钉住：谁调回 900 以下（会重演 742MB 卡死）或调到 4000 以上都红
+    assert 1000 <= C._MIN_FREE_VRAM_MB_I2V <= 4000, (
+        f"I2V 门槛 {C._MIN_FREE_VRAM_MB_I2V}MB 必须高于实测失败值 742MB，"
+        "且不高于清缓存后 8GB 卡的实际可用量")
     assert C._MIN_FREE_VRAM_MB <= 900, (
         f"T2V 门槛 {C._MIN_FREE_VRAM_MB}MB 高于实测可用值 808MB")
 
     p = _provider()
     _patch_get(monkeypatch, {"/system_stats": {}})
 
-    # 实测可用过的低显存，两档都要放行
-    monkeypatch.setattr(C, "_gpu_free_mb", lambda: 900)
-    p._require_online(C._MIN_FREE_VRAM_MB_22)
+    # 刚好够门槛：两档都要放行
+    monkeypatch.setattr(C, "_gpu_free_mb", lambda: C._MIN_FREE_VRAM_MB_I2V)
+    p._require_online(C._MIN_FREE_VRAM_MB_I2V)
+    monkeypatch.setattr(C, "_gpu_free_mb", lambda: C._MIN_FREE_VRAM_MB)
     p._require_online(C._MIN_FREE_VRAM_MB)
 
     # 真的快没空间才拦
