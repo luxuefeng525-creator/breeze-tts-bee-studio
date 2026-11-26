@@ -127,19 +127,25 @@ def _req(url, method="GET", body=None, ctype=None, timeout=30):
 
 
 def test_index_page(base_url):
-    # 首页 302 到 Bee Studio（方案 A 多 Tab 共存），旧面板在 /index.html。
-    # 原断言固定 "/" 返回 BreezeTTS Studio，与现行跳转冲突，属过期用例。
+    # 2026-11-26 修正：首页回 TTS 制声台（方言 / 克隆 / 角色自定义都在 index.html），
+    # 视频工作台在 /bee-studio.html。此前 "/" 直接 302 到 bee-studio，
+    # 把整个 TTS 界面盖住了，顶栏 /?screen=clone 等外链全部失效。
     with urllib.request.urlopen(base_url + "/", timeout=10) as r:
         html = r.read().decode("utf-8")
         final_url = r.geturl()
     assert r.status == 200
-    assert final_url.endswith("/bee-studio.html")
-    assert "音色库" in html and "角色库" in html and "合成历史" in html
+    assert final_url.endswith("/index.html")
+    assert "BreezeTTS Studio" in html
 
-    with urllib.request.urlopen(base_url + "/index.html", timeout=10) as r2:
-        page = r2.read().decode("utf-8")
-    assert r2.status == 200
-    assert "BreezeTTS Studio" in page
+    # query 必须原样带走，否则 ?screen=clone 会停在默认屏
+    with urllib.request.urlopen(base_url + "/?screen=clone", timeout=10) as r2:
+        assert r2.status == 200
+        assert r2.geturl().endswith("/index.html?screen=clone")
+
+    with urllib.request.urlopen(base_url + "/bee-studio.html", timeout=10) as r3:
+        bee = r3.read().decode("utf-8")
+    assert r3.status == 200
+    assert "音色库" in bee and "角色库" in bee and "合成历史" in bee
 
 
 def test_voices_crud(base_url):
@@ -176,6 +182,96 @@ def test_roles_crud(base_url):
     code, _ = _req(base_url + "/api/roles/" + rid, "DELETE")
     assert code == 200
     _req(base_url + "/api/voices/" + vid, "DELETE")
+
+
+def _upload_wav(base_url, vid):
+    """给音色传一段真实 wav，返回 (code, 响应体)。"""
+    import math
+    pcm = b"".join(struct.pack("<h", int(12000 * math.sin(i / 8))) for i in range(24000))
+    wav = P.pcm_to_wav(pcm)
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"ref_audio\"; filename=\"ref.wav\"\r\n"
+        f"Content-Type: application/octet-stream\r\n\r\n".encode() + wav + b"\r\n"
+        + f"--{boundary}--\r\n".encode()
+    )
+    return _req(base_url + f"/api/voices/{vid}/ref", "POST", body,
+                f"multipart/form-data; boundary={boundary}")
+
+
+def _upload_png(base_url, rid):
+    """给角色传一张合法 PNG，返回 (code, 响应体)。"""
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 128
+    b = uuid.uuid4().hex
+    body = (
+        f"--{b}\r\nContent-Disposition: form-data; name=\"role_id\"\r\n\r\n{rid}\r\n"
+        f"--{b}\r\nContent-Disposition: form-data; name=\"consent\"\r\n\r\ntrue\r\n"
+        f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n"
+        f"Content-Type: image/png\r\n\r\n".encode() + png + b"\r\n"
+        + f"--{b}--\r\n".encode()
+    )
+    return _req(base_url + "/api/refs/upload", "POST", body,
+                f"multipart/form-data; boundary={b}")
+
+
+def test_delete_voice_purges_ref_audio(base_url):
+    """删音色必须连磁盘上的参考音频一起删（回归：曾只删账本，积了 18 个孤儿）。"""
+    code, v = _req(base_url + "/api/voices", "POST", json.dumps({
+        "name": "待删音色", "type": "clone", "ref_text": "测试文稿", "cfg_scale": 1,
+    }).encode(), "application/json")
+    assert code in (200, 201), v
+    vid = v["id"]
+    code, up = _upload_wav(base_url, vid)
+    assert code == 200 and up["ok"], up
+
+    rec = next(x for x in P._load("voices.json") if x["id"] == vid)
+    rel = rec.get("ref_audio") or ""
+    assert rel, "上传后应写入 ref_audio"
+    fp = P.DATA / rel
+    assert fp.is_file(), "上传后参考音频应落盘"
+
+    code, res = _req(base_url + "/api/voices/" + vid, "DELETE")
+    assert code == 200 and res["purged_ref"] is True, res
+    assert not fp.exists(), "删音色后参考音频必须一起删掉"
+
+
+def test_delete_role_purges_ref_image_dir(base_url):
+    """删角色必须连 data/refs/characters/<rid>/ 一起删，否则人脸照片永远清不掉。"""
+    code, r = _req(base_url + "/api/roles", "POST",
+                   json.dumps({"name": "待删角色", "archetype": "adult_f"}).encode(),
+                   "application/json")
+    assert code in (200, 201), r
+    rid = r["id"]
+    code, up = _upload_png(base_url, rid)
+    assert code == 200 and up["ok"], up
+
+    d = P.DATA / "refs" / "characters" / rid
+    assert d.is_dir() and any(d.iterdir()), "上传后参考图目录应有文件"
+
+    code, res = _req(base_url + "/api/roles/" + rid, "DELETE")
+    assert code == 200, res
+    assert res["purged_ref_images"] >= 1, res
+    assert not d.exists(), "删角色后参考图目录必须消失"
+
+
+def test_delete_refs_endpoint_clears_role_field(base_url):
+    """DELETE /api/refs/... 要同时删文件并清空角色上的 ref_image，不留悬空引用。"""
+    code, r = _req(base_url + "/api/roles", "POST",
+                   json.dumps({"name": "换图角色", "archetype": "adult_m"}).encode(),
+                   "application/json")
+    rid = r["id"]
+    code, up = _upload_png(base_url, rid)
+    assert code == 200 and up["ok"], up
+    url = up["ref_image"]
+    fp = P.DATA / url.replace("/api/", "", 1)
+    assert fp.is_file()
+
+    code, res = _req(base_url + url, "DELETE")
+    assert code == 200, res
+    assert not fp.exists(), "文件应被删除"
+    rec = next(x for x in P._load("roles.json") if x["id"] == rid)
+    assert not (rec.get("ref_image") or ""), "记录里的 ref_image 应被清空"
+    _req(base_url + "/api/roles/" + rid, "DELETE")
 
 
 def test_ref_upload_and_synthesize(base_url):
@@ -222,6 +318,43 @@ def test_ref_upload_and_synthesize(base_url):
     with urllib.request.urlopen(base_url + res["wav_url"], timeout=10) as r:
         wav_bytes = r.read()
     assert wav_bytes[:4] == b"RIFF" and len(wav_bytes) > 8000
+
+    _req(base_url + "/api/voices/" + vid, "DELETE")
+
+
+def test_design_voice_with_stale_ref_text_synthesizes(base_url):
+    """回归：design 型音色残留 ref_text 时不该被当成「缺参考音频」拦掉。
+
+    panel.py 原先用 bool(ref_audio) != bool(ref_text) 做对称校验，把设计型
+    音色残留的文稿当成配置错误；就算放行，仍会把 ref_text 发给上游，上游
+    再报 ref_audio and ref_text must be paired。两条链路都必须豁免 design。
+    """
+    code, _ = _req(base_url + "/api/model")
+    if code != 200:
+        pytest.skip("API 7860 offline")
+
+    code, v = _req(base_url + "/api/voices", "POST", json.dumps({
+        "name": "设计型带脏文稿",
+        "type": "design",
+        "instruction": "温厚的中年男声",
+        "ref_text": "这段文稿是历史脏数据，设计型音色根本不需要它。",
+        "cfg_scale": 4,
+    }).encode(), "application/json")
+    assert code in (200, 201), v
+    vid = v["id"]
+
+    fd = uuid.uuid4().hex
+    synth_body = (
+        f"--{fd}\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\n你好\r\n"
+        f"--{fd}\r\nContent-Disposition: form-data; name=\"voice_id\"\r\n\r\n{vid}\r\n"
+        f"--{fd}\r\nContent-Disposition: form-data; name=\"cfg_scale\"\r\n\r\n4\r\n"
+        f"--{fd}\r\nContent-Disposition: form-data; name=\"seed\"\r\n\r\n42\r\n"
+        f"--{fd}--\r\n"
+    ).encode()
+    code, res = _req(base_url + "/api/synthesize", "POST", synth_body,
+                     f"multipart/form-data; boundary={fd}", timeout=300)
+    assert code == 200, res
+    assert res["duration"] > 0.1
 
     _req(base_url + "/api/voices/" + vid, "DELETE")
 

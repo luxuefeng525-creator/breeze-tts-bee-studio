@@ -212,17 +212,27 @@ def purge_script_roles(sid: str) -> list[str]:
     被别的角色复用。
     """
     names: list[str] = []
+    rids: list[str] = []
 
     def _mut(items):
         keep = []
         for r in items:
             if str(r.get("script_id") or "") == str(sid):
                 names.append(str(r.get("name") or ""))
+                rids.append(str(r.get("id") or ""))
                 continue
             keep.append(r)
         items[:] = keep
 
     P._update_json("roles.json", _mut)
+    # 角色记录删了，data/refs/characters/<rid>/ 还在就是永远删不掉的人脸照片
+    for rid in rids:
+        if not rid:
+            continue
+        try:
+            P._purge_role_ref_dir(rid)
+        except Exception:
+            continue
     return names
 
 

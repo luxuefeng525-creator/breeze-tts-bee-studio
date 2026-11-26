@@ -901,6 +901,11 @@
         const segName = `seg_${stamp}_${i}.wav`;
         fd.append("save_as", segName);
 
+        // 必须在 fetch 之前声明：失败分支要 clearTimeout 它。
+        // 原实现在 resp.ok 分支里才 `let waitTick`，一旦上游返回 4xx/5xx
+        // 就会抛 "Cannot access 'waitTick' before initialization"，
+        // 把真正的失败原因（如缺参考音频）整个盖掉。
+        let waitTick = null;
         const resp = await fetch("/api/synthesize/stream", { method: "POST", body: fd });
         if (!resp.ok) {
           clearTimeout(waitTick);
@@ -917,7 +922,6 @@
         const reader = resp.body.getReader();
         const parts = [];
         let segBytes = 0;
-        let waitTick = null;
         // 引擎忙时（上游排队）给出明确提示，避免 0% 干等看起来像卡死
         waitTick = setTimeout(() => {
           if (!state.bytesGot) {

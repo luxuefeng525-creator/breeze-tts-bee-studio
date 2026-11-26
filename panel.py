@@ -703,6 +703,51 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^\w.\-]+", "_", name)[:80]
 
 
+def _purge_rel_file(rel: str) -> bool:
+    """删 data/ 下的单个文件，越界一律拒绝。
+
+    路径来自 JSON 账本，理论上可信；但文件名与角色 id 都可能被塞进 URL，
+    所以仍按「resolve 后必须落在 DATA 内」来判，宁可少删也不越界。
+    """
+    rel = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return False
+    try:
+        base = DATA.resolve()
+        p = (base / rel).resolve()
+        if p != base and base not in p.parents:
+            return False
+        if p.is_file():
+            p.unlink()
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _purge_role_ref_dir(rid: str) -> int:
+    """删角色的参考图目录 data/refs/characters/<rid>/，返回删除的文件数。"""
+    rid = str(rid or "").strip()
+    if not rid or "/" in rid or "\\" in rid or rid in (".", ".."):
+        return 0
+    d = DATA / "refs" / "characters" / rid
+    if not d.is_dir():
+        return 0
+    n = 0
+    try:
+        for f in d.iterdir():
+            if f.is_file():
+                try:
+                    f.unlink()
+                    n += 1
+                except OSError:
+                    pass
+        d.rmdir()
+    except OSError:
+        pass
+    return n
+
+
 def _sniff_image_ext(data: bytes) -> str:
     """按文件头认图片类型，不信前端给的扩展名。认不出返回空串。"""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -2260,9 +2305,13 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
         if path == "/":
-            # Bee Studio 作为默认首页（方案 A 多 Tab 共存）
+            # 首页回 TTS 制声台：方言 / 声音克隆 / 角色自定义都在 web/index.html。
+            # 视频工作台在 /bee-studio.html，两边顶栏互链。
+            # query 必须原样带走 —— bee-studio 顶栏的「克隆 / 音色库 / 剧本台」
+            # 是 /?screen=xxx，丢了 query 会永远停在默认屏（2026-11-26 回归）。
+            _qs = urlparse(self.path).query
             self.send_response(302)
-            self.send_header("Location", "/bee-studio.html")
+            self.send_header("Location", "/index.html" + (("?" + _qs) if _qs else ""))
             self.end_headers()
             return
         if path == "/index.html":
@@ -2371,6 +2420,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/videos/"):
             self._serve_video(path[len("/api/videos/"):])
+            return
+        if path.startswith("/api/images/"):
+            # SD1.5 出图落在 data/images/<date>-<id>.png，只接受纯文件名
+            rel = unquote(path[len("/api/images/"):])
+            if not rel or "/" in rel or "\\" in rel or ":" in rel \
+                    or rel != _safe_name(rel) or not rel.lower().endswith(".png"):
+                self._err("图片路径不合法", 400)
+                return
+            base = (DATA / "images").resolve()
+            target = (base / rel).resolve()
+            if not target.is_file() or not target.is_relative_to(base):
+                self._err("not found", 404)
+                return
+            self._serve_file(target, "image/png")
             return
         self._err("not found", 404)
 
@@ -2817,13 +2880,17 @@ class Handler(BaseHTTPRequestHandler):
                 api_fields["cfg_scale"] = "1"
                 cfg_used = "1"
             if voice:
-                if voice.get("ref_text") and not api_fields.get("ref_text"):
-                    api_fields["ref_text"] = voice["ref_text"]
+                # 设计型音色没有参考音频：它残留的 ref_text 若发给上游，
+                # 会被直接判 ref_audio and ref_text must be paired，整条合成打挂。
+                _vtxt = ("" if (voice.get("type") or "").strip() == "design"
+                         else (voice.get("ref_text") or "").strip())
+                if _vtxt and not api_fields.get("ref_text"):
+                    api_fields["ref_text"] = _vtxt
                 if voice.get("ref_audio"):
                     rp = DATA / voice["ref_audio"]
                     if rp.is_file():
                         files["ref_audio"] = (rp.name, rp.read_bytes())
-            out_body, out_ctype = _remultipart(api_fields, files)
+            # save_as 是面板自己的参数，不能透给上游：必须先摘掉再序列化。
             _save_as = (api_fields.get("save_as") or "").strip()
             api_fields.pop("save_as", None)
             out_body, out_ctype = _remultipart(api_fields, files)
@@ -2885,6 +2952,13 @@ class Handler(BaseHTTPRequestHandler):
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()
+                _vtype = (voice.get("type") or "").strip()
+                # 设计型音色靠 instruction 描述，本来就没有参考音频。
+                # 它身上残留的 ref_text 是历史脏数据：既不该拿去做「成对」校验，
+                # 也不能发给上游——上游只收到 ref_text 没有 ref_audio 会直接
+                # 报 ref_audio and ref_text must be paired，把合成整条打挂。
+                if _vtype == "design":
+                    _vtxt = ""
                 if bool(_vref) != bool(_vtxt):
                     missing = "文字稿" if _vref else "参考音频"
                     return self._err(f"音色「{voice.get('name', '')}」缺{missing}（参考音频与文字稿必须成对），请点该音色的编辑按钮补齐后再合成")
@@ -2899,8 +2973,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(f"音色「{voice.get('name', '')}」的参考音频文件缺失，请点编辑重新上传")
                 if voice.get("instruction") and not ins:
                     api_fields["instruction"] = voice["instruction"]
-                if voice.get("ref_text") and not ref_text:
-                    api_fields["ref_text"] = voice["ref_text"]
+                if _vtxt and not ref_text:
+                    api_fields["ref_text"] = _vtxt
                 if voice.get("cfg_scale") and "cfg_scale" not in fields:
                     api_fields["cfg_scale"] = str(voice["cfg_scale"])
                 if voice.get("ref_audio"):
@@ -3021,6 +3095,13 @@ class Handler(BaseHTTPRequestHandler):
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()
+                _vtype = (voice.get("type") or "").strip()
+                # 设计型音色靠 instruction 描述，本来就没有参考音频。
+                # 它身上残留的 ref_text 是历史脏数据：既不该拿去做「成对」校验，
+                # 也不能发给上游——上游只收到 ref_text 没有 ref_audio 会直接
+                # 报 ref_audio and ref_text must be paired，把合成整条打挂。
+                if _vtype == "design":
+                    _vtxt = ""
                 if bool(_vref) != bool(_vtxt):
                     missing = "文字稿" if _vref else "参考音频"
                     return self._err(f"音色「{voice.get('name', '')}」缺{missing}（参考音频与文字稿必须成对），请点该音色的编辑按钮补齐后再合成")
@@ -3035,8 +3116,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(f"音色「{voice.get('name', '')}」的参考音频文件缺失，请点编辑重新上传")
                 if voice.get("instruction"):
                     api_fields["instruction"] = voice["instruction"]
-                if voice.get("ref_text"):
-                    api_fields["ref_text"] = voice["ref_text"]
+                if _vtxt:
+                    api_fields["ref_text"] = _vtxt
                 if voice.get("ref_audio"):
                     rp = DATA / voice["ref_audio"]
                     if rp.is_file():
@@ -3250,8 +3331,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # W2-3c: 删除词典条目
         if path.startswith("/api/dict/"):
-            from urllib.parse import unquote
             # urlparse 不解码百分号编码，中文词条必须先 unquote
+            # （unquote 已在模块顶部导入；此处不能再局部 import，
+            #   否则整个函数内 unquote 会被当成局部变量，前面调用直接 UnboundLocalError）
             word = _safe_name(unquote(path.rsplit("/", 1)[-1]))
             scope = "global"
             query = urlparse(self.path).query
@@ -3264,18 +3346,46 @@ class Handler(BaseHTTPRequestHandler):
             _save_dict(dictionary)
             self._json({"ok": True})
             return
+        # ---- DELETE /api/refs/<相对路径>：单独删一张参考图/参考音频 ----
+        if path.startswith("/api/refs/"):
+            rel = "refs/" + unquote(path[len("/api/refs/"):])
+            if not _purge_rel_file(rel):
+                return self._err("参考文件不存在或路径非法", 404)
+            # 文件删了、账本还指着它就是悬空引用：把引用字段一起清空
+            url = "/api/" + rel
+
+            def _clear_voice(items):
+                for v in items:
+                    if (v.get("ref_audio") or "").strip().lstrip("/") == rel:
+                        v["ref_audio"] = ""
+                        v["ref_text"] = ""
+
+            def _clear_role(items):
+                for r in items:
+                    if (r.get("ref_image") or "").strip() == url:
+                        r["ref_image"] = ""
+
+            _update_json("voices.json", _clear_voice)
+            _update_json("roles.json", _clear_role)
+            return self._json({"ok": True})
         if path.startswith("/api/voices/"):
             vid = path.rsplit("/", 1)[-1]
+            removed: dict = {}
+
             def _drop(items, _vid=vid):
-                hit = any(v["id"] == _vid for v in items)
-                if hit:
-                    items[:] = [v for v in items if v["id"] != _vid]
-                return {"hit": hit}
+                for i, v in enumerate(items):
+                    if v["id"] == _vid:
+                        removed.update(v)
+                        del items[i]
+                        return {"hit": True}
+                return {"hit": False}
 
             res = _update_json("voices.json", _drop)
             if not res["hit"]:
                 return self._err("voice not found", 404)
-            return self._json({"ok": True})
+            # 只删账本会让参考音频永久留在 data/refs 下（实测已积 18 个孤儿）
+            purged = _purge_rel_file(removed.get("ref_audio", ""))
+            return self._json({"ok": True, "purged_ref": purged})
         if path.startswith("/api/roles/"):
             rid = path.rsplit("/", 1)[-1]
             def _drop(items, _rid=rid):
@@ -3287,6 +3397,8 @@ class Handler(BaseHTTPRequestHandler):
             res = _update_json("roles.json", _drop)
             if not res["hit"]:
                 return self._err("role not found", 404)
+            # 角色没了，参考图目录留着就是永远删不掉的人脸照片
+            purged_imgs = _purge_role_ref_dir(rid)
             # 剧本 cast 里留着这个 id 会变成悬空引用：解析时找不到角色、
             # 界面也不报错，用户只会觉得「这一行突然没声音了」
             cleaned, warning = 0, ""
@@ -3298,7 +3410,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 「剧本里的引用没清干净」，否则他只会在下次打开剧本时
                 # 看到某个角色莫名其妙消失了
                 warning = f"角色已删除，但清理剧本引用失败：{exc}"
-            return self._json({"ok": True, "cleaned": cleaned, "warning": warning})
+            return self._json({"ok": True, "cleaned": cleaned, "warning": warning,
+                               "purged_ref_images": purged_imgs})
         if path.startswith("/api/history/"):
             hid = path.rsplit("/", 1)[-1]
             items = _load("history.json")
