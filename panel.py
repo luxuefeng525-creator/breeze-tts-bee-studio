@@ -3364,6 +3364,10 @@ class Handler(BaseHTTPRequestHandler):
                 for r in items:
                     if (r.get("ref_image") or "").strip() == url:
                         r["ref_image"] = ""
+                        # 授权跟着图走：图删了还留着 consent，会留下
+                        # 「没有图却有授权」的脏账本
+                        r["ref_consent_at"] = ""
+                        r["ref_consent_ver"] = ""
 
             _update_json("voices.json", _clear_voice)
             _update_json("roles.json", _clear_role)
