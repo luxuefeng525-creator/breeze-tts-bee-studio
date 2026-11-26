@@ -1,6 +1,6 @@
 ---
 req_id: REQ-20261127-01
-stage: release
+stage: done
 status: active
 owner: trae
 updated: 2026-11-27
@@ -16,8 +16,10 @@ hits: []
 - [x] A 段：真实浏览器实测出片主链路（新建→生成→持久化→导入→导出），造数已清，产物已还原
 - [x] B 段代码：C2 风格模板库 + LLM 注入 + 建议镜头数（`api/style_templates.py`、`data/style_templates.json`、`api/router.py`、`web/bee-studio.html`）
 - [x] 单测 8 项 + 全量回归 621 passed
-- [ ] G2 人确认（等用户原文）
-- [ ] G3 独立审查 / V 视觉门禁
+- [x] G2 人确认（用户原文「G2 通过（推荐）」，2026-11-27 06:05）
+- [x] G3 独立审查 + V 视觉门禁 + G4（06:15 / 06:21）
+- [x] 分支提交 `fabc626`
+- [ ] 合流回 main（git-atomic merge 命令 + 手动执行）
 
 ## 2. 阻塞
 
@@ -66,14 +68,14 @@ V: PASS | 确认人: 用户 | 时间: 2026-11-27 06:21 | 确认原文: "V 通过
 
 ## 6. 下一步
 
-1. 用户给出 G2 确认原文
-2. 跑 `node harness/engine/harness.mjs gate REQ-20261127-01 --stage G2`
-3. G3 独立审查 → V 视觉门禁 → G4
+1. `node f:\TTS2\harness\scripts\git-atomic.mjs merge session/trae-20261127 REQ-20261127-01` 取命令
+2. 主工作区 `checkout main` → `pull --ff-only` → `merge --no-ff session/trae-20261127 -m "merge session/trae-20261127"`
+3. 删工作树与分支；推送远程需另行取得用户明确同意
 
 ## 7. 交接摘要（可选）
 
-- 上次执行到：B 段代码完成，全量 621 passed，等 G2 确认
-- 关键判断：C3 不重做（`video_pipeline/ffmpeg_export.py:155` + `api/router.py:1251` 已实现且实测导出 PASS）
+- 上次执行到：G1/G2/G3/V/G4 全 PASS，stage 已置 done，待合流
+- 关键判断：C3 不重做（`video_pipeline/ffmpeg_export.py:155` + `api/router.py:1251` 已实现且实测导出 PASS）；真实 LLM 因 LongCat 402 未验证风格一致性
 - 接手注意：面板已重启加载新代码；`data/style_templates.json` 为唯一数据文件，删它即回退内置
 
 ## 8. 清理记录
