@@ -6,6 +6,7 @@
 <title>BreezeTTS Studio · 制声台</title>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="/app.css">
+<script src="/shared/topbar.js" defer></script>
 </head>
 <body data-screen="workbench" data-state="default">
 
@@ -43,8 +44,9 @@
 </svg>
 
 <div class="app">
-  <header class="topbar">
-    <div class="brand">
+  <!-- 顶栏结构与站点共用组件，深色皮肤仍由 app.css 提供 -->
+  <bee-topbar mode="app" active="workbench" theme="off">
+    <div slot="brand" class="brand">
       <svg class="brand-mark" viewBox="0 0 26 26" aria-hidden="true">
         <rect x="2" y="10" width="2.4" height="6" rx="1.2" fill="currentColor"/>
         <rect x="6.2" y="7" width="2.4" height="12" rx="1.2" fill="currentColor"/>
@@ -56,18 +58,10 @@
       <span class="brand-div"></span>
       <span class="brand-sub">制声台</span>
     </div>
-    <nav class="nav" aria-label="主导航">
-      <button type="button" data-screen="workbench" aria-current="page"><svg class="icon"><use href="#i-wave"/></svg>合成台</button>
-      <button type="button" data-screen="clone"><svg class="icon"><use href="#i-mic"/></svg>克隆</button>
-      <button type="button" data-screen="script"><svg class="icon"><use href="#i-book"/></svg>剧本</button>
-      <button type="button" data-screen="library"><svg class="icon"><use href="#i-grid"/></svg>音色库</button>
-    </nav>
-    <div class="top-actions">
-      <span class="engine" id="engineState"><span class="dot"></span><span id="engineText">本地引擎 · 连接中</span></span>
-      <button class="icon-btn" type="button" aria-label="帮助与说明" id="helpBtn"><svg class="icon"><use href="#i-help"/></svg></button>
-      <button class="icon-btn" type="button" aria-label="设置与诊断" id="settingsBtn"><svg class="icon"><use href="#i-settings"/></svg></button>
-    </div>
-  </header>
+    <span class="engine" id="engineState"><span class="dot"></span><span id="engineText">本地引擎 · 连接中</span></span>
+    <button class="icon-btn" type="button" aria-label="帮助与说明" id="helpBtn"><svg class="icon"><use href="#i-help"/></svg></button>
+    <button class="icon-btn" type="button" aria-label="设置与诊断" id="settingsBtn"><svg class="icon"><use href="#i-settings"/></svg></button>
+  </bee-topbar>
 
   <main>
     <!-- ============ screen 1: workbench ============ -->
