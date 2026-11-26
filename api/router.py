@@ -20,6 +20,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from api import style_templates as _styles
+
 
 # ------------------------------------------------------------------
 # SQLite 任务持久化（A1：视频生成 + ffmpeg 导出）
@@ -863,6 +865,11 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
         _h_json(h, job)
         return True
 
+    # ---- GET /api/bee/style-templates —— 剧本视觉风格模板库 ----
+    if parts == ["api", "bee", "style-templates"]:
+        _h_json(h, {"templates": _styles.list_templates()})
+        return True
+
     # ---- GET /api/bee/video/jobs — Bee Studio 专属命名空间，避免与原产品冲突 ----
     if parts == ["api", "bee", "video", "jobs"]:
         # 列出最近 50 条视频任务（A1：持久化后可以重查）
@@ -932,6 +939,33 @@ def handle_get(h: BaseHTTPRequestHandler, path: str) -> bool:
 # ------------------------------------------------------------------
 # POST 路由
 # ------------------------------------------------------------------
+def build_script_prompts(topic: str, shots_count: int, audience: str,
+                         tpl: dict) -> tuple[str, str]:
+    """构造 script-gen 的 system/user prompt。风格约束进 system，保证被遵守。"""
+    system_prompt = (
+        "你是资深短视频导演兼编剧。根据用户给的主题生成一段分镜剧本（JSON 格式）。\n"
+        "严格遵守以下约束：\n"
+        "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
+        "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
+        "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
+        "4. 角色名保持一致。emotion 必须从这 11 个词里选、且只能选一个："
+        "中性/温柔/开心/激动/悲伤/愤怒/紧张/迟疑/恐惧/讽刺/疲惫（这是 TTS 情绪引擎的枚举，写别的词会被丢弃）；"
+        "整体情绪要有起伏（紧张→爆发→收束）。\n"
+        "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
+    )
+    # R-02：把所选风格的画面约束写进 system prompt（不是只给一行标签）
+    system_prompt += _styles.style_system_suffix(tpl)
+    desc = f" — {tpl['description']}" if tpl.get("description") else ""
+    user_prompt = (
+        f"主题：{topic}\n"
+        f"镜头数：{shots_count}\n"
+        f"目标受众：{audience or '通用'}\n"
+        f"风格/色调：{tpl['name']}{desc}\n\n"
+        "请输出完整 JSON。"
+    )
+    return system_prompt, user_prompt
+
+
 def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", ctype: str = "") -> bool:
     # body 已经由 panel.py 读过并传进来了，不要重读 rfile
     body = {}
@@ -1320,6 +1354,9 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         provider = str(body.get("provider", "longcat")).strip()
         force_mock = bool(body.get("force_mock"))   # G2-2: 跳过 LLM 直接 Mock 并写 DB
         api_key = str(body.get("api_key", "")).strip() or _get_key(provider)
+        style_id = str(body.get("style_id") or _styles.DEFAULT_STYLE_ID).strip()
+        tpl = _styles.get_template(style_id)
+        style_id = tpl["id"]   # 归一化：未知 id 已由 get_template 落到默认模板
 
         # G2-2: 提前定义，force_mock 块依赖它们（Python 闭包要求先定义后引用）
         def _norm_emotion(raw_emo) -> str:
@@ -1350,7 +1387,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     return v
             return "中性"
 
-        def _normalize_shot(s: dict | None) -> dict:
+        def _normalize_shot(s: dict | None, style_id: str | None = None) -> dict:
             """兜底填空值，保证每个 shot 都有必需字段。"""
             s = s or {}
             return {
@@ -1361,10 +1398,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "duration_sec": int(s.get("duration_sec") or s.get("duration") or 5),
                 "prompt": str(s.get("prompt") or s.get("description") or ""),
                 "voice_prompt": str(s.get("voice_prompt") or s.get("voice_text") or ""),
+                "style_id": str(s.get("style_id") or style_id or _styles.DEFAULT_STYLE_ID),
             }
 
-        def _build_mock_script() -> dict:
+        def _build_mock_script(style_id: str | None = None) -> dict:
             """A5 兜底 mock（LLM 挂了也能出个可编辑剧本）。"""
+            sid = style_id or _styles.DEFAULT_STYLE_ID
             mock_shots = []
             for i in range(max(shots_count, 1)):
                 mock_shots.append({
@@ -1375,6 +1414,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "duration_sec": 5,
                     "prompt": f"（mock）{topic} 场景 {i + 1}",
                     "voice_prompt": f"（mock）旁白，第 {i + 1} 句台词",
+                    "style_id": sid,
                 })
             return {"title": topic or "mock 剧本", "shots": mock_shots}
 
@@ -1387,7 +1427,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
 
         if force_mock:
             # G2-2: 前端要求 Mock 模式（无 LLM Key 也要持久化剧本）
-            mock = _build_mock_script()
+            mock = _build_mock_script(style_id)
             pid = body.get("project_id") or f"proj-{int(time.time())}"
             _script_write(pid, mock["title"], "",
                           json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
@@ -1395,7 +1435,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {
                 "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                 "generated_by": "mock", "shots_count": len(mock["shots"]),
-                "used_mock": True, "mock_reason": "force_mock",
+                "used_mock": True, "mock_reason": "force_mock", "style_id": style_id,
             })
             return True
 
@@ -1403,25 +1443,8 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
             return True
 
-        # 构造 system + user prompt，要求输出结构化 JSON
-        system_prompt = (
-            "你是资深短视频导演兼编剧。根据用户给的主题生成一段分镜剧本（JSON 格式）。\n"
-            "严格遵守以下约束：\n"
-            "1. 每个镜头包含：scene_no（序号）、title（标题）、char（角色，用昵称）、emotion（情绪）、duration_sec（整数秒）、prompt（详细的视频生成提示词）、voice_prompt（配音要求）。\n"
-            "2. prompt 要能直接喂给即梦/Kling/Vidu 等视频模型，详细描述画面、运动、光线、情绪。\n"
-            "3. 总时长约等于所有 duration_sec 之和（每个镜头建议 5~15s）。\n"
-            "4. 角色名保持一致。emotion 必须从这 11 个词里选、且只能选一个："
-            "中性/温柔/开心/激动/悲伤/愤怒/紧张/迟疑/恐惧/讽刺/疲惫（这是 TTS 情绪引擎的枚举，写别的词会被丢弃）；"
-            "整体情绪要有起伏（紧张→爆发→收束）。\n"
-            "5. 输出必须是合法 JSON，外层结构为 {\"title\": \"剧本标题\", \"shots\": [...]}"
-        )
-        user_prompt = (
-            f"主题：{topic}\n"
-            f"镜头数：{shots_count}\n"
-            f"目标受众：{audience or '通用'}\n"
-            f"风格/色调：{style or '电影感，冷暖对比'}\n\n"
-            "请输出完整 JSON。"
-        )
+        # 构造 system + user prompt，要求输出结构化 JSON（风格约束在函数内注入）
+        system_prompt, user_prompt = build_script_prompts(topic, shots_count, audience, tpl)
 
         # A5：schema validation + retry （_normalize_shot / _build_mock_script 已提前到 force_mock 之前定义）
 
@@ -1452,7 +1475,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             shots_raw = data.get("shots") or []
             if not isinstance(shots_raw, list) or not shots_raw:
                 raise ValueError("LLM 返回 shots 为空或非数组")
-            shots = [_normalize_shot(s) for s in shots_raw[:30]]  # 上限 30
+            shots = [_normalize_shot(s, style_id) for s in shots_raw[:30]]  # 上限 30
             title = str(data.get("title") or topic or "未命名剧本")
 
             # A3：剧本历史持久化（存 SQLite scripts 表）
@@ -1464,11 +1487,11 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {
                 "project_id": pid, "title": title, "shots": shots,
                 "generated_by": provider, "shots_count": len(shots),
-                "used_mock": False,
+                "used_mock": False, "style_id": style_id,
             })
         except json.JSONDecodeError as exc:
             # A5：双重失败 → mock 降级（不是真 502，是可用 fallback）
-            mock = _build_mock_script()
+            mock = _build_mock_script(style_id)
             pid = body.get("project_id") or f"proj-{int(time.time())}"
             _script_write(pid, mock["title"], "",
                           json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
@@ -1477,12 +1500,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                 "generated_by": "mock", "shots_count": len(mock["shots"]),
                 "used_mock": True, "mock_reason": f"JSON 解析失败: {exc.msg}",
-                "raw_preview": (raw or "")[:500],
+                "raw_preview": (raw or "")[:500], "style_id": style_id,
             }, 200)  # 200 OK mock 也算可用，不报 502
         except Exception as exc:
             # LLM 调用挂了 → mock 降级
             try:
-                mock = _build_mock_script()
+                mock = _build_mock_script(style_id)
                 pid = body.get("project_id") or f"proj-{int(time.time())}"
                 _script_write(pid, mock["title"], "",
                               json.dumps({"shots": mock["shots"]}, ensure_ascii=False),
@@ -1491,6 +1514,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                     "generated_by": "mock", "shots_count": len(mock["shots"]),
                     "used_mock": True, "mock_reason": f"LLM 调用失败: {str(exc)[:200]}",
+                    "style_id": style_id,
                 }, 200)
             except Exception as exc2:
                 _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)

@@ -1,0 +1,4 @@
+project_id proj-style-e2e-001
+resp.style_id cyberpunk
+shot.style_ids ['cyberpunk', 'cyberpunk']
+cleaned proj-style-e2e-001

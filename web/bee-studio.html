@@ -1128,6 +1128,7 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   border-top: 1px solid var(--border);
   display:flex; justify-content:flex-end; gap: var(--space-2);
 }
+.style-desc { font-size: var(--font-xs); color: var(--text-muted); margin-top: 6px; min-height: 2.4em; line-height: 1.35; }
 .form-group label {
   display:block; font-size: var(--font-xs); color: var(--text-muted); font-weight: 600; margin: var(--space-1); letter-spacing: 0.5px;
 }
@@ -1534,11 +1535,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
         <div class="form-group">
           <label>🎨 视觉风格</label>
           <select id="scriptStyle">
-            <option selected>电影感 · Cinematic</option>
-            <option>赛博朋克 · Cyberpunk</option>
-            <option>日系动画 · Anime</option>
-            <option>写实纪录片 · Doc</option>
+            <option value="" selected>加载模板中</option>
           </select>
+          <div class="style-desc" id="scriptStyleDesc"></div>
         </div>
         <div class="form-group">
           <label>📐 镜头数量</label>
@@ -1713,6 +1712,7 @@ async function syncProjectsFromDB() {
           videoReady: !!sh.video_url,
           videoUrl: sh.video_url || null,
           videoMock: !!sh.video_mock,
+          styleId: sh.style_id || null,
         }));
         const totalDuration = shots.reduce((a, b) => a + (b.duration || 0), 0);
         loaded.push({
@@ -1778,6 +1778,8 @@ async function autosaveProject() {
     role_id: s.roleId || null,
     // 落库同样夹一次：内存态可能被注入/导入带进不支持的画幅
     res: normRes(s.provider || 'comfyui', s.res || '1080p'),
+    // 风格归属落库：刷新后仍能知道这批镜头按哪个风格生成
+    style_id: s.styleId || null,
   }));
   try {
     await apiBT(`/api/bee/script/${proj.id}/shots`, {
@@ -1886,6 +1888,9 @@ function switchProject(id) {
   renderTimeline();
   const proj = getActiveProject();
   $('#projectTitleInput').value = proj.name;
+  // 重开旧项目时回显它的风格归属（数据本来就在 shots_json 里，不显性等于没有）
+  const sid = (proj.shots || []).map(s => s.styleId).find(Boolean);
+  if (sid && STYLE_TEMPLATES.some(t => t.id === sid)) $('#scriptStyle').value = sid;
   updateUndoRedoUI();  // G7: 切项目时刷新撤销栈状态
 }
 
@@ -2344,8 +2349,9 @@ async function generateVideo(shotId, cardEl) {
   } catch {}
   if (!keyConfigured) {
     const why = keyState === 'placeholder' ? 'API Key 是测试占位，需换成真实 Key' : '未配置 API Key';
-    // 不写 mock、不动预览：没 Key 就是没 Key，不能给人看假成功
-    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。LongCat 是文本模型写不了视频；剧本/配音/导出不受影响。要出视频可选「本地 ComfyUI · 免费」，或配 Kling / 即梦 / Vidu / 万相 其中一家的真实 Key`, 'warn');
+    // 不写 mock、不动预览：没 Key 就是没 Key，不能给人看假成功。
+    // 也别再把「LongCat 写不了视频」扯进来——这里是视频 provider，不是 LLM。
+    showToast(`⚠️ ${PROV_LABEL[shot.provider] || shot.provider} ${why}。视频不会用 Mock 冒充成功：可把该镜头切成「本地 ComfyUI · 免费」直接出片，或在右侧密钥管理配置真实 Key`, 'warn');
     return;
   }
 
@@ -2449,6 +2455,9 @@ async function exportProject() {
   if (!shots.length) { showToast('⚠️ 没有可导出的镜头', 'warn'); return; }
 
   showToast(`🎞️ 开始合成 ${shots.length} 镜头...`, 'info');
+  // 后端按片合成时只取有视频文件的片段；不提前说清楚会出现「2 镜头导出成 1 秒」
+  const noVideo = shots.filter(s => !s.videoUrl).length;
+  if (noVideo > 0) showToast(`⚠️ ${noVideo} 个镜头还没有视频，本次只导出已有视频的片段`, 'warn');
   let ejid;
   try {
     const r = await apiBT('/api/export/' + project.id, {
@@ -3099,6 +3108,7 @@ $$('.emotion-tag').forEach(t => {
 // 打开 Modal 时检测 LLM 状态
 $('#aiScriptBtn').addEventListener('click', async () => {
   $('#scriptModal').classList.add('open');
+  loadStyleTemplates();
   // 刷新 LLM 状态徽章
   try {
     const provs = await apiBT('/api/providers');
@@ -3134,24 +3144,95 @@ $('#scriptLLM').addEventListener('change', async () => {
     else { badge.textContent = '未配置'; badge.className = 'llm-status llm-bad'; }
   } catch {}
 });
+// R-03：改总时长或风格时刷新建议镜头数（用户手选后不会被无关操作覆盖）
+$('#scriptDuration').addEventListener('change', refreshShotSuggestion);
+$('#scriptStyle').addEventListener('change', refreshShotSuggestion);
+
+// ========== 视觉风格模板库（后端接口优先，内置兜底） ==========
+const FALLBACK_STYLES = [
+  {id:'cinematic', name:'电影感 · Cinematic', description:'冷暖对比、浅景深、缓慢运镜，适合剧情向短片。', prompt_hint:'画面追求电影感：冷暖对比色调、浅景深、自然光与实用光源结合；镜头运动以缓慢推轨/横移为主，构图留白，避免塑料感与过饱和。', shot_seconds:6},
+  {id:'cyberpunk', name:'赛博朋克 · Cyberpunk', description:'霓虹雨夜、体积光、高密度城市细节。', prompt_hint:'画面为赛博朋克风：霓虹招牌与雨夜湿反射、蓝紫与洋红高光、浓雾与体积光；镜头多为低机位仰拍与特写，强调全息广告与机械细节。', shot_seconds:6},
+  {id:'anime', name:'日系动画 · Anime', description:'赛璐璐上色、明朗天空、节奏明快。', prompt_hint:'画面为日系动画风：干净线条、柔和赛璐璐上色、大面积天空与云、夸张光影；镜头节奏明快，多用定帧与速度线表现动作。', shot_seconds:5},
+  {id:'documentary', name:'写实纪录片 · Doc', description:'手持自然光、真实环境、采访中近景。', prompt_hint:'画面为写实纪录片：手持轻微晃动、自然光、真实环境声暗示（不生成声音）、采访式中近景；避免摆拍感与戏剧化打光。', shot_seconds:6},
+  {id:'product', name:'产品广告 · Product', description:'主体突出、材质质感、色调统一。', prompt_hint:'画面为产品广告：主体居中或三分构图、洁净背景、柔和轮廓光勾勒材质；镜头缓慢环绕或微距推进，突出质感与卖点，色调统一。', shot_seconds:5},
+  {id:'vertical', name:'竖屏短视频 · Vertical', description:'9:16 构图、顶部字幕安全区、开头强钩子。', prompt_hint:'画面按 9:16 竖屏构图：主体位于中上三分之一、顶部留字幕安全区、背景简化；镜头运动短促有力，前 1 秒给强视觉钩子。', shot_seconds:5}
+];
+let STYLE_TEMPLATES = [];
+
+async function loadStyleTemplates() {
+  let list = [];
+  try {
+    const r = await apiBT('/api/bee/style-templates');
+    list = Array.isArray(r.templates) ? r.templates : [];
+  } catch {}
+  // 接口挂了也不能让弹窗空着：回退内置，行为与文件缺失时一致
+  STYLE_TEMPLATES = list.length ? list : FALLBACK_STYLES;
+  renderStyleTemplates();
+}
+function renderStyleTemplates() {
+  const sel = $('#scriptStyle');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '';
+  STYLE_TEMPLATES.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t.id; o.textContent = t.name;
+    sel.appendChild(o);
+  });
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  renderStyleDesc();
+}
+function currentStyleTemplate() {
+  const sel = $('#scriptStyle');
+  return STYLE_TEMPLATES.find(t => t.id === (sel && sel.value)) || STYLE_TEMPLATES[0] || null;
+}
+function renderStyleDesc() {
+  const box = $('#scriptStyleDesc'); const t = currentStyleTemplate();
+  if (!box) return;
+  box.textContent = t ? `${t.description || ''}${t.shot_seconds ? ` · 建议每镜约 ${t.shot_seconds}s` : ''}` : '';
+}
+function suggestShotCount(totalDur, tpl) {
+  const total = parseInt(totalDur, 10), per = Number(tpl && tpl.shot_seconds);
+  if (!Number.isFinite(total) || !Number.isFinite(per) || total <= 0 || per <= 0) return null;
+  return Math.max(1, Math.min(30, Math.round(total / per)));
+}
+function sortShotOptions(sel) {
+  const opts = [...sel.options];
+  opts.sort((a, b) => (parseInt(a.value, 10) || 0) - (parseInt(b.value, 10) || 0));
+  sel.innerHTML = '';
+  opts.forEach(o => sel.appendChild(o));
+}
+function refreshShotSuggestion() {
+  const n = suggestShotCount($('#scriptDuration').value, currentStyleTemplate());
+  if (!n) { showToast('⚠️ 总时长无效，已保持当前镜头数', 'warn'); return; }
+  const sel = $('#scriptShots');
+  if (![...sel.options].some(o => o.value === String(n))) {
+    const o = document.createElement('option');
+    o.value = String(n); o.textContent = `${n} 镜头`;
+    sel.appendChild(o);
+  }
+  sortShotOptions(sel);
+  sel.value = String(n);
+  renderStyleDesc();
+}
 
 // ========== AI 剧本生成（LLM + Mock 降级） ==========
 // G2-2: _mockGenerate 现在走后端 force_mock 端点，确保 Mock 项目也持久化到 SQLite
 async function _mockGenerate(topic, numShots, totalDur, audience, style) {
   try {
-    const body = { topic, shots_count: numShots, audience, style, force_mock: true };
+    const body = { topic, shots_count: numShots, audience, style, force_mock: true,
+                   style_id: (currentStyleTemplate() || {}).id || 'cinematic' };
     const r = await apiBT('/api/llm/script-gen', {
       method: 'POST', body: JSON.stringify(body)
     });
     if (r.error) throw new Error(r.error);
-    // 复用 _llmGenerate 里的 ShotSegment 映射
-    const styleHints = {'电影感 · Cinematic':'广角镜头，浅景深，4K','赛博朋克 · Cyberpunk':'霓虹色彩，雨夜里的全息广告','日系动画 · Anime':'柔和色调','写实纪录片 · Doc':'手持摄影，真实质感'};
     const shots = (r.shots || []).map((s, i) => ({
       id: 's-mock-' + i, num: i + 1,
       title: s.title || `镜头 ${i+1}`,
       char: s.char || '主角',
       duration: s.duration_sec || 5,
-      prompt: (s.prompt || '') + (styleHints[style] ? ` · ${styleHints[style]}` : ''),
+      prompt: s.prompt || '',
+      styleId: s.style_id || (currentStyleTemplate() || {}).id || 'cinematic',
       voice: s.voice_prompt || '男声 · 沉稳',
       emotion: s.emotion || '中性',
       // 新建镜头默认就是本地档：画幅直接给它能出的 480p，别摆 1080p 让人白等一场空
@@ -3188,25 +3269,26 @@ async function _mockGenerate(topic, numShots, totalDur, audience, style) {
 }
 
 async function _llmGenerate(topic, numShots, totalDur, audience, style, provider) {
-  const body = { topic, shots_count: numShots, audience, style, provider };
+  const body = { topic, shots_count: numShots, audience, style, provider,
+                 style_id: (currentStyleTemplate() || {}).id || 'cinematic' };
   const r = await apiBT('/api/llm/script-gen', {
     method: 'POST', body: JSON.stringify(body)
   });
   if (r.error) throw new Error(r.error);
   // 把 LLM JSON 映射成前端 ShotSegment
-  const styleHints = {'电影感 · Cinematic':'广角镜头，浅景深，4K','赛博朋克 · Cyberpunk':'霓虹色彩，雨夜里的全息广告','日系动画 · Anime':'柔和色调','写实纪录片 · Doc':'手持摄影，真实质感'};
   const shots = (r.shots || []).map((s, i) => ({
     id: 's-llm-' + i,
     num: i + 1,
     title: s.title || `镜头 ${i+1}`,
     char: s.char || '主角',
     duration: Math.max(3, Math.min(15, parseInt(s.duration_sec) || Math.round(totalDur / numShots))),
-    prompt: (s.prompt || `${topic} · 镜头 ${i+1}`) + ` · ${styleHints[style] || ''}`,
+    prompt: s.prompt || `${topic} · 镜头 ${i+1}`,
     voice: s.voice_prompt || '自然配音',
     emotion: s.emotion || EMOTIONS[i % EMOTIONS.length],
     provider: 'comfyui', res: '480p',
     cost: calcCost('comfyui','480p', Math.round(totalDur / numShots)),
-    audioUrl: null, videoReady: false
+    audioUrl: null, videoReady: false,
+    styleId: s.style_id || (currentStyleTemplate() || {}).id || 'cinematic'
   }));
   return { title: r.title || topic, shots };
 }
@@ -3325,7 +3407,7 @@ $('#videoAllBtn').addEventListener('click', async () => {
   const proj = getActiveProject();
   const shots = proj.shots.filter(s => !s.videoReady);
   if (shots.length === 0) { showToast('🎬 所有镜头都已有视频 · 点镜头卡的 🎬 单独重生成', 'info'); return; }
-  showToast(`🎬 批量视频生成 · ${shots.length} 镜头排队中（无 Key 自动 Mock）`, 'info');
+  showToast(`🎬 批量视频生成 · ${shots.length} 镜头排队中（仅本地 ComfyUI 立即可用；云端需真实 Key）`, 'info');
   for (let i = 0; i < shots.length; i++) {
     await new Promise(r => setTimeout(r, 400));
     // 分镜卡 DOM 里找对应 shot 触发视觉更新
@@ -3344,6 +3426,7 @@ $('#newProjectBtn').addEventListener('click', () => {
   $('#scriptShots').value = '5';
   $('#scriptDuration').value = '30';
   $('#scriptModal').classList.add('open');
+  loadStyleTemplates();
   showToast('🎬 新建项目 · 主题 → 自动生成剧本+分镜', 'info');
 });
 

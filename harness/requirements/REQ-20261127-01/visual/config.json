@@ -1,0 +1,16 @@
+{
+  "baseUrl": "http://127.0.0.1:7861",
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "tablet", "width": 768, "height": 1024 }
+  ],
+  "pages": [
+    {
+      "name": "bee-studio-script-modal",
+      "path": "/bee-studio.html",
+      "states": ["default"],
+      "expect": [],
+      "emptyAllowed": []
+    }
+  ]
+}

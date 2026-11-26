@@ -1,0 +1,5 @@
+命令：f:\TTS2\breeze-tts\.venv\Scripts\python.exe -m pytest -q
+工作树：f:\TTS2\breeze-tts（分支 session/trae-20261127）
+执行时间：2026-11-27
+输出末尾：621 passed, 1 warning in 481.53s (0:08:01)
+说明：含新增 tests/test_style_templates.py 8 项；无 FAIL。
