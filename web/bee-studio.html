@@ -572,6 +572,30 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
 .role-item .ri-name { font-size: var(--font-sm); font-weight: 600; }
 .role-item .ri-desc { font-size: var(--font-xs); color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .role-item.empty { text-align: center; padding: var(--space-5); color: var(--text-faint); font-size: var(--font-sm); }
+/* 角色卡上的「用作首帧」：复用 btn 的 token，不自造配色；禁用态说明原因 */
+.role-item .ri-action {
+  flex-shrink: 0; font-size: var(--font-xs); padding: 4px 8px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--panel); color: var(--text-muted); cursor: pointer;
+}
+.role-item .ri-action:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+.role-item .ri-action:disabled { opacity: .45; cursor: not-allowed; }
+/* 用 --on-primary 而不是写死白字：暗色主题的 --primary 是亮金，白字压不住 */
+.role-item .ri-action.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+/* 镜头卡 prompt 旁的参考缩略图回显 */
+.sp-ref {
+  display: flex; align-items: center; gap: var(--space-2);
+  margin-top: var(--space-2); padding: var(--space-2);
+  border: 1px dashed var(--border); border-radius: var(--radius-md); background: var(--panel-2);
+}
+.sp-ref img { width: 34px; height: 34px; object-fit: cover; border-radius: var(--radius-sm); flex-shrink: 0; }
+.sp-ref .sr-name { font-size: var(--font-xs); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sp-ref .sr-clear {
+  margin-left: auto; flex-shrink: 0; font-size: var(--font-xs); padding: 3px 7px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--panel); color: var(--text-faint); cursor: pointer;
+}
+.sp-ref .sr-clear:hover { border-color: var(--primary); color: var(--primary); }
 
 .history-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: var(--space-1); }
 .history-item {
@@ -1617,6 +1641,28 @@ const priceOf = (k) => {
   return p['1080p'] ?? p['720p'] ?? p['480p'] ?? 0;
 };
 
+// 各档实际支持的画幅：本地模型物理上限就在这，摆一个 1080p 出来只会让用户以为能出 1080p
+const RES_BY_PROVIDER = {
+  comfyui: ['480p', '720p'],
+  jimeng: ['720p', '1080p'],
+  kling: ['720p', '1080p'],
+  vidu: ['720p', '1080p'],
+  wanx: ['720p', '1080p'],
+};
+
+/**
+ * 把画幅夹到该 provider 真正支持的范围内。
+ * 存量镜头读回时可能带着 1080p（早期默认值），本地档下必须先收敛再显示/提交，
+ * 否则按钮写「立即生成 1080p」，实际只能出 480p，用户拿到的是货不对板的成片。
+ * @param {string} provider - 视频 provider 名
+ * @param {string} res - 目标画幅
+ * @returns {string} 合法画幅
+ */
+function normRes(provider, res) {
+  const ok = RES_BY_PROVIDER[provider] || ['720p', '1080p'];
+  return ok.includes(res) ? res : ok[0];
+}
+
 const EMOTIONS = ['平静','忧郁','紧张','愤怒','温柔','悬疑','兴奋','孤独','希望','恐惧','幽默','怀旧'];
 // 后端 tts_pipeline/script.py 的 EMOTIONS 只有 11 个键（中性/温柔/开心/激动/悲伤/愤怒/紧张/迟疑/恐惧/讽刺/疲惫）。
 // UI 用词更贴创作，合成前必须映射过去；否则后端认不出（script.py 只在 tag in EMOTIONS 时生效），会静默退回默认。
@@ -1655,7 +1701,10 @@ async function syncProjectsFromDB() {
           voice: sh.voice_prompt || '',
           emotion: sh.emotion || '中性',
           provider: sh.provider || 'comfyui',
-          res: sh.res || '1080p',
+          // 显式绑定的首帧角色：后端 shots_json 存的是 role_id，读回来要还原成镜头的绑定关系
+          roleId: sh.role_id || null,
+          // 读回即夹到该档支持的画幅：切档时也会清（:2032），但存量镜头带 1080p 时同样要收敛
+          res: normRes(sh.provider || 'comfyui', sh.res || '1080p'),
           cost: 0,
           // 后端 shots_json 原样存取；不读回就等于每次刷新丢配音/视频/剧本绑定
           bt_script_id: sh.bt_script_id || null,
@@ -1725,7 +1774,10 @@ async function autosaveProject() {
     video_url: s.videoUrl || null,
     video_mock: !!s.videoMock,
     provider: s.provider || 'comfyui',
-    res: s.res || '1080p',
+    // 绑定关系落库：不存的话刷新后镜头靠 char 名重新猜角色，改名/重名就静默失效
+    role_id: s.roleId || null,
+    // 落库同样夹一次：内存态可能被注入/导入带进不支持的画幅
+    res: normRes(s.provider || 'comfyui', s.res || '1080p'),
   }));
   try {
     await apiBT(`/api/bee/script/${proj.id}/shots`, {
@@ -1842,6 +1894,14 @@ function getActiveProject() {
 }
 
 // -------------------------- Render Storyboard ---------------------------
+// 镜头当前用的首帧角色：只认镜头上显式绑定的 role_id。
+// 不按 char 名回头猜——取消绑定后 shot.char 还在，名字猜测会让旧角色「复活」，
+// 缩略图撤不掉、下次出片又带着它提交。绑定关系只由 role_id 说话。
+function shotRole(shot) {
+  if (!shot || !shot.roleId) return null;
+  return (allRoles || []).find(r => r.id === shot.roleId) || null;
+}
+
 function renderStoryboard() {
   const wall = $('#storyboardWall');
   // P0-root-fix: 先保护再清空 —— state 未就绪时不动 DOM（保留旧内容直到数据回来）
@@ -1876,10 +1936,24 @@ function renderStoryboard() {
         <span class="sp-save-hint" data-role="save-hint" style="display:none">💾 已保存</span>
       </div>
 
+      ${(() => {
+        // 让用户看见这一镜用了谁的脸：绑了角色且它有参考图才显示
+        const r = shotRole(shot);
+        if (!r || !r.ref_image) return '';
+        return `<div class="sp-ref">
+          <img src="${BT}${escapeHtml(r.ref_image)}" alt="">
+          <div class="sr-name">首帧 · ${escapeHtml(r.name)}</div>
+          <button class="sr-clear" data-action="clear-ref" title="取消用这个角色当首帧">✕ 取消</button>
+        </div>`;
+      })()}
+
       <div class="shot-preview ${shot.videoUrl ? 'preview-ready' : ''}" data-state="${shot.videoUrl ? 'ready' : 'empty'}">
         ${shot.videoUrl
           ? `<video class="shot-video" src="${shot.videoUrl}" controls preload="metadata" playsinline></video>`
-          : `<div class="pv-empty"><div class="sc-emoji">🎬</div><strong>尚未生成视频</strong><span>需配置视频模型 API Key（LongCat 只能写剧本）</span></div>`}
+          : (shot.provider === 'comfyui'
+            // 本地档默认就是它：不能再写「需配置 API Key」，那会把免费能力藏起来
+            ? `<div class="pv-empty"><div class="sc-emoji">🖥️</div><strong>尚未生成视频</strong><span>本地图生视频 · 免费 · 约 3–10 分钟，点「🎬 视频生成」开始</span></div>`
+            : `<div class="pv-empty"><div class="sc-emoji">🎬</div><strong>尚未生成视频</strong><span>${escapeHtml((PRICING[shot.provider] || {}).name || shot.provider)} 需先在设置里填 API Key</span></div>`)}
       </div>
 
       <div class="shot-actions">
@@ -1892,7 +1966,7 @@ function renderStoryboard() {
               ${Object.keys(PRICING).map(k => `<div class="dm-item ${shot.provider===k?'active':''}" data-model="${k}">${PRICING[k].name}<span>${priceOf(k) ? priceOf(k).toFixed(2)+'/s' : '¥0'}</span></div>`).join('')}
               <div class="dm-sep"></div>
               <div class="dm-title">分辨率</div>
-              ${['720p','1080p'].map(r => `<div class="dm-item ${shot.res===r?'active':''}" data-res="${r}">${r}</div>`).join('')}
+              ${(RES_BY_PROVIDER[shot.provider] || ['720p','1080p']).map(r => `<div class="dm-item ${shot.res===r?'active':''}" data-res="${r}">${r}</div>`).join('')}
               <div class="dm-sep"></div>
               <div class="dm-item" data-gen="gen" style="color:var(--accent);font-weight:700">⚡ 立即生成 ${shot.res}</div>
             </div>
@@ -1932,6 +2006,14 @@ function renderStoryboard() {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { promptEdit.blur(); }
     });
 
+    const clearRefBtn = card.querySelector('[data-action="clear-ref"]');
+    if (clearRefBtn) clearRefBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      commitUndo(() => { shot.roleId = null; }, '取消首帧角色');
+      _debounceAutosave();
+      renderStoryboard();
+    });
+
     card.addEventListener('click', (e) => {
       if (e.target.closest('.dropdown-menu') || e.target.closest('.shot-prompt')) return;
       state.activeShotId = shot.id;
@@ -1960,6 +2042,8 @@ function renderStoryboard() {
         if (item.dataset.model) {
           commitUndo(() => {
             shot.provider = item.dataset.model;
+            // 本地档不支持 1080p：不清掉的话按钮会写「立即生成 1080p」，实际只能按本地画幅出
+            shot.res = normRes(shot.provider, shot.res);
             shot.cost = calcCost(shot.provider, shot.res, shot.duration);
           }, '切换视频模型');
         } else if (item.dataset.res) {
@@ -1969,6 +2053,10 @@ function renderStoryboard() {
           }, '切换分辨率');
         } else if (item.dataset.gen) {
           closeAllDropdowns();
+          if (card.classList.contains('generating')) {
+            showToast('⏳ 这个镜头正在出片，等它出完再提交', 'warn');
+            return;
+          }
           generateVideo(shot.id, card);
           return;
         }
@@ -2030,6 +2118,9 @@ document.addEventListener('click', closeAllDropdowns);
 // -------------------------- Inspector ---------------------------
 function getActiveShot() {
   const p = getActiveProject();
+  // 没有项目 / 项目还没加载完时不能解引用：loadRoles 在初始化时就会调它，
+  // 少了这层判断会让整个角色库渲染中断（用户看到空白列表 + 控制台报错）
+  if (!p || !p.shots) return null;
   return p.shots.find(s => s.id === state.activeShotId) || p.shots[0];
 }
 
@@ -2056,7 +2147,8 @@ async function updateCost() {
   try {
     if (model === 'comfyui') {
       const shot = getActiveShot();
-      const role = shot && (allRoles || []).find(r => r.name === shot.char);
+      // 与提交口径一致：用镜头显式绑定的角色，而不是再按 char 名猜一遍
+      const role = shot && shotRole(shot);
       if (role && role.ref_image) img = 1;
     }
   } catch {}
@@ -2091,7 +2183,26 @@ async function updateCost() {
     $('#costRate').textContent = `${p.name} · ${res} · ¥${rate.toFixed(2)}/s（离线 fallback）`;
   }
 }
-['#costModel','#costRes','#costDuration'].forEach(s => $(s).addEventListener('input', updateCost));
+
+// 成本面板的画幅与时长按所选模型收敛：本地档给 1080p/28 秒，
+// 后端只会回一句「实出 5 秒」，不如一开始就不给选
+function syncCostLimits(model) {
+  const resSel = $('#costRes'), durInp = $('#costDuration');
+  if (!resSel || !durInp) return;
+  const okRes = RES_BY_PROVIDER[model] || ['720p', '1080p'];
+  resSel.innerHTML = okRes.map(r => `<option value="${r}">${r}</option>`).join('');
+  if (!okRes.includes(resSel.value)) resSel.value = okRes[0];
+  const isLocal = model === 'comfyui';
+  durInp.max = isLocal ? 5 : 600;
+  if (isLocal && parseInt(durInp.value) > 5) durInp.value = 5;
+}
+// 换模型要先把画幅/时长收敛到该模型真能出的范围，再重算报价，
+// 否则本地档会留在 1080p/28 秒，算出来的是根本拿不到的价位
+$('#costModel').addEventListener('input', () => {
+  try { syncCostLimits($('#costModel').value); } catch {}
+  updateCost();
+});
+['#costRes','#costDuration'].forEach(s => $(s).addEventListener('input', updateCost));
 updateCost();
 
 // -------------------------- BreezeTTS API ---------------------------
@@ -2214,7 +2325,14 @@ const PROV_LABEL = { comfyui:'本地 ComfyUI（免费）', jimeng:'即梦 Jimeng
 async function generateVideo(shotId, cardEl) {
   const shot = getActiveProject().shots.find(s => s.id === shotId);
   if (!shot) return;
-  const preview = cardEl.querySelector('.shot-preview');
+  // 判重放在这里而不是只放下拉入口：批量生成（videoAllBtn）直调本函数，
+  // 只靠外层拦会漏 —— generating 态再提交就是重复任务
+  const genCard = cardEl || document.querySelector(`.shot-card[data-shot-id="${shotId}"]`);
+  if (genCard && genCard.classList.contains('generating')) {
+    showToast('⏳ 这个镜头正在出片，等它出完再提交', 'warn');
+    return;
+  }
+  const preview = (genCard || document.body).querySelector('.shot-preview');
 
   // 1. 先检查 API Key 有没有配置（调 /api/providers）
   let keyConfigured = false, keyState = 'missing';
@@ -2238,16 +2356,20 @@ async function generateVideo(shotId, cardEl) {
     showToast('🖥️ 本地出片会用显卡：语音模型会自动让出显存，出片期间请勿合成语音；下次合成需重新加载（约 1 分钟）', 'warn');
   }
   preview.innerHTML = `<div class="spinner"></div><div style="margin-top:10px;font-size: var(--font-xs)">AI 生成中... 预计 ${isLocal ? '3-8 分钟' : '90-180s'}</div>`;
-  showToast(`🎬 调用 ${PROV_LABEL[shot.provider] || shot.provider} 生成视频（${isLocal ? '480p' : shot.res} · ${shot.duration}s）...`, 'info');
+  showToast(`🎬 调用 ${PROV_LABEL[shot.provider] || shot.provider} 生成视频（${shot.res} · ${shot.duration}s）...`, 'info');
+  // 提交期间锁住这个镜头卡：连点两下会建两个任务，白烧一次显卡
+  genCard.classList.add('generating');
 
-  // 2. 发起任务（时长吸附到模型支持的档位：Kling/即梦 均 5/10/15/20）
-  const ALLOWED_DUR = [5, 10, 15, 20];
+  // 2. 发起任务（时长吸附到模型支持的档位）
+  // 本地 5B 是 121 帧 @24fps ≈ 5.04 秒的物理上限，摆 10/15/20 秒只会让用户以为能出那么长
+  const ALLOWED_DUR = isLocal ? [1, 2, 3, 4, 5] : [5, 10, 15, 20];
   const genDur = ALLOWED_DUR.reduce((a, b) => Math.abs(b - shot.duration) < Math.abs(a - shot.duration) ? b : a);
   if (genDur !== shot.duration) showToast(`⏱ 时长 ${shot.duration}s 不在模型档位，按 ${genDur}s 生成`, 'info');
   let jobId;
-  // 角色一致性：按镜头 char 找同名角色，传 role_id 由服务端解析参考图。
+  // 角色一致性：只认镜头上显式绑定的 role_id，由服务端解析参考图。
   // 本地带图走 Wan2.2 TI2V-5B 真图生视频；没图则降级为 1.3B 纯文本。
-  const roleObj = (allRoles || []).find(r => r.name === shot.char);
+  // 不做名字猜测：那会让「已取消的绑定」在下次出片时复活
+  const roleObj = shotRole(shot);
   let useRoleId;
   if (roleObj && roleObj.ref_image) {
     useRoleId = roleObj.id;
@@ -2261,7 +2383,8 @@ async function generateVideo(shotId, cardEl) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         provider: provName,
-        resolution: isLocal ? '480p' : shot.res,
+        // 用镜头卡上选中的画幅：本地档列表已被收敛到 480p/720p，不再前端硬改
+        resolution: shot.res,
         duration: genDur,
         prompt: (shot.prompt || shot.title).replace(/[（(]\s*mock\s*[)）]\s*/gi, '').trim(),
         image_url: '',
@@ -2272,12 +2395,14 @@ async function generateVideo(shotId, cardEl) {
       let msg = String(resp.status);
       try { const j = await resp.json(); msg = j.error || j.detail || j.message || msg; } catch {}
       showToast('❌ ' + msg, 'error');
+      genCard.classList.remove('generating');
       return;
     }
     const j = await resp.json();
     jobId = j.job_id;
   } catch (err) {
     showToast('❌ 发起失败: ' + err.message, 'error');
+    genCard.classList.remove('generating');
     return;
   }
 
@@ -2294,6 +2419,7 @@ async function generateVideo(shotId, cardEl) {
         break;
       } else if (poll.status === 'failed') {
         showToast('❌ 生成失败: ' + (poll.error || '未知原因'), 'error');
+        genCard.classList.remove('generating');
         return;
       }
       preview.querySelector('.shot-preview') || (preview.innerHTML = `<div class="spinner"></div><div style="margin-top:6px;font-size: var(--font-xs)">轮询中 #${poll.poll_count||0} · ${poll.status}</div>`);
@@ -2309,6 +2435,7 @@ async function generateVideo(shotId, cardEl) {
     showToast(lastCost > 0 ? `✅ 视频完成 · 实际结算 ¥${lastCost.toFixed(2)}` : '✅ 视频完成（本地推理，未产生费用）', 'success');
   } else {
     showToast(`⏱️ 生成超时（>${isLocal ? '30 分钟' : '200s'}），可稍后重试`, 'warn');
+    genCard.classList.remove('generating');
     return;
   }
   renderStoryboard();
@@ -3027,7 +3154,8 @@ async function _mockGenerate(topic, numShots, totalDur, audience, style) {
       prompt: (s.prompt || '') + (styleHints[style] ? ` · ${styleHints[style]}` : ''),
       voice: s.voice_prompt || '男声 · 沉稳',
       emotion: s.emotion || '中性',
-      provider: 'comfyui', res: '1080p',
+      // 新建镜头默认就是本地档：画幅直接给它能出的 480p，别摆 1080p 让人白等一场空
+      provider: 'comfyui', res: '480p',
       cost: calcCost('comfyui','480p', s.duration_sec || 5),
       audioUrl: null, videoReady: false,
     }));
@@ -3048,7 +3176,8 @@ async function _mockGenerate(topic, numShots, totalDur, audience, style) {
         prompt: `${topic} · ${charPool[i % charPool.length]}在${locPool[i % locPool.length]}${actionPool[i % actionPool.length]}`,
         voice: '男声 · 沉稳 · 晓峰',
         emotion: EMOTIONS[i % EMOTIONS.length],
-        provider: 'comfyui', res: '1080p',
+        // 新建镜头默认就是本地档：画幅直接给它能出的 480p，别摆 1080p 让人白等一场空
+      provider: 'comfyui', res: '480p',
         cost: calcCost('comfyui','480p',dur),
         audioUrl: null, videoReady: false
       });
@@ -3075,7 +3204,7 @@ async function _llmGenerate(topic, numShots, totalDur, audience, style, provider
     prompt: (s.prompt || `${topic} · 镜头 ${i+1}`) + ` · ${styleHints[style] || ''}`,
     voice: s.voice_prompt || '自然配音',
     emotion: s.emotion || EMOTIONS[i % EMOTIONS.length],
-    provider: 'comfyui', res: '1080p',
+    provider: 'comfyui', res: '480p',
     cost: calcCost('comfyui','480p', Math.round(totalDur / numShots)),
     audioUrl: null, videoReady: false
   }));
@@ -3529,6 +3658,25 @@ async function loadVoices() {
   }
 }
 
+// 把角色绑到当前镜头当首帧：只写 role_id，参考图由服务端按 role_id 自己解析
+function bindRoleToShot(rid) {
+  // getActiveShot() 在无选中时会回落到第一个镜头，那样会静默绑错镜头；
+  // 提示语写的是「先选镜头」，就必须真的要求选中，而不是替他做主
+  if (!state.activeShotId) { showToast('⚠️ 先在时间轴上选一个镜头', 'warn'); return; }
+  const shot = getActiveShot();
+  if (!shot) { showToast('⚠️ 先在时间轴上选一个镜头', 'warn'); return; }
+  const role = (allRoles || []).find(r => r.id === rid);
+  if (!role || !role.ref_image) {
+    showToast('⚠️ 这个角色还没有参考图，不能当首帧', 'warn');
+    return;
+  }
+  commitUndo(() => { shot.roleId = rid; }, '绑定首帧角色');
+  _debounceAutosave();   // 绑定关系落库，刷新后不丢
+  renderStoryboard();    // prompt 旁的缩略图立刻出现
+  loadRoles();           // 按钮态刷新为「✓ 已用」
+  showToast(`🎭 已把「${role.name}」设为该镜头首帧`, 'success');
+}
+
 async function loadRoles() {
   const box = $('#roleList');
   const hint = $('#roleCount');
@@ -3544,12 +3692,20 @@ async function loadRoles() {
     box.innerHTML = `<div class="role-item empty">暂无角色<br>角色 = 名字 + 音色 + 默认参数</div>`;
   } else {
     const voiceMap = Object.fromEntries(allVoices.map(v => [v.id, v.name]));
+    // 按钮要跟当前镜头的绑定态联动：绑了谁就高亮谁
+    const curShot = getActiveShot();
+    const curRid = curShot && curShot.roleId;
     box.innerHTML = allRoles.map(r => {
       const arch = BT_ARCH_LABEL[r.archetype] || '';
       // 有参考图就显示脸，没有就用名字首字占位
       const face = r.ref_image
         ? `<img src="${BT}${escapeHtml(r.ref_image)}" alt="" style="width:28px;height:28px;object-fit:cover;border-radius:50%;flex-shrink:0">`
         : `<div class="ri-avatar">${escapeHtml(r.name.charAt(0))}</div>`;
+      const usable = !!r.ref_image;
+      const on = curRid === r.id;
+      const tip = usable
+        ? (on ? '当前镜头已用这个角色当首帧' : '把这个角色的参考图用作当前镜头首帧')
+        : '这个角色还没有参考图，先在角色库里上传';
       return `
       <div class="role-item" data-rid="${r.id}">
         ${face}
@@ -3557,8 +3713,15 @@ async function loadRoles() {
           <div class="ri-name">${renderBold(r.name)} ${arch ? `<span style="color:var(--text-faint);font-weight:400">· ${escapeHtml(arch)}</span>` : ''} ${voiceMap[r.voice_id] ? `<span style="color:var(--text-faint);font-weight:400">· ${escapeHtml(voiceMap[r.voice_id])}</span>` : ''}</div>
           <div class="ri-desc">${escapeHtml((r.description || '').slice(0, 40))}</div>
         </div>
+        <button class="ri-action ${on ? 'on' : ''}" data-rid="${r.id}" ${usable ? '' : 'disabled'} title="${escapeHtml(tip)}">${on ? '✓ 已用' : '用作首帧'}</button>
       </div>`;
     }).join('');
+    box.querySelectorAll('.ri-action').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        bindRoleToShot(btn.dataset.rid);
+      });
+    });
   }
 }
 
@@ -3837,6 +4000,7 @@ async function loadVideoModels() {
   } catch {
     sel.innerHTML = '<option value="kling">Kling 3.0 Standard</option><option value="jimeng">即梦 Jimeng Seedance 2.5</option>';
   }
+  try { syncCostLimits(sel.value); } catch {}
   try { updateCost(); } catch {}
 }
 
