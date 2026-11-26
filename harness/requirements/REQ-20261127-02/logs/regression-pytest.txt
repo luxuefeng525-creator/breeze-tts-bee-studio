@@ -1,0 +1,5 @@
+命令：.f.venv\Scripts\python.exe -m pytest -q
+时间：2026-11-27（改动后：api/llm_client.py、api/router.py、tests/test_custom_llm_model.py 已就位）
+结果：629 passed, 1 warning in 414.12s (0:06:54)
+基线对照：改动前同命令 622 passed；差额 7 = tests/test_custom_llm_model.py 新增用例数
+唯一 warning：starlette TestClient 的 httpx 弃用提示（既有，与本次无关）
