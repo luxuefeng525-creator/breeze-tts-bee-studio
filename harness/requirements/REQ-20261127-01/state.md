@@ -20,7 +20,10 @@ hits: []
 - [x] G3 独立审查 + V 视觉门禁 + G4（06:15 / 06:21）
 - [x] 分支提交 `fabc626`
 - [x] 合流回 main：merge commit `26d3e0b`，分支 `session/trae-20261127` 已删（`42cebac`）
-- [ ] 推送远程（需用户明确同意）
+- [x] 推送远程：`8e24f7a` → origin/main（用户确认「推送到 origin/main」）
+- [x] PRD-v4 剩余项核对：功能项已全部落地，剩外部依赖（Key）；顺手修正 PRD/feature-matrix 过时口径（`docs/product/`，非 git 仓库）
+- [x] 风格一致性替代取证：新增 `test_style_constraint_reaches_llm_request`（本地假 OpenAI 端点抓出站请求体），9 passed
+- [x] 清理：本次探针 11 个 + `bee-a/` + `bee-a-backup/` 已删
 
 ## 2. 阻塞
 
@@ -86,13 +89,17 @@ V: PASS | 确认人: 用户 | 时间: 2026-11-27 06:21 | 确认原文: "V 通过
 | `data/bee_tasks.db` 中 proj-style-e2e-001 | A | 测试固定 id 造数 | 删除 | 2026-11-27 05:5x | 自动 |
 | A 段 proj-1795728085 与 ej_1795728133_52476 | A | A 段实测造数 | 删除 | 2026-11-27 | 自动 |
 | `outputs/bee-studio/proj-1795613185/export.zip` | A | A 段实测覆盖了历史导出 zip | 用 `e:\Temp\trae\bee-a-backup` 备份还原（sha1 一致 97E22A33） | 2026-11-27 06:2x | 自动 |
+| `e:\Temp\trae\` 本次探针 11 个（`bee_probe_*.mjs`、`bee_visual_capture.mjs`、`dbg_anchor.mjs`、`post_style_mock.py`、`cleanup_a.py`、`dbq.py`）+ `bee-a\`、`bee-a-backup\` | A | 结项清理，证据已随需求包 `logs/` 归档 | 删除（2026-11-27） | 2026-11-27 | 用户指令「清理临时探针与备份」 |
 
 ## 9. 自检记录
+
+> 步骤 3/4/5 的一次性探针脚本已按用户指令清理；其覆盖的功能由 `tests/test_style_templates.py`（含出站请求体取证）与 `logs/` 内归档证据承接。
 
 | 步骤 | 命令 | 退出码 | 证据路径 |
 |---|---|---|---|
 | 1 | `.venv\Scripts\python.exe -m pytest tests/test_style_templates.py -q` | 0 | `logs/ac02-ac03-pytest.txt` |
 | 2 | `.venv\Scripts\python.exe -m pytest -q` | 0 | `logs/regression-pytest.txt` |
-| 3 | `node e:\Temp\trae\bee_probe_style.mjs` | 0 | `logs/ac01-ac04-style-ui.json` |
-| 4 | `.venv\Scripts\python.exe e:\Temp\trae\post_style_mock.py` | 0 | `logs/ac02-mock-api.txt` |
-| 5 | `node e:\Temp\trae\bee_probe_export_warn.mjs` | 0 | `logs/ac06-export-warn.json` |
+| 3 | `node e:\Temp\trae\bee_probe_style.mjs`（已清理） | 0 | `logs/ac01-ac04-style-ui.json` |
+| 4 | `.venv\Scripts\python.exe e:\Temp\trae\post_style_mock.py`（已清理） | 0 | `logs/ac02-mock-api.txt` |
+| 5 | `node e:\Temp\trae\bee_probe_export_warn.mjs`（已清理） | 0 | `logs/ac06-export-warn.json` |
+| 6 | `.venv\Scripts\python.exe -m pytest tests/test_style_templates.py -q`（新增出站链路取证用例后 9 passed） | 0 | `logs/ac02-outbound-style-pytest.txt` |
