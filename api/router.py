@@ -148,6 +148,10 @@ _PROVIDER_CLASSES = {
 def _make_provider(provider: str):
     """按名字构建 provider 实例。comfyui 跑在本机，不需要 Key。"""
     import importlib
+    from api.providers import ProviderError
+    # 未知方案必须是人话 400；否则 `_PROVIDER_CLASSES[provider]` 抛 KeyError → 500
+    if provider not in _PROVIDER_CLASSES:
+        raise ProviderError(f"未知的出片方案「{provider}」")
     mod_name, cls_name = _PROVIDER_CLASSES[provider]
     mod = importlib.import_module(mod_name)
     cls = getattr(mod, cls_name)
@@ -207,7 +211,9 @@ def _ref_image_local(role: dict) -> str:
     if raw.startswith("/api/refs/"):
         p = (data_dir / "refs" / raw[len("/api/refs/"):]).resolve()
     else:
-        p = Path(raw).resolve()
+        # 兜底解析任意本机路径，等于把「角色库图片」放宽成「整机任意文件」；
+        # 授权语义是「这张角色图可发给服务商」，不该覆盖任意路径
+        raise ProviderError("非法的参考图引用：只接受 /api/refs/ 下的角色库图片")
     if not p.is_file():
         raise ProviderError("参考图文件不存在，请重新上传")
     return "file:" + str(p)
@@ -1194,6 +1200,9 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         # 2. 加载 provider 类
         try:
             prov = _make_provider(provider)
+        except ProviderError as e:
+            _h_json(h, {"error": str(e)}, 400)
+            return True
         except Exception as e:
             _h_json(h, {"error": f"provider 加载失败: {e}"}, 500)
             return True
@@ -1621,7 +1630,11 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
 
         # 原先这里 import 了不存在的 load_provider，批量出片一调就 ImportError。
         # 统一走 _make_provider，comfyui 无 Key 也能建。
-        prov = _make_provider(provider)
+        try:
+            prov = _make_provider(provider)
+        except ProviderError as e:
+            _h_json(h, {"error": str(e)}, 400)
+            return True
         batch_results = []  # [{shot_index, job_id, status, error}]
 
         def _one(idx: int, shot: dict) -> dict:
