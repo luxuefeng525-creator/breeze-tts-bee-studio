@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小蜜蜂 · 视频超分 — Real-ESRGAN 逐帧增强</title>
+<link rel="stylesheet" href="/shared/tokens.css">
+<script src="/shared/ui.js"></script>
+<script src="/shared/topbar.js" defer></script>
+<style>
+body { overflow: hidden; }
+.app {
+  height: calc(100vh - var(--h-topbar));
+  display: grid; grid-template-columns: 380px minmax(0, 1fr);
+  gap: var(--space-4); padding: var(--space-4) var(--space-5);
+  overflow: hidden; position: relative; z-index: 1;
+}
+@media (max-width: 1100px) { .app { grid-template-columns: 1fr; overflow: auto; height: auto; } }
+
+.rail { display: flex; flex-direction: column; overflow: hidden; animation: rise 260ms cubic-bezier(.2,.8,.2,1) both; }
+.rail-head { padding: var(--space-4) var(--space-5) var(--space-3); border-bottom: 1px solid var(--border); }
+.rail-head h1 { font-size: var(--font-lg); font-weight: 650; }
+.rail-head p { color: var(--text-faint); font-size: var(--font-xs); margin-top: 2px; }
+.rail-body { padding: var(--space-4) var(--space-5); overflow-y: auto; }
+
+.field { margin-bottom: var(--space-4); }
+.field-label { display: flex; align-items: center; justify-content: space-between; font-size: var(--font-sm); font-weight: 600; margin-bottom: var(--space-2); }
+.tip { font-weight: 400; color: var(--text-faint); font-size: var(--font-xs); }
+
+.vlist { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+.vitem {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--panel); text-align: left;
+  transition: border-color var(--transition), background var(--transition), transform 120ms ease;
+}
+.vitem:hover { background: var(--panel-2); }
+.vitem:active { transform: scale(.99); }
+.vitem[aria-pressed="true"] { border-color: var(--primary); background: var(--primary-soft); }
+.vitem .name { font-size: var(--font-xs); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vitem .meta { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.vitem .flag { font-size: 11px; color: var(--success); white-space: nowrap; }
+.vitem .flag.toobig { color: var(--danger); }
+
+.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--panel-2); padding: 4px; border-radius: var(--radius-md); }
+.segmented button {
+  border: none; background: transparent; border-radius: 6px; padding: 9px 6px;
+  font-size: var(--font-xs); color: var(--text-muted);
+  transition: background var(--transition), color var(--transition), transform 120ms ease;
+}
+.segmented button:active { transform: scale(.97); }
+.segmented button[aria-pressed="true"] { background: var(--panel); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+
+#startBtn { width: 100%; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; animation: spin .8s linear infinite; }
+.hint-line { margin-top: var(--space-3); font-size: var(--font-xs); color: var(--text-faint); display: flex; gap: 6px; line-height: 1.55; }
+
+.main { min-width: 0; display: flex; flex-direction: column; gap: var(--space-4); overflow: hidden; animation: rise 320ms cubic-bezier(.2,.8,.2,1) both; }
+.main-head { display: flex; align-items: center; gap: var(--space-3); }
+.main-head h2 { font-size: var(--font-base); font-weight: 650; }
+.main-status { margin-left: auto; font-size: var(--font-xs); color: var(--text-faint); display: flex; align-items: center; gap: 6px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+.dot.busy { background: var(--primary); animation: pulse 1.4s ease-in-out infinite; }
+
+.preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); min-height: 0; }
+@media (max-width: 900px) { .preview-grid { grid-template-columns: 1fr; } }
+.pane { display: flex; flex-direction: column; overflow: hidden; }
+.pane-head { display: flex; align-items: center; gap: 8px; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.pane-head h3 { font-size: var(--font-sm); font-weight: 650; }
+.pane-head .badge { margin-left: auto; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.pane-body { flex: 1; min-height: 200px; display: grid; place-items: center; padding: var(--space-3); background: var(--panel-2); }
+.pane-body video { max-width: 100%; max-height: 46vh; border-radius: var(--radius-md); background: #000; animation: reveal 260ms cubic-bezier(.2,.8,.2,1) both; }
+.pane-empty { text-align: center; color: var(--text-faint); font-size: var(--font-xs); display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.pane-empty .glyph { font-size: 26px; }
+.pane-foot { padding: var(--space-3) var(--space-4); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--font-xs); color: var(--text-faint); }
+
+.progress-box { padding: var(--space-3) var(--space-4) var(--space-4); display: none; }
+.progress-box.show { display: block; animation: rise 220ms cubic-bezier(.2,.8,.2,1) both; }
+.progress-top { display: flex; justify-content: space-between; font-size: var(--font-xs); color: var(--text-muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.bar { height: 8px; border-radius: var(--radius-pill); background: var(--panel-3); overflow: hidden; }
+.bar > i {
+  display: block; height: 100%; width: 0; border-radius: var(--radius-pill);
+  background: linear-gradient(90deg, var(--primary), rgba(var(--accent-rgb), .55));
+  transition: width 400ms cubic-bezier(.2,.8,.2,1);
+  position: relative; overflow: hidden;
+}
+.bar > i::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.45) 50%, transparent 70%);
+  transform: translateX(-100%); animation: sweep 1.8s ease-in-out infinite;
+}
+.progress-note { margin-top: 6px; font-size: 11px; color: var(--text-faint); }
+</style>
+</head>
+<body class="ambient">
+
+<bee-topbar active="enhance"></bee-topbar>
+
+<div class="app">
+  <aside class="rail card">
+    <div class="rail-head">
+      <h1>视频超分</h1>
+      <p>Real-ESRGAN 逐帧放大 · 保留原音轨 · 本机运行</p>
+    </div>
+    <div class="rail-body">
+      <div class="field">
+        <span class="field-label">选择成片 <span class="tip" id="videoCount">加载中…</span></span>
+        <div class="vlist" id="videoList" role="listbox" aria-label="选择要超分的视频"></div>
+      </div>
+
+      <div class="field">
+        <span class="field-label">放大倍率 <span class="tip">模型固定 x4</span></span>
+        <div class="segmented" id="scaleSeg" role="group" aria-label="放大倍率">
+          <button data-scale="2" aria-pressed="true">2× (推荐)</button>
+          <button data-scale="4" aria-pressed="false">4×</button>
+        </div>
+      </div>
+
+      <button class="btn-primary" id="startBtn" disabled><span id="startLabel">开始超分</span></button>
+      <div class="hint-line">
+        <span>ⓘ</span>
+        <span>逐帧处理，约 1–2 秒/帧；超过 241 帧（约 10 秒 24fps）的单次会被拒绝。处理期间请勿再合成语音，8GB 卡会被两头挤爆。</span>
+      </div>
+    </div>
+  </aside>
+
+  <section class="main">
+    <div class="main-head">
+      <h2>对比预览</h2>
+      <div class="main-status"><span class="dot" id="statusDot"></span><span id="statusText">就绪</span></div>
+    </div>
+
+    <div class="preview-grid" style="flex:1;min-height:0">
+      <div class="pane card">
+        <div class="pane-head"><h3>原片</h3><span class="badge" id="srcBadge">未选择</span></div>
+        <div class="pane-body" id="srcBody">
+          <div class="pane-empty"><span class="glyph">🎬</span><span>从左侧选一段成片</span></div>
+        </div>
+        <div class="pane-foot" id="srcFoot"></div>
+      </div>
+
+      <div class="pane card">
+        <div class="pane-head"><h3>超分结果</h3><span class="badge" id="outBadge">—</span></div>
+        <div class="pane-body" id="outBody">
+          <div class="pane-empty"><span class="glyph">✨</span><span>完成后在这里对比</span></div>
+        </div>
+        <div class="pane-foot" id="outFoot"></div>
+      </div>
+    </div>
+
+    <div class="card progress-box" id="progressBox">
+      <div class="progress-top"><span id="progressLabel">准备中…</span><span id="progressPct">0%</span></div>
+      <div class="bar"><i id="progressFill"></i></div>
+      <div class="progress-note" id="progressNote"></div>
+    </div>
+  </section>
+</div>
+
+<div class="toast-host" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const toast = window.BeeUI.toast;
+const MAX_FRAMES = 241;
+
+const state = { videos: [], selected: null, scale: 2, jobId: null, timer: null };
+
+function setStatus(text, busy = false) {
+  $("#statusText").textContent = text;
+  $("#statusDot").classList.toggle("busy", busy);
+}
+function fmtSize(b) {
+  return b >= 1048576 ? (b / 1048576).toFixed(2) + " MB" : Math.round(b / 1024) + " KB";
+}
+
+async function loadVideos() {
+  const box = $("#videoList");
+  try {
+    const resp = await fetch("/api/videos/list");
+    const data = await resp.json();
+    state.videos = data.items || [];
+    box.innerHTML = "";
+    if (!state.videos.length) {
+      box.innerHTML = '<div class="pane-empty">本机还没有成片，先去视频工作台生成一段</div>';
+      $("#videoCount").textContent = "0 段";
+      return;
+    }
+    $("#videoCount").textContent = state.videos.length + " 段";
+    state.videos.forEach(v => box.appendChild(videoItem(v)));
+  } catch (err) {
+    box.innerHTML = '<div class="pane-empty">读取成片失败：' + (err.message || err) + "</div>";
+    $("#videoCount").textContent = "读取失败";
+  }
+}
+
+function videoItem(v) {
+  const btn = document.createElement("button");
+  btn.className = "vitem";
+  btn.setAttribute("aria-pressed", "false");
+  const left = document.createElement("div");
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = v.file;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `${v.width}×${v.height} · ${v.frames} 帧 · ${v.duration}s · ${fmtSize(v.bytes)}`;
+  left.append(name, meta);
+  const flag = document.createElement("span");
+  flag.className = "flag";
+  if (v.upscaled) { flag.textContent = "已增强"; }
+  else if (v.frames > MAX_FRAMES) { flag.textContent = "帧数超限"; flag.classList.add("toobig"); }
+  btn.append(left, flag);
+  btn.addEventListener("click", () => selectVideo(v, btn));
+  return btn;
+}
+
+function selectVideo(v, btn) {
+  if (state.jobId) { toast("超分进行中，先等它完成", true); return; }
+  state.selected = v;
+  $$("#videoList .vitem").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+  $("#startBtn").disabled = v.frames > MAX_FRAMES;
+  $("#startLabel").textContent = v.frames > MAX_FRAMES ? "帧数超限" : "开始超分";
+  $("#srcBadge").textContent = `${v.width}×${v.height} · ${v.frames} 帧`;
+  $("#srcBody").innerHTML = "";
+  const video = document.createElement("video");
+  video.src = v.url;
+  video.controls = true;
+  video.preload = "metadata";
+  video.loop = true;
+  $("#srcBody").appendChild(video);
+  $("#srcFoot").textContent = `${v.fps} fps · ${v.duration} 秒 · ${fmtSize(v.bytes)} · 预计 ${Math.round(v.frames * (state.scale === 4 ? 4 : 3.5))} 秒`;
+}
+
+$("#scaleSeg").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-scale]");
+  if (!btn) return;
+  state.scale = +btn.dataset.scale;
+  $$("#scaleSeg button").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+  if (state.selected) $("#srcFoot").textContent =
+    `${state.selected.fps} fps · ${state.selected.duration} 秒 · 预计 ${Math.round(state.selected.frames * (state.scale === 4 ? 4 : 3.5))} 秒`;
+});
+
+$("#startBtn").addEventListener("click", async () => {
+  const v = state.selected;
+  if (!v) return;
+  $("#startBtn").disabled = true;
+  $("#startLabel").innerHTML = '<span class="spinner"></span> 超分中…';
+  setStatus("正在逐帧超分", true);
+  $("#progressBox").classList.add("show");
+  renderProgress({ done: 0, total: v.frames, status: "running", started: Date.now() / 1000 });
+  try {
+    const resp = await fetch("/api/video/upscale", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: v.file, scale: state.scale }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.ok === false) throw new Error(data.error || ("HTTP " + resp.status));
+    state.jobId = data.job_id;
+    poll();
+  } catch (err) {
+    toast("启动失败：" + err.message, true);
+    finishJob();
+    setStatus("超分失败");
+  }
+});
+
+function poll() {
+  clearInterval(state.timer);
+  state.timer = setInterval(async () => {
+    try {
+      const resp = await fetch("/api/video/upscale/" + encodeURIComponent(state.jobId));
+      const data = await resp.json();
+      if (!resp.ok || data.ok === false) throw new Error(data.error || "状态读取失败");
+      renderProgress(data);
+      if (data.status === "done") {
+        finishJob();
+        showResult(data.result);
+        setStatus("就绪");
+        toast("超分完成 · " + data.result.seconds + " 秒");
+        loadVideos();
+      } else if (data.status === "failed") {
+        finishJob();
+        setStatus("超分失败");
+        toast("超分失败：" + (data.error || "未知错误"), true);
+        $("#outBadge").textContent = "失败";
+        $("#outBody").innerHTML = "";
+        const box = document.createElement("div");
+        box.className = "pane-empty";
+        box.innerHTML = '<span class="glyph">⚠️</span>';
+        const p = document.createElement("span");
+        p.textContent = data.error || "未知错误";
+        box.appendChild(p);
+        $("#outBody").appendChild(box);
+      }
+    } catch (err) {
+      finishJob();
+      toast("状态读取失败：" + err.message, true);
+    }
+  }, 1500);
+}
+
+function renderProgress(d) {
+  const done = d.done || 0, total = d.total || 1;
+  const pct = Math.min(100, Math.round(done / total * 100));
+  $("#progressPct").textContent = pct + "%";
+  $("#progressFill").style.width = pct + "%";
+  $("#progressLabel").textContent = `正在处理第 ${done} / ${total} 帧`;
+  if (d.elapsed) {
+    const per = done > 0 ? d.elapsed / done : 0;
+    const left = Math.max(0, Math.round(per * (total - done)));
+    $("#progressNote").textContent = done
+      ? `已用时 ${d.elapsed} 秒 · 预计还需 ${left} 秒`
+      : `已用时 ${d.elapsed} 秒 · 正在抽帧与装载模型`;
+  }
+}
+
+function finishJob() {
+  clearInterval(state.timer);
+  state.timer = null;
+  state.jobId = null;
+  $("#startBtn").disabled = !state.selected || state.selected.frames > MAX_FRAMES;
+  $("#startLabel").textContent = "开始超分";
+}
+
+function showResult(r) {
+  $("#outBadge").textContent = `${r.width}×${r.height} · ${r.frames} 帧`;
+  $("#outBody").innerHTML = "";
+  const video = document.createElement("video");
+  video.src = r.url;
+  video.controls = true;
+  video.loop = true;
+  $("#outBody").appendChild(video);
+  $("#outFoot").innerHTML = "";
+  const info = document.createElement("span");
+  info.textContent = `${fmtSize(r.bytes)} · 耗时 ${r.seconds} 秒`;
+  const dl = document.createElement("a");
+  dl.className = "btn-ghost";
+  dl.href = r.url;
+  dl.setAttribute("download", r.file);
+  dl.textContent = "⬇️ 下载";
+  $("#outFoot").append(info, dl);
+}
+
+loadVideos();
+</script>
+</body>
+</html>
