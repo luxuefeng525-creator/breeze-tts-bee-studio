@@ -1,0 +1,19 @@
+{
+  "pages": [
+    {
+      "name": "home",
+      "path": "/index.html",
+      "states": ["default"],
+      "expect": [],
+      "emptyAllowed": []
+    }
+  ],
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "tablet", "width": 768, "height": 1024 },
+    { "name": "mobile", "width": 375, "height": 812 }
+  ],
+  "capture": {
+    "command": "见 05-visual.md §2（本机 headless Chrome，直接截 7861）"
+  }
+}
