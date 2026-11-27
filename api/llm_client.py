@@ -54,8 +54,12 @@ def call_chat(*, provider: str, api_key: str,
     """
     cfg = LLM_PROVIDERS.get(provider)
     if cfg:
+        # 内置 provider 的端点写死在注册表里，不接受外部改写（RV-04）：
+        # 允许覆盖会让「内置」和「自定义」两条链路口径混淆、静默改道。
+        if base_url:
+            raise ValueError(f"内置 provider {provider} 不接受 base_url（仅自定义模型可指定端点）")
         protocol = cfg["default_protocol"]
-        base_url = (base_url or cfg["endpoints"][protocol]).rstrip("/")
+        base_url = cfg["endpoints"][protocol].rstrip("/")
         model_name = model or cfg["default_model"]
         to = timeout or cfg["default_timeout"]
     else:

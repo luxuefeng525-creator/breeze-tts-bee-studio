@@ -24,7 +24,7 @@ updated: 2026-11-27
 |---|---|---|---|---|---|---|
 | AC-01 | 自定义模型带 base_url | 假端点抓请求体，走完整 script-gen | 出站打到该 base_url（保留 /v1 只拼一次）、model = 注册 model_name、used_mock=false | 7 passed，`req["model"]=="glm-probe-1"`，messages 含主题 | PASS | `harness/requirements/REQ-20261127-02/logs/ac01-ac03-custom-llm-pytest.txt` |
 | AC-02 | 自定义 id 作 provider / 缺 Key / 未知 id | 分别传 api_key、空 api_key、未知 provider | 有 Key→真实调用；无 Key→402 need_key 且零请求；未知→400 | 三者均符合 | PASS | `harness/requirements/REQ-20261127-02/logs/ac01-ac03-custom-llm-pytest.txt` |
-| AC-03 | 端点不可达（拒连） | base_url 指向未监听端口 | mock 兜底 + custom_model_error=true + 原因可见，不 502 | used_mock=true + custom_model_error=true + mock_reason 含连接错误 | PASS | `harness/requirements/REQ-20261127-02/logs/ac02-curl-custom-llm.txt` |
+| AC-03 | 端点不可达（拒连） | base_url 指向未监听端口 | mock 兜底 + used_custom_model=true + 原因可见，不 502 | used_mock=true + used_custom_model=true + mock_reason 含连接错误 | PASS | `harness/requirements/REQ-20261127-02/logs/ac02-curl-custom-llm.txt` |
 
 ## 3. 边界与异常
 
@@ -32,7 +32,7 @@ updated: 2026-11-27
 |---|---|---|---|
 | 空数据 | base_url 为空字符串 | `_resolve_llm` 报「未填 base_url」，不出站 | `logs/ac01-ac03-custom-llm-pytest.txt` |
 | 非法值 | `ftp://nope`、`not-a-url` | 明确报错，不调用 | `logs/ac01-ac03-custom-llm-pytest.txt` |
-| 依赖失败 | 端点拒连 / 返回 401 | mock 兜底 + `custom_model_error=true` | `logs/ac02-curl-custom-llm.txt` |
+| 依赖失败 | 端点拒连 / 返回 401 | mock 兜底 + `used_custom_model=true` | `harness/requirements/REQ-20261127-02/logs/ac02-curl-custom-llm.txt` |
 | 缺 Key | 不传 api_key 且未配 Key | 402 `need_key`，假端点 0 请求 | `logs/ac01-ac03-custom-llm-pytest.txt` |
 | 重复/撞名 | 内置 provider 与注册表同名 | 内置优先（`provider in LLM_PROVIDERS` 直接返回），注册表指向缺失也不影响 | `logs/ac01-ac03-custom-llm-pytest.txt` |
 

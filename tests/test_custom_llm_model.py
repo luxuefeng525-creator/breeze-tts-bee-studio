@@ -151,7 +151,7 @@ def test_call_failure_keeps_mock_with_reason(env):
 
         resp = _post(_FakeH())
         assert resp["used_mock"] is True, resp
-        assert resp["custom_model_error"] is True
+        assert resp["used_custom_model"] is True
         assert "401" in resp["mock_reason"]
 
 
@@ -174,6 +174,16 @@ def test_builtin_provider_not_affected(env, tmp_path, monkeypatch):
     monkeypatch.setattr(router, "_MODEL_REGISTRY_FILE", tmp_path / "absent.json")
     assert router._resolve_llm("longcat") == ("", "")
     assert router._resolve_llm("openai") == ("", "")
+
+
+def test_builtin_provider_rejects_base_url_override(env, tmp_path, monkeypatch):
+    """RV-04：内置 provider 的端点不接受外部改写，避免静默改道。"""
+    from api import llm_client
+    with pytest.raises(ValueError):
+        llm_client.call_chat(provider="longcat", api_key="k" * 20,
+                             user="ping", base_url="http://127.0.0.1:9/v1")
+    # model 覆盖内置是允许的（不换端点）
+    assert router._resolve_llm("longcat") == ("", "")
 
 
 def test_script_persisted_with_custom_provider(env):

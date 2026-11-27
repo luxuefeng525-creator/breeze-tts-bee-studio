@@ -1474,15 +1474,17 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             })
             return True
 
-        if not api_key:
-            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
-            return True
-
-        # R-01/R-02：解析自定义模型（内置返回 ("","")，行为与改动前一致）
+        # R-01/R-02：先解析模型（内置返回 ("","")，行为与改动前一致），再查 Key
         try:
             llm_model, llm_base = _resolve_llm(provider)
         except ValueError as exc:
-            _h_json(h, {"error": str(exc)}, 400)
+            _h_json(h, {"error": str(exc), "used_custom_model": False}, 400)
+            return True
+        is_custom = bool(llm_base)
+
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True,
+                         "used_custom_model": is_custom}, 402)
             return True
 
         # 构造 system + user prompt，要求输出结构化 JSON（风格约束在函数内注入）
@@ -1532,6 +1534,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "project_id": pid, "title": title, "shots": shots,
                 "generated_by": provider, "shots_count": len(shots),
                 "used_mock": False, "style_id": style_id,
+                "used_custom_model": is_custom,
             })
         except json.JSONDecodeError as exc:
             # A5：双重失败 → mock 降级（不是真 502，是可用 fallback）
@@ -1545,7 +1548,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "generated_by": "mock", "shots_count": len(mock["shots"]),
                 "used_mock": True, "mock_reason": f"JSON 解析失败: {exc.msg}",
                 "raw_preview": (raw or "")[:500], "style_id": style_id,
-                "custom_model_error": bool(llm_base),
+                "used_custom_model": is_custom,
             }, 200)  # 200 OK mock 也算可用，不报 502
         except Exception as exc:
             # LLM 调用挂了 → mock 降级
@@ -1559,7 +1562,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                     "generated_by": "mock", "shots_count": len(mock["shots"]),
                     "used_mock": True, "mock_reason": f"LLM 调用失败: {str(exc)[:200]}",
-                    "style_id": style_id, "custom_model_error": bool(llm_base),
+                    "style_id": style_id, "used_custom_model": is_custom,
                 }, 200)
             except Exception as exc2:
                 _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)
@@ -1609,16 +1612,17 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {"error": f"shot_index {shot_index} 越界（0~{len(shots)-1}）"}, 400)
             return True
 
-        if not api_key:
-            _h_json(h, {"error": f"{provider} 未配置 API Key（改镜头需要真实 LLM）",
-                         "need_key": True}, 402)
-            return True
-
-        # R-01/R-02：改镜头与生成共用同一套自定义模型解析
+        # R-01/R-02：改镜头与生成共用同一套自定义模型解析（先解析，再查 Key）
         try:
             llm_model, llm_base = _resolve_llm(provider)
         except ValueError as exc:
-            _h_json(h, {"error": str(exc)}, 400)
+            _h_json(h, {"error": str(exc), "used_custom_model": False}, 400)
+            return True
+        is_custom = bool(llm_base)
+
+        if not api_key:
+            _h_json(h, {"error": f"{provider} 未配置 API Key（改镜头需要真实 LLM）",
+                         "need_key": True, "used_custom_model": is_custom}, 402)
             return True
 
         system_prompt = (
@@ -1634,6 +1638,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             "请只输出 updated_shot JSON，严格遵循原镜头的字段结构。"
         )
 
+        raw = ""   # RV-01：先初始化，避免 call_chat 自身失败时 except 里取不到变量
         try:
             from api.llm_client import call_chat
             raw = call_chat(provider=provider, api_key=api_key,
@@ -1665,11 +1670,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "project_id": project_id, "updated_shot_index": shot_index,
                 "updated_shot": shots[shot_index],
                 "shots": shots, "edited_by": provider,
+                "used_custom_model": is_custom,
             })
         except Exception as exc:
             _h_json(h, {"error": f"改镜头 LLM 失败: {str(exc)[:200]}",
-                         "custom_model_error": bool(llm_base),
-                         "raw_preview": (raw or "")[:500] if 'raw' in dir() else ""}, 502)
+                         "used_custom_model": is_custom,
+                         "raw_preview": (raw or "")[:500]}, 502)
         return True
 
     # ---- POST /api/video/generate-batch —— A4：多镜头并行视频生成 ----
