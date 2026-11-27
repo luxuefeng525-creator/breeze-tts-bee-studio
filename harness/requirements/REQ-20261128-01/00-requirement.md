@@ -25,7 +25,7 @@ acceptance: [AC-01, AC-02, AC-03]
 
 当后端需要把异常/失败原因放进响应字段（`mock_reason` 及 `api/router.py` 内同语义的 `error` 文案）时，系统应**保留文本尾部**并在尾部窗口内第一个分隔符处断开，以便用户看到异常类型、Errno、连接细节等真正能定位问题的信息。
 
-- 验收点 AC-01：构造 `str(exc)` 长度 > 200、尾部含 `[WinError 10061]` 的异常，走完整 script-gen 降级路径后，`mock_reason` 必须包含尾部片段，且不出现被从词中间切断的半词。
+- 验收点 AC-01：构造 `str(exc)` 长度 > 200、尾部含 `[WinError 10061]` 的异常，走完整 script-gen 降级路径后，`mock_reason` 必须包含尾部片段；有分隔符时不在词中切断，无分隔符时允许从词中间开始（尾部窗口完整保留）。
 - 验收点 AC-02：长度 ≤ 上限的文本原样返回不加省略号；空串 / `None` 返回明确占位（不含 `None`、不留空括号）。
 - 边界：超长且无分隔符（硬切尾部）、中文/emoji 多字节、多层包装的重复异常前缀、超时类异常（文本极长）。
 
@@ -48,7 +48,7 @@ acceptance: [AC-01, AC-02, AC-03]
 | 类型 | 证据 | 说明 |
 |---|---|---|
 | 现有实现定位 | `api/router.py:1641`（`"mock_reason": f"LLM 调用失败: {str(exc)[:200]}"`）、`:1753`（改镜头失败）、`:1645`（mock 也挂） | 头部硬切，尾部丢失 |
-| 同语义位置 | `api/router.py:263`、`:1184`、`:1219`、`:1249`、`:1667`、`:1844` | 均为异常转用户文案，同一缺陷模式 |
+| 同语义位置 | `api/router.py:263`、`:311`、`:1184`、`:1219`、`:1249`、`:1667`、`:1844` | 均为异常转用户文案，同一缺陷模式 |
 | 明确不动的位置 | `api/llm_client.py:121`、`api/providers/kling.py:57`、`api/router.py:1627`、`api/router.py:1755` | 第三方响应体/`raw_preview`，语义是「看开头」 |
 | 调用方 | `web/bee-studio.html:3384-3390` | 前端整段展示 `err.payload.error` / `mockReason`，不二次加工 |
 | 边界 / 反例 1（超长） | `str(exc)` 262 字、尾部为 `[WinError 10061] ...` | 尾部保留，末尾完整可读 |
@@ -60,7 +60,7 @@ acceptance: [AC-01, AC-02, AC-03]
 
 ## 5. 影响面
 
-- 涉及模块：`api/router.py`（新增 1 个模块级 helper + 替换 9 处调用点）、`tests/test_llm_error_clip.py`（新增）
+- 涉及模块：`api/router.py`（新增 1 个模块级 helper + 替换 10 处调用点）、`tests/test_llm_error_clip.py`（新增）
 - 涉及接口：`POST /api/llm/script-gen`、`/api/llm/script-edit`、`/api/providers/{p}/keys`、`/api/video/generate`、`/api/bee/script/{pid}/shots` 的失败响应字段
 - 数据变更：无（只改内存中的响应字符串，不落库）
 
@@ -123,5 +123,5 @@ G1: PASS | 确认人: 用户 | 时间: 2026-11-28 05:00 | 确认原文: "G1 通�
 
 | 切片 | 目录结构 | 文件归属 | 路由 / 入口 | 函数 / 模块 | 数据表 / 字段 | 验收方式 | 清理项 |
 |---|---|---|---|---|---|---|---|
-| 切片 A | `api/` | `api/router.py` | 不适用：模块级 helper | 新增 `_clip_reason(text, limit)`，替换 9 处异常文案截断点 | 不适用：无持久化 | `pytest tests/test_llm_error_clip.py -q` | 无 |
+| 切片 A | `api/` | `api/router.py` | 不适用：模块级 helper | 新增 `_clip_reason(text, limit)`，替换 10 处异常文案截断点 | 不适用：无持久化 | `pytest tests/test_llm_error_clip.py -q` | 无 |
 | 切片 B | `tests/` | `tests/test_llm_error_clip.py` | `POST /api/llm/script-gen`（经 `handle_post` 构造异常） | 单测：长异常尾部可见 / 短文本原样 / None 占位 / 无裸 `str()[:N]` | 不适用：无持久化 | 同上 | 临时写的注册表探针条目（若用 curl 实测则还原） |

@@ -621,7 +621,11 @@ def _clip_reason(text, limit: int = 200) -> str:
     `[WinError 10061]` / `getaddrinfo failed` 这些真正能定位问题的信息全丢。
     空值给占位，避免界面出现 "None" 或空括号。
     """
-    t = "" if text is None else str(text).strip()
+    try:
+        t = "" if text is None else str(text).strip()
+    except Exception:
+        # 异常对象的 __str__ 自己再抛错时，不能让它覆盖原始故障
+        return "未知原因"
     if not t:
         return "未知原因"
     if len(t) <= limit:

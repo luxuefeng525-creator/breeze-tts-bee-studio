@@ -63,6 +63,16 @@ def test_short_empty_none_states() -> None:
     assert "None" not in router._clip_reason(None)
 
 
+def test_bad_str_object_falls_back_to_placeholder() -> None:
+    """异常对象的 __str__ 自己再抛错时，helper 不能二次抛错。"""
+
+    class BadStr:
+        def __str__(self) -> str:
+            raise RuntimeError("str 本身挂了")
+
+    assert router._clip_reason(BadStr()) == "未知原因"
+
+
 def test_cut_happens_at_separator_without_half_word() -> None:
     """超长且在分隔符处断开时，断点后应从完整词开始，不留半词。"""
     text = ("开头套话 " + "alpha beta gamma delta " * 40 + "结尾标记")
@@ -113,5 +123,8 @@ def test_script_gen_degradation_preserves_tail(monkeypatch) -> None:
 def test_router_has_no_bare_exception_head_slice() -> None:
     """同一策略覆盖 router.py：不能再有裸的异常头部硬切。"""
     src = ROUTER_PY.read_text(encoding="utf-8")
-    hits = re.findall(r"\bstr\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s*\[\s*:\s*\d+\s*\]", src)
+    # 覆盖两种写法：f-string 整体切片、str(...) 切片；同时覆盖 [:N] 与 [0:N]
+    pattern = (r'(?:f?"[^"\n]*\{(?:e|exc|err|error)\}[^"\n]*"'
+               r'|str\([^)\n]*\))\s*\[\s*(?:\d+\s*:|:\s*\d+)\s*\]')
+    hits = re.findall(pattern, src)
     assert not hits, f"router.py 仍存在异常头部硬切：{hits}"

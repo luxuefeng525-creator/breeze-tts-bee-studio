@@ -22,9 +22,9 @@ updated: 2026-11-28
 
 | 验收点 | 场景 | 步骤 | 预期 | 实际 | 结论 | 证据 |
 |---|---|---|---|---|---|---|
-| AC-01 | LLM 异常降级 | 构造 `str(exc)` > 200、尾部为 `[WinError 10061] ConnectionRefusedTailMarker`，走 script-gen 降级分支 | `mock_reason` 含尾部片段且无半词 | `mock_reason` 保留该尾部标记，长度 ≤ 201 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-targeted.txt` |
-| AC-02 | 短 / 空 / None | 直接调用 `_clip_reason("短文本")`、`_clip_reason("")`、`_clip_reason(None)` | 短文本原样；空值给「未知原因」，不出现 `None` | 三态均符合预期 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-targeted.txt` |
-| AC-03 | 全量回归 + 静态扫描 | 扫 `api/router.py` 裸异常头部硬切；跑全量 `pytest -q` | 无裸 `str(异常)[:N]`；全量不红 | 扫描无命中；650 passed，退出码 0 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-full.txt` |
+| AC-01 | LLM 异常降级 | 构造 `str(exc)` > 200、尾部为 `[WinError 10061] ConnectionRefusedTailMarker`，走 script-gen 降级分支 | `mock_reason` 含尾部片段；有分隔符时不在词中断，无分隔符允许从词中间开始 | `mock_reason` 保留该尾部标记，长度 ≤ 201 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-clip.txt` |
+| AC-02 | 短 / 空 / None / `__str__` 抛错 | 直接调用 `_clip_reason("短文本")`、`_clip_reason("")`、`_clip_reason(None)`、自定义 `BadStr` | 短文本原样；空值与 `__str__` 抛错均回落「未知原因」，不出现 `None` | 四态均符合预期 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-clip.txt` |
+| AC-03 | 全量回归 + 静态扫描 | 扫 `api/router.py` 裸异常头部硬切；跑全量 `pytest -q` | 无裸异常头部切片（含 f-string / `[0:N]` 变体）；全量不红 | 扫描无命中；651 passed，退出码 0 | PASS | `harness/requirements/REQ-20261128-01/logs/pytest-full.txt` |
 
 ## 3. 边界与异常
 
@@ -40,8 +40,9 @@ updated: 2026-11-28
 
 | 受影响功能 | 验证方式 | 结果 |
 |---|---|---|
-| 截断相关既有测试 | `pytest tests/test_llm_error_clip.py tests/test_bee_studio_notice.py tests/test_router_provider_guard.py tests/test_script_api.py tests/test_custom_llm_model.py -q` | PASS 55 passed |
-| 全工程回归 | `pytest -q` | PASS 650 passed（1 条 fastapi/httpx deprecation warning，与本次改动无关） |
+| 截断相关既有测试 | `pytest tests/test_llm_error_clip.py tests/test_bee_studio_notice.py tests/test_router_provider_guard.py tests/test_script_api.py tests/test_custom_llm_model.py -q` | PASS 57 passed |
+| 新增用例单独取证 | `pytest tests/test_llm_error_clip.py -q` | PASS 7 passed |
+| 全工程回归 | `pytest -q` | PASS 651 passed（1 条 fastapi/httpx deprecation warning，与本次改动无关） |
 | 语法编译 | `python -m py_compile api/router.py tests/test_llm_error_clip.py` | PASS |
 
 ## 5. 未验证项
@@ -49,9 +50,9 @@ updated: 2026-11-28
 | 项 | 未验证原因 | 影响 | 补验条件 |
 |---|---|---|---|
 | 真实上游超时/拒连的浏览器端展示 | 本需求只改后端字符串；前端展示已在 REQ-20261127-03 验收，本轮用单测构造异常 | 未做真实网络失败的端到端复现 | 有可用 Key/端点时做一次真实降级 |
-| `providers/*`、`video_upscale.py`、`cost_calc.py`、`comfy_templates.py` 的同模式截断 | 不在本需求批准的 `router.py` 9 处范围内 | 那些入口的长异常仍可能丢尾部 | 用户确认后另开需求 |
+| `providers/*`、`video_upscale.py`、`cost_calc.py`、`comfy_templates.py` 的同模式截断 | 不在本需求批准的 `router.py` 10 处范围内 | 那些入口的长异常仍可能丢尾部 | 用户确认后另开需求 |
 
 ## 6. 结论
 
 - 验收点通过率：3/3
-- 是否可进入审查：是（AC-01/02/03 均有命令退出码与日志证据，全量回归 650 passed）
+- 是否可进入审查：是（AC-01/02/03 均有命令退出码与日志证据，整改后全量回归 651 passed）

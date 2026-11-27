@@ -18,7 +18,7 @@ updated: 2026-11-28
 
 | 方案 | 做法 | 优点 | 代价 | 结论 |
 |---|---|---|---|---|
-| A | 新增模块级 `_clip_reason(text, limit=200)`：尾部窗口保留 + 窗口内第一个分隔符断开 + 空值占位；替换 router.py 内 9 处异常文案 | 与前端策略一致；可测；改动局部；不会把末尾 Errno 当前缀切掉 | 需替换多处调用点 | 选用 |
+| A | 新增模块级 `_clip_reason(text, limit=200)`：尾部窗口保留 + 窗口内第一个分隔符断开（无分隔符则整窗保留）+ 空值占位；替换 router.py 内 10 处异常文案 | 与前端策略一致；可测；改动局部；不会把末尾 Errno 当前缀切掉 | 需替换多处调用点 | 选用 |
 | B | 保留头部截断，仅把上限提到 500 | 改动最小 | 治不了「尾部丢失」——异常链长度不可控，超长仍会切掉尾部 | 否决 |
 | C | 不截断，透传完整 `str(exc)` | 信息零丢失 | toast/界面被撑爆；可能带出堆栈与敏感路径 | 否决 |
 
@@ -29,7 +29,7 @@ updated: 2026-11-28
 | 文件/模块 | 改动 | 原因 |
 |---|---|---|
 | `api/router.py` | 新增 `_clip_reason(text, limit=200)`（放在模块级工具区） | R-01/R-02 |
-| `api/router.py` | 替换 `:263`、`:1184`、`:1219`、`:1249`、`:1641`、`:1645`、`:1667`、`:1753`、`:1844` 共 9 处 | R-02 |
+| `api/router.py` | 替换 `:263`、`:311`、`:1184`、`:1219`、`:1249`、`:1641`、`:1645`、`:1667`、`:1753`、`:1844` 共 10 处 | R-02 |
 | `tests/test_llm_error_clip.py` | 新增单测：helper 行为 + script-gen 降级路径端到端断言 | AC-01/02/03 |
 
 不动的同形位置（语义不同）：`api/llm_client.py:121`、`api/providers/kling.py:57`、`api/router.py:1627`（`raw_preview`）、`:1755`。
@@ -53,7 +53,7 @@ updated: 2026-11-28
 - 调用方：`POST /api/llm/script-gen`、`/api/llm/script-edit`、`/api/providers/{p}/keys`、`/api/providers/{p}/test`、`/api/video/generate`、`/api/bee/script/{pid}/shots` 的失败响应；前端仅把 `mock_reason`/`error` 整段显示，不解析格式
 - 共享状态：不改 `_API_KEYS`、不改 DB schema、不改端口配置
 - 兼容性：字段名与结构完全不变，只改内容截断方向；老前端不受影响（不依赖前缀），新前端（REQ-20261127-03）展示更完整
-- 回归风险：9 处替换均为同语义改写，若 helper 对非字符串抛错会影响错误分支——helper 内部必须 `str()` 兜底
+- 回归风险：10 处替换均为同语义改写，若 helper 对非字符串抛错会影响错误分支——helper 内部必须 `str()` 兜底
 
 ## 7. 回退思路
 
@@ -65,4 +65,4 @@ updated: 2026-11-28
 | 问题 | 影响 | 待定方 |
 |---|---|---|
 | 是否顺带统一 `providers/*` 的第三方响应预览 | 那些位置语义是「看响应开头」，本次不动 | 用户（另议） |
-| 是否顺带修同模式的其它文件 | `api/video_upscale.py:335`、`api/cost_calc.py:182`、`api/comfy_templates.py:79` 也是异常头部硬切，但不在本需求批准的 `router.py` 9 处范围内 | 用户（另议） |
+| 是否顺带修同模式的其它文件 | `api/video_upscale.py:335`、`api/cost_calc.py:182`、`api/comfy_templates.py:79` 也是异常头部硬切，但不在本需求批准的 `router.py` 10 处范围内 | 用户（另议） |
