@@ -38,6 +38,7 @@ hits: []
 | 全量回归（G3 修复后） | pytest -q | PASS 630 | `logs/regression-pytest.txt` |
 | G3 审查整改复跑 | pytest tests/test_custom_llm_model.py + 失败子集 | PASS 17 / 5 | `03-review.md` §5 |
 | 探针数据清理 | sqlite 删除 scripts.proj-curl-probe | PASS deleted=1 leftover=0 | `logs/ac02-curl-custom-llm.txt` |
+| 合流后发布复验（真实面板） | 不可达端点降级 / 未知 id 400 / 内置不受影响 | PASS | `logs/release-verify.txt` |
 
 ## 4. 门禁记录
 

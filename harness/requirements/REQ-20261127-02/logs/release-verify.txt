@@ -1,0 +1,26 @@
+REQ-20261127-02 发布复验（合流后 · main · 真实面板 7861）
+
+时间：2026-11-27 08:15 前后
+前置：merge session/trae-20261127 → main（77cf9c7）；重启面板 7861（新 pid 21108）加载新代码
+脚本：临时脚本执行，自动备份/还原 data/model_registry.json 并清理 scripts 表探针行
+
+[A] 不可达自定义端点（base_url=http://127.0.0.1:9/v1）
+    POST /api/llm/script-gen  provider=release-probe
+    响应 200：generated_by=mock, used_mock=true, used_custom_model=true,
+              style_id=cinematic, mock_reason 内含 "url: /v1/chat/completions"
+    判读：出站确实打到注册表的 base_url，且保留 /v1 只拼一次 /chat/completions（R-01）；
+          失败不静默、带原因与 used_custom_model（R-03）
+
+[B] 未知 provider id
+    POST /api/llm/script-gen  provider=no-such-model
+    响应 400：{"error":"未知 LLM provider: no-such-model","used_custom_model":false}
+    判读：明确报错不降级（R-02）
+
+[C] 内置 provider 未受影响
+    POST /api/llm/script-gen  provider=longcat（假 Key）
+    响应 200：generated_by=mock, used_custom_model=false
+    判读：内置链路未被自定义改造误伤；G3 后内置若被传 base_url 会直接报错（RV-04）
+
+清理：model_registry.json 已还原为 []；scripts.proj-release-probe 删除 rowcount=1 leftover=0
+
+结论：PASS
