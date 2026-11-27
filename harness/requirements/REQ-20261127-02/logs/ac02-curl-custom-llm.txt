@@ -1,0 +1,29 @@
+AC-02/AC-03 真实接口取证（面板 7861，重启后加载新代码）
+
+前置：data/model_registry.json 临时写入探针条目
+[{"id":"custom-curl-probe","name":"curl 探针","type":"llm","provider":"custom",
+  "model_name":"glm-curl-probe","base_url":"http://127.0.0.1:9/v1","builtin":false}]
+（测后已还原为 []，并删除 scripts 表 proj-curl-probe，rowcount=1 leftover=0）
+
+请求 1（不可达自定义端点）：
+POST /api/llm/script-gen
+{"topic":"取证","shots_count":1,"provider":"custom-curl-probe","api_key":"probe-key-abcdefgh","project_id":"proj-curl-probe"}
+
+响应 200：
+{"project_id":"proj-curl-probe","title":"取证","shots":[…],"generated_by":"mock","used_mock":true,
+ "mock_reason":"LLM 调用失败: LLM 调用失败（重试 1 次）: HTTPConnectionPool(host='127.0.0.1', port=9):
+   Max retries exceeded with url: /v1/chat/completions …",
+ "style_id":"cinematic","custom_model_error":true}
+
+判读：
+- 出站确实打到用户填写的 base_url，且保留其 /v1 后缀只拼一次 /chat/completions（R-01）
+- 失败未 502、未静默：带 mock_reason + custom_model_error=true（R-03）
+
+请求 2（未知模型 id）：
+POST /api/llm/script-gen
+{"topic":"取证","shots_count":1,"provider":"no-such-model","api_key":"probe-key-abcdefgh"}
+
+响应 400：
+{"error":"未知 LLM provider: no-such-model"}
+
+判读：明确报错，不再静默降级（R-02）

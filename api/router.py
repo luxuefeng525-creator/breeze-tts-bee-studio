@@ -588,6 +588,31 @@ _LLM_LABELS = {
 }
 
 
+def _resolve_llm(provider: str) -> tuple[str, str]:
+    """把 provider 解析成 (model_name, base_url)，喂给 llm_client.call_chat。
+
+    内置 provider 返回 ("", "")，端点与默认模型仍由 llm_client 注册表决定；
+    其余按 data/model_registry.json 里的自定义 LLM 条目解析。
+    前端添加自定义模型后会把「AI 剧本模型」下拉设成该条目 id
+    （web/bee-studio.html:4157），所以这里必须认得这个 id。
+    """
+    from api.llm_client import LLM_PROVIDERS
+    if provider in LLM_PROVIDERS:
+        return "", ""
+    for m in _load_custom_models():
+        if m.get("id") == provider and m.get("type") == "llm":
+            mn = str(m.get("model_name") or "").strip()
+            bu = str(m.get("base_url") or "").strip()
+            if not mn:
+                raise ValueError(f"自定义模型 {provider} 未填 model_name")
+            if not bu:
+                raise ValueError(f"自定义模型 {provider} 未填 base_url")
+            if not bu.lower().startswith(("http://", "https://")):
+                raise ValueError(f"自定义模型 {provider} 的 base_url 非法：{bu}")
+            return mn, bu
+    raise ValueError(f"未知 LLM provider: {provider}")
+
+
 # ------------------------------------------------------------------
 # 模型 Registry — 内置 + 自定义（持久化 data/model_registry.json）
 # ------------------------------------------------------------------
@@ -1102,12 +1127,22 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {"ok": False, "error": "未配置 API Key", "latency_ms": 0})
             return True
         # LLM provider → 打一次最小 chat completion 测 key + endpoint
-        if provider in ("longcat", "openai"):
+        # 内置 LLM 或自定义 LLM 模型 → 打一次最小 chat completion 测 key + endpoint
+        _is_llm = provider in ("longcat", "openai")
+        _llm_model = _llm_base = ""
+        if not _is_llm:
+            try:
+                _llm_model, _llm_base = _resolve_llm(provider)
+                _is_llm = True
+            except ValueError:
+                _is_llm = False   # 不是 LLM，交给下面的视频 provider 分支
+        if _is_llm:
             try:
                 import time as _t
                 from api.llm_client import call_chat
                 t0 = _t.time()
                 call_chat(provider=provider, api_key=api_key,
+                          model=_llm_model, base_url=_llm_base,
                           user="ping", json_mode=False, max_retries=0, timeout=10)
                 latency_ms = int((_t.time() - t0) * 1000)
                 _h_json(h, {"ok": True, "latency_ms": latency_ms})
@@ -1439,8 +1474,17 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             })
             return True
 
+        # R-01/R-02：先解析模型（内置返回 ("","")，行为与改动前一致），再查 Key
+        try:
+            llm_model, llm_base = _resolve_llm(provider)
+        except ValueError as exc:
+            _h_json(h, {"error": str(exc), "used_custom_model": False}, 400)
+            return True
+        is_custom = bool(llm_base)
+
         if not api_key:
-            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True}, 402)
+            _h_json(h, {"error": f"{provider} 未配置 API Key", "need_key": True,
+                         "used_custom_model": is_custom}, 402)
             return True
 
         # 构造 system + user prompt，要求输出结构化 JSON（风格约束在函数内注入）
@@ -1451,6 +1495,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         try:
             from api.llm_client import call_chat
             raw = call_chat(provider=provider, api_key=api_key,
+                            model=llm_model, base_url=llm_base,
                             system=system_prompt, user=user_prompt,
                             json_mode=True, max_retries=1, timeout=90)
             cleaned = raw.strip()
@@ -1464,6 +1509,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                                 "这一次请确保：只输出裸 JSON，不要任何文字解释，不要 Markdown 代码块，"
                                 "不要在开头加「好的，这是剧本：」。直接输出 {\"title\":...,\"shots\":[...]}")
                 raw2 = call_chat(provider=provider, api_key=api_key,
+                                 model=llm_model, base_url=llm_base,
                                  system=system_prompt, user=retry_prompt,
                                  json_mode=True, max_retries=0, timeout=90)
                 cleaned2 = raw2.strip()
@@ -1488,6 +1534,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "project_id": pid, "title": title, "shots": shots,
                 "generated_by": provider, "shots_count": len(shots),
                 "used_mock": False, "style_id": style_id,
+                "used_custom_model": is_custom,
             })
         except json.JSONDecodeError as exc:
             # A5：双重失败 → mock 降级（不是真 502，是可用 fallback）
@@ -1501,6 +1548,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "generated_by": "mock", "shots_count": len(mock["shots"]),
                 "used_mock": True, "mock_reason": f"JSON 解析失败: {exc.msg}",
                 "raw_preview": (raw or "")[:500], "style_id": style_id,
+                "used_custom_model": is_custom,
             }, 200)  # 200 OK mock 也算可用，不报 502
         except Exception as exc:
             # LLM 调用挂了 → mock 降级
@@ -1514,7 +1562,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                     "generated_by": "mock", "shots_count": len(mock["shots"]),
                     "used_mock": True, "mock_reason": f"LLM 调用失败: {str(exc)[:200]}",
-                    "style_id": style_id,
+                    "style_id": style_id, "used_custom_model": is_custom,
                 }, 200)
             except Exception as exc2:
                 _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)
@@ -1564,9 +1612,17 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {"error": f"shot_index {shot_index} 越界（0~{len(shots)-1}）"}, 400)
             return True
 
+        # R-01/R-02：改镜头与生成共用同一套自定义模型解析（先解析，再查 Key）
+        try:
+            llm_model, llm_base = _resolve_llm(provider)
+        except ValueError as exc:
+            _h_json(h, {"error": str(exc), "used_custom_model": False}, 400)
+            return True
+        is_custom = bool(llm_base)
+
         if not api_key:
             _h_json(h, {"error": f"{provider} 未配置 API Key（改镜头需要真实 LLM）",
-                         "need_key": True}, 402)
+                         "need_key": True, "used_custom_model": is_custom}, 402)
             return True
 
         system_prompt = (
@@ -1582,9 +1638,11 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             "请只输出 updated_shot JSON，严格遵循原镜头的字段结构。"
         )
 
+        raw = ""   # RV-01：先初始化，避免 call_chat 自身失败时 except 里取不到变量
         try:
             from api.llm_client import call_chat
             raw = call_chat(provider=provider, api_key=api_key,
+                            model=llm_model, base_url=llm_base,
                             system=system_prompt, user=user_prompt,
                             json_mode=True, max_retries=1, timeout=60)
             cleaned = raw.strip()
@@ -1612,10 +1670,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "project_id": project_id, "updated_shot_index": shot_index,
                 "updated_shot": shots[shot_index],
                 "shots": shots, "edited_by": provider,
+                "used_custom_model": is_custom,
             })
         except Exception as exc:
             _h_json(h, {"error": f"改镜头 LLM 失败: {str(exc)[:200]}",
-                         "raw_preview": (raw or "")[:500] if 'raw' in dir() else ""}, 502)
+                         "used_custom_model": is_custom,
+                         "raw_preview": (raw or "")[:500]}, 502)
         return True
 
     # ---- POST /api/video/generate-batch —— A4：多镜头并行视频生成 ----

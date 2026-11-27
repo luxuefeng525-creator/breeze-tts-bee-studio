@@ -45,19 +45,36 @@ LLM_PROVIDERS = {
 def call_chat(*, provider: str, api_key: str,
               system: str = "", user: str,
               model: str = "", json_mode: bool = True,
-              max_retries: int = 2, timeout: int = 0) -> str:
-    """调一次 chat completion，返回纯文本。json_mode=True 时返回 JSON 文本。"""
+              max_retries: int = 2, timeout: int = 0,
+              base_url: str = "") -> str:
+    """调一次 chat completion，返回纯文本。json_mode=True 时返回 JSON 文本。
+
+    provider 为内置（longcat/openai）时按注册表取端点；其余视为自定义模型，
+    必须由调用方传 base_url（OpenAI 兼容），model 缺省用 provider 本身。
+    """
     cfg = LLM_PROVIDERS.get(provider)
-    if not cfg:
-        raise ValueError(f"未知 LLM provider: {provider}")
+    if cfg:
+        # 内置 provider 的端点写死在注册表里，不接受外部改写（RV-04）：
+        # 允许覆盖会让「内置」和「自定义」两条链路口径混淆、静默改道。
+        if base_url:
+            raise ValueError(f"内置 provider {provider} 不接受 base_url（仅自定义模型可指定端点）")
+        protocol = cfg["default_protocol"]
+        base_url = cfg["endpoints"][protocol].rstrip("/")
+        model_name = model or cfg["default_model"]
+        to = timeout or cfg["default_timeout"]
+    else:
+        # 自定义模型：只支持 OpenAI 兼容协议，端点来自 data/model_registry.json
+        if not base_url:
+            raise ValueError(f"未知 LLM provider: {provider}（自定义模型需提供 base_url）")
+        if not base_url.lower().startswith(("http://", "https://")):
+            raise ValueError(f"base_url 非法（需 http/https）：{base_url}")
+        protocol = "openai"
+        base_url = base_url.rstrip("/")
+        model_name = model or provider
+        to = timeout or 60
     if not api_key:
         raise ValueError("api_key 为空")
 
-    base_url = cfg["endpoints"][cfg["default_protocol"]]
-    model_name = model or cfg["default_model"]
-    to = timeout or cfg["default_timeout"]
-
-    protocol = cfg["default_protocol"]
     if protocol == "openai":
         url = base_url.rstrip("/") + "/chat/completions"
         payload = {
