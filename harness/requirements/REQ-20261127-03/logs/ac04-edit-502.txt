@@ -1,0 +1,18 @@
+AC-04 接口取证：script-edit 走不可达的自定义模型端点
+
+项目：proj-1795769505（scripts 表最新一条，浏览器验收时生成）
+请求：POST http://127.0.0.1:7861/api/llm/script-edit
+      {"project_id":"proj-1795769505","shot_index":0,
+       "edit_instruction":"把这一镜改得更紧张","provider":"notice-probe"}
+
+响应：502
+keys: ['error', 'raw_preview', 'used_custom_model']
+error: 改镜头 LLM 失败: LLM 调用失败（重试 1 次）: HTTPConnectionPool(host='127.0.0.1', port=9):
+        Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("H…
+used_custom_model: True
+raw_preview: （空 —— 调用在建立连接阶段即失败，无返回体可回显）
+
+判读：失败响应带原因 + 自定义模型上下文字段，前端 submitScriptEdit 的拼接逻辑
+      （web/bee-studio.html 失败分支）已被 tests/test_bee_studio_notice.py
+      ::test_script_edit_surfaces_failure_context 静态断言覆盖。
+      raw_preview 有内容时（如上游返回非 JSON）才会显示，本次为空属预期。

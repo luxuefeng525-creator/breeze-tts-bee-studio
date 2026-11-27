@@ -1803,6 +1803,19 @@ async function autosaveProject() {
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
 
+// 降级原因截断（REQ-20261127-03）：空值兜底；超长保留结尾，
+// 因为关键信息通常在末尾（如 connection refused / HTTP 401）
+function truncateReason(text, max = 120) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return '未返回具体原因';
+  if (t.length <= max) return t;
+  const head = t.slice(-max);
+  // 别把单词/URL 切成半截（如 "Failed to e"）：优先在最近的分隔符处断开
+  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('，'),
+                       head.lastIndexOf('；'), head.lastIndexOf('/'));
+  return '…' + (cut > max * 0.5 ? head.slice(cut + 1) : head);
+}
+
 function showToast(msg, type='info') {
   const stack = $('#toastStack');
   const t = document.createElement('div');
@@ -3300,7 +3313,10 @@ async function _llmGenerate(topic, numShots, totalDur, audience, style, provider
     audioUrl: null, videoReady: false,
     styleId: s.style_id || (currentStyleTemplate() || {}).id || 'cinematic'
   }));
-  return { title: r.title || topic, shots };
+  // 降级三字段原样带出（REQ-20261127-03）：调用处据此决定提示成功还是降级
+  return { title: r.title || topic, shots,
+           usedMock: !!r.used_mock, mockReason: r.mock_reason || '',
+           usedCustomModel: !!r.used_custom_model };
 }
 
 $('#scriptModalGen').addEventListener('click', async () => {
@@ -3315,13 +3331,23 @@ $('#scriptModalGen').addEventListener('click', async () => {
   if (!topic) { showToast('⚠️ 请先填视频主题', 'warn'); $('#scriptTopic').focus(); return; }
 
   btn.disabled = true; btn.textContent = '🎬 AI 正在构思...';
-  let shots, title, usedLLM = false, llmName = llmProvider;
+  let shots, title, usedLLM = false, llmName = llmProvider, degraded = false;
 
   // 1. 先尝试真实 LLM
   try {
     const result = await _llmGenerate(topic, numShots, totalDur, audience, style, llmProvider);
     shots = result.shots; title = result.title; usedLLM = true;
-    showToast(`✅ ${llmName} 生成 ${shots.length} 镜头 · 主题《${title}》`, 'success');
+    // REQ-20261127-03：后端 200 也可能是降级 mock，不能一律报成功。
+    // force_mock 是用户主动选的 Mock 演示，不算失败降级，保持原有成功提示。
+    if (result.usedMock && result.mockReason !== 'force_mock') {
+      degraded = true;
+      const reason = truncateReason(result.mockReason);
+      const step = result.usedCustomModel ? '；请检查该自定义模型的 Base URL 与 API Key' : '';
+      // 一条讲清：降级 + 原因 + 下一步 + 产出镜头数；不再另弹创建提示，避免两条重复
+      showToast(`⚠️ ${llmName} 不可用，已用演示数据生成 ${shots.length} 镜头（${reason}）${step}`, 'warn');
+    } else {
+      showToast(`✅ ${llmName} 生成 ${shots.length} 镜头 · 主题《${title}》`, 'success');
+    }
   } catch (err) {
     // 2. 降级 mock
     const result = await _mockGenerate(topic, numShots, totalDur, audience, style);
@@ -3343,7 +3369,12 @@ $('#scriptModalGen').addEventListener('click', async () => {
   if (latest) {
     switchProject(latest.id);
     $('#scriptModal').classList.remove('open');
-    showToast(`📐 已创建 ${latest.name} · ${latest.shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+    // 降级时不能弹绿色「已创建」成功提示，否则与上面的 warn 互相打架、
+    // 用户会以为真实模型跑通了（REQ-20261127-03）
+    // 降级时不再弹「已创建」提示：信息已由上面那条 warn 一并说明
+    if (!degraded) {
+      showToast(`📐 已创建 ${latest.name} · ${latest.shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+    }
   }
 });
 
@@ -3978,7 +4009,10 @@ async function submitScriptEdit() {
     const data = await resp.json();
     if (!resp.ok) {
       const msg = (data.need_key ? '（需要先配 API Key）' : '') + (data.error || resp.status);
-      flashNotice('❌ 改镜头失败：' + msg);
+      // REQ-20261127-03：带上自定义模型上下文与返回片段，别让用户靠猜
+      const ctx = data.used_custom_model ? '（本次修改走的是你添加的自定义模型端点）' : '';
+      const preview = data.raw_preview ? `｜返回片段：${truncateReason(data.raw_preview, 80)}` : '';
+      flashNotice(`❌ 改镜头失败：${msg}${ctx}${preview}`);
       btn.disabled = false;
       label.textContent = '✨ AI 重写这个镜头';
       return;
