@@ -44,8 +44,8 @@ hits: ["surgical-patch"]
 ```text
 G1: PASS | 确认人: 用户 | 时间: 2026-11-28 05:00 | 确认原文: "G1 通过（推荐）"
 G2: PASS | 确认人: 用户 | 时间: 2026-11-28 05:54 | 确认原文: "G2 通过（推荐）"
-G3: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
-G4: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
+G3: PASS | 确认人: 用户 | 时间: 2026-11-28 06:18 | 确认原文: "G3 通过（推荐）"
+G4: PASS | 确认人: 用户 | 时间: 2026-11-28 06:28 | 确认原文: "G4 通过 + 合流（推荐）"
 ```
 
 追加记录（不覆盖历史）：
@@ -54,7 +54,8 @@ G4: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
 |---|---|---|---|
 | G1 | PASS | 人确认 | — |
 | G2 | PASS | 人确认 + 全量 pytest 取证 | `harness/requirements/REQ-20261128-01/logs/pytest-full.txt` |
-| G3 | 待确认 | 独立只读审查 + 5 项整改 | `harness/requirements/REQ-20261128-01/03-review.md` |
+| G3 | PASS | 独立只读审查 + 5 项整改 + 人确认 | `harness/requirements/REQ-20261128-01/03-review.md` |
+| G4 | PASS | 发布材料齐全 + 人确认授权合流 | `harness/requirements/REQ-20261128-01/04-release.md` |
 
 ## 5. 未验证项
 
@@ -66,10 +67,10 @@ G4: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
 
 ## 6. 下一步
 
-1. 向用户索取 G3 确认原文
-2. 写入 `state.md` 门禁块后跑 `gate REQ-20261128-01 --stage G3 --dir f:\TTS2\breeze-tts-trae`
-3. G4 发布收口，补 `04-release.md`
-4. 合流 main、重启面板 7861 使新后端生效
+1. 跑 `gate REQ-20261128-01 --stage G4 --dir f:\TTS2\breeze-tts-trae` 并回填结论
+2. 合流 main（git merge --no-ff session/trae-20261128）
+3. 重启面板 7861 使新后端生效
+4. 清理工作树与分支
 
 ## 7. 交接摘要（可选）
 

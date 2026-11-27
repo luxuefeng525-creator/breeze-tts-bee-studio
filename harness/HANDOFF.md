@@ -1,6 +1,6 @@
 # 接手指南（引擎自动生成，勿手改）
 
-- 生成时间：2026-11-28 06:11
+- 生成时间：2026-11-28 06:29
 - 需求：REQ-20261128-01
 - 当前阶段：test
 - 项目：f:\TTS2\breeze-tts-trae
@@ -13,18 +13,18 @@
 ## 2. 门禁最新结论
 - G1: PASS
 - G2: PASS
-- G3: 未开始
-- G4: 未开始
-- 最近执行：G2 PASS（2026-11-28 06:11）
+- G3: PASS
+- G4: PASS
+- 最近执行：G4 PASS（2026-11-28 06:29）
 
 ## 3. 阻塞
 - 无
 
 ## 4. 下一步（来自 state.md）
-- 1. 向用户索取 G3 确认原文
-- 2. 写入 `state.md` 门禁块后跑 `gate REQ-20261128-01 --stage G3 --dir f:\TTS2\breeze-tts-trae`
-- 3. G4 发布收口，补 `04-release.md`
-- 4. 合流 main、重启面板 7861 使新后端生效
+- 1. 跑 `gate REQ-20261128-01 --stage G4 --dir f:\TTS2\breeze-tts-trae` 并回填结论
+- 2. 合流 main（git merge --no-ff session/trae-20261128）
+- 3. 重启面板 7861 使新后端生效
+- 4. 清理工作树与分支
 
 ## 5. 接手三步
 1. 读本文件与 `harness/requirements/REQ-20261128-01/state.md`
