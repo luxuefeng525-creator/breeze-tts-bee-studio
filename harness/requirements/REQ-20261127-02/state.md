@@ -47,7 +47,7 @@ hits: []
 ```text
 G1: PASS | 确认人: 用户 | 时间: 2026-11-27 07:21 | 确认原文: "按方案 A 确认（推荐）"
 G2: PASS | 确认人: 用户 | 时间: 2026-11-27 07:36 | 确认原文: "G2 通过（推荐）"
-G3: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
+G3: PASS | 确认人: 用户 | 时间: 2026-11-27 08:11 | 确认原文: "G3 通过（推荐）"
 G4: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
 ```
 
@@ -58,6 +58,7 @@ G4: 未开始 | 确认人: — | 时间: — | 确认原文: "<TBD>"
 | G1 | PASS | 用户选项「按方案 A 确认（推荐）」 | `00-requirement.md` §2/§4/§7、`01-design.md` §2 |
 | G2 | PASS | 全量 629 passed + 用户选项「G2 通过（推荐）」 | `02-test.md`、`logs/regression-pytest.txt` |
 | G2 复跑 | PASS | G3 修复后全量 630 passed，AC 证据未变 | `02-test.md`、`logs/regression-pytest.txt` |
+| G3 | PASS | 独立审查 RV-01~05（修 3 接受 2，无阻断）+ 用户选项「G3 通过（推荐）」 | `03-review.md`、`logs/regression-pytest.txt` |
 
 ## 5. 未验证项
 
