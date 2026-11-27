@@ -88,6 +88,15 @@ def _db_init() -> None:
             conn.execute("ALTER TABLE export_jobs ADD COLUMN zip_path TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass  # 已经有了
+        # 迁移：成片音轨来源与响度。声效入片之后必须能回答「这条片子有没有声音」，
+        # 否则用户只能自己点开看；沉默导出和正常导出在界面上长得一模一样。
+        for _col, _ddl in (("audio_source", "TEXT DEFAULT ''"),
+                           ("audio_level_db", "REAL"),
+                           ("silent_shots", "INTEGER DEFAULT 0")):
+            try:
+                conn.execute(f"ALTER TABLE export_jobs ADD COLUMN {_col} {_ddl}")
+            except sqlite3.OperationalError:
+                pass  # 已经有了
         # 迁移：上传进 ComfyUI input 的参考图副本名。轮询线程活在内存里，
         # 面板一重启就丢了名字，那张副本会永久留在 input 目录（实测漏过一张）。
         try:
@@ -310,21 +319,80 @@ def resume_pending_video_jobs() -> None:
                          args=(prov, jid, result, budget), daemon=True).start()
 
 
+def _safe_data_file(base: Path, rel: str) -> str:
+    """把 data 目录内的相对路径解析成真实文件；越界或不存在一律返回空串。
+
+    scripts.json 是外部可写的索引，不能直接 `(base/rel)` 就交给 ffmpeg。
+    """
+    s = str(rel or "").strip().replace("\\", "/")
+    if not s or s.startswith("/") or ":" in s or ".." in s.split("/"):
+        return ""
+    cand = (base / s).resolve()
+    try:
+        cand.relative_to(base.resolve())
+    except ValueError:
+        return ""
+    return str(cand) if cand.is_file() else ""
+
+
+def _script_mix_path(sid: str, _cache: dict | None = None) -> str:
+    """取该剧本的混音成品（含 ambience/BGM 铺底）。
+
+    只认「文件真的在」的引用：scripts.json 里的 mix_wav 可能是陈旧路径
+    （产物被清/换机），此时按当前场次配置现算一份——几秒钟、不占显存。
+    取不到就返回空串，由导出层回退到仅配音，绝不能因为混音失败带崩整次导出。
+    `_cache` 用于同一次导出按 sid 去重，避免同剧多镜头重复现算互相覆写。
+    """
+    sid = str(sid or "").strip()
+    if not sid:
+        return ""
+    if _cache is not None and sid in _cache:
+        return _cache[sid]
+
+    base = Path(os.environ.get("BREEZE_DATA") or (_ROOT / "data"))
+    rel = ""
+    try:
+        recs = json.loads((base / "scripts.json").read_text(encoding="utf-8"))
+        rec = next((r for r in recs if str(r.get("id")) == sid), None)
+        if rec:
+            rel = str(rec.get("mix_wav") or "")
+    except (OSError, ValueError):
+        recs = []
+    out = _safe_data_file(base, rel)
+
+    if not out:
+        try:
+            import script_routes as _sr
+            mix_rel, _err = _sr._build_mix(sid)
+        except Exception:
+            mix_rel = ""
+        out = _safe_data_file(base, mix_rel)
+
+    if _cache is not None:
+        _cache[sid] = out
+    return out
+
+
 def _export_job_write(job: dict) -> None:
     _db_init()
     job = dict(job)
     job.setdefault("created_at", datetime.datetime.now().isoformat())
     job.setdefault("zip_path", "")
+    job.setdefault("audio_source", "")
+    job.setdefault("audio_level_db", None)
+    job.setdefault("silent_shots", 0)
     job["updated_at"] = datetime.datetime.now().isoformat()
     with _db_lock, contextlib.closing(sqlite3.connect(_DB_PATH)) as conn:
         conn.execute("""
-            INSERT INTO export_jobs(job_id,project_id,status,output_path,output_duration,zip_path,error,created_at,updated_at,poll_count)
-            VALUES(:job_id,:project_id,:status,:output_path,:output_duration,:zip_path,:error,:created_at,:updated_at,:poll_count)
+            INSERT INTO export_jobs(job_id,project_id,status,output_path,output_duration,zip_path,error,created_at,updated_at,poll_count,audio_source,audio_level_db,silent_shots)
+            VALUES(:job_id,:project_id,:status,:output_path,:output_duration,:zip_path,:error,:created_at,:updated_at,:poll_count,:audio_source,:audio_level_db,:silent_shots)
             ON CONFLICT(job_id) DO UPDATE SET
               status=excluded.status, output_path=excluded.output_path,
               output_duration=excluded.output_duration, zip_path=excluded.zip_path,
               error=excluded.error,
-              updated_at=excluded.updated_at, poll_count=excluded.poll_count
+              updated_at=excluded.updated_at, poll_count=excluded.poll_count,
+              audio_source=excluded.audio_source, audio_level_db=excluded.audio_level_db,
+              silent_shots=excluded.silent_shots
         """, job)
         conn.commit()
 
@@ -1323,7 +1391,12 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         shots_raw = body.get("shots", [])
         from video_pipeline.ffmpeg_export import ShotSegment, compose as _ffmpeg_compose
         shots = []
+        mix_cache: dict[str, str] = {}
         for s in shots_raw:
+            # 音轨优先级：本镜头的混音成品（含声效）> 分镜配音。混饵文件不在就现算。
+            mp = str(s.get("mix_path") or "").strip()
+            if not (mp and os.path.isfile(mp)):
+                mp = _script_mix_path(str(s.get("script_id") or ""), mix_cache)
             shots.append(ShotSegment(
                 shot_id=str(s.get("shot_id") or s.get("id") or ""),
                 video_path=_media_local_path(str(s.get("video_path") or s.get("videoUrl") or "")),
@@ -1332,6 +1405,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 voice_path=_media_local_path(str(s.get("voice_path") or s.get("audioUrl") or "")),
                 subtitle=str(s.get("subtitle") or s.get("prompt") or ""),
                 scene_no=int(s.get("scene_no") or 1),
+                mix_path=mp,
             ))
         if not shots:
             _h_json(h, {"error": "shots 列表不能为空"}, 400)
@@ -1369,6 +1443,9 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                     j["output_path"] = result.get("mp4_path", "")
                     j["output_duration"] = result.get("duration_total", 0)
                     j["zip_path"] = result.get("zip_path", "")
+                    j["audio_source"] = result.get("audio_source", "")
+                    j["audio_level_db"] = result.get("audio_level_db")
+                    j["silent_shots"] = result.get("silent_shots", 0)
                 _export_job_write(j)
             except Exception as exc:
                 j = _export_job_read(ejid) or {}
