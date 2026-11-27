@@ -2467,6 +2467,8 @@ async function exportProject() {
           shot_id: s.id, video_path: s.videoUrl || '',
           start_sec: 0, end_sec: s.duration,
           voice_path: s.audioUrl || '',
+          // 后端据此找该镜头的混音成品（含声效铺底）；不传就只剩配音
+          script_id: s.bt_script_id || null,
           subtitle: s.prompt || s.title,
           scene_no: i + 1,
         }))
@@ -2485,7 +2487,15 @@ async function exportProject() {
     try {
       const poll = await apiBT('/api/export/poll/' + ejid);
       if (poll.status === 'succeeded') {
-        showToast(`✅ 合成完成！时长 ${poll.duration_total}s · ${poll.mp4_path}`, 'success');
+        // 声音是这次改动的主角：把音轨来源和静音镜头数直接说出来，别让用户自己点开猜
+        const srcMap = { mix: '含声效混音', voice: '仅配音', none: '无音轨' };
+        const src = srcMap[poll.audio_source] || poll.audio_source || '音轨未知';
+        const lv = (poll.audio_level_db === null || poll.audio_level_db === undefined)
+          ? '' : ` · 音量 ${Math.round(poll.audio_level_db)}dB`;
+        const miss = poll.silent_shots ? ` · ⚠️ ${poll.silent_shots} 个镜头无音` : '';
+        // 保留产物路径：用户复制去交付/上传要用，别只报喜不给地址
+        const out = poll.output_path || '';
+        showToast(`✅ 合成完成！时长 ${poll.duration_total}s · ${src}${lv}${miss} · ${out}`, 'success');
         if (poll.zip_path) showToast(`📦 ZIP 包: ${poll.zip_path}`, 'info');
         return;
       } else if (poll.status === 'failed') {
