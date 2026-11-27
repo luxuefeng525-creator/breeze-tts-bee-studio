@@ -260,7 +260,7 @@ def _poll_video_job(prov, job_id: str, result, budget: float) -> None:
         except Exception as e:
             j = _video_job_read(job_id)
             if j:
-                j["error"] = str(e)[:200]
+                j["error"] = _clip_reason(e)
                 _video_job_write(j)
     # 超时
     j = _video_job_read(job_id)
@@ -308,7 +308,7 @@ def resume_pending_video_jobs() -> None:
             j = _video_job_read(jid)
             if j:
                 j["status"] = "failed"
-                j["error"] = f"面板重启后无法恢复轮询：{e}"[:200]
+                j["error"] = _clip_reason(f"面板重启后无法恢复轮询：{e}")
                 _video_job_write(j)
             continue
         from api.providers import GenResult
@@ -612,6 +612,30 @@ def _keys_save(d: dict) -> None:
 
 
 _API_KEYS: dict[str, str] = _keys_load()  # 启动时加载（解密后在内存里是明文）
+
+
+def _clip_reason(text, limit: int = 200) -> str:
+    """把异常/失败文案限长，但保留**尾部**——异常类型、Errno、连接细节都在末尾。
+
+    旧写法从头部硬切 200 字，实测界面只剩「Failed to e」，
+    `[WinError 10061]` / `getaddrinfo failed` 这些真正能定位问题的信息全丢。
+    空值给占位，避免界面出现 "None" 或空括号。
+    """
+    t = "" if text is None else str(text).strip()
+    if not t:
+        return "未知原因"
+    if len(t) <= limit:
+        return t
+    tail = t[-limit:]
+    # 在尾部窗口里找**第一个**分隔符：这样既避开开头可能的半词，
+    # 又能把该分隔符之后的完整内容（通常正是 Errno / 连接细节）全留下。
+    # 用最后一个分隔符会把 `[WinError 10061]` 这种关键类型当成“前缀”切掉。
+    cuts = [p for p in (tail.find(" "), tail.find("，"), tail.find("；")) if p >= 0]
+    cut = min(cuts) if cuts else -1
+    # 只在切出来的尾巴还够长时才切断：否则会切成一两个字符的残句
+    if cut > 0 and len(tail) - cut - 1 >= 12:
+        return "…" + tail[cut + 1:]
+    return "…" + tail
 
 
 def _get_key(provider: str) -> str:
@@ -1181,7 +1205,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
         try:
             _keys_save(_API_KEYS)
         except Exception as e:
-            _h_json(h, {"ok": False, "error": f"Key 写入失败: {str(e)[:200]}"}, 500)
+            _h_json(h, {"ok": False, "error": f"Key 写入失败: {_clip_reason(e)}"}, 500)
             return True
         _h_json(h, {"ok": True, "provider": provider, "masked": key[:4] + "****" + key[-4:]})
         return True
@@ -1216,7 +1240,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 _h_json(h, {"ok": True, "latency_ms": latency_ms})
             except Exception as exc:
                 latency_ms = int(latency_ms or 0)
-                _h_json(h, {"ok": False, "error": str(exc)[:200], "latency_ms": latency_ms})
+                _h_json(h, {"ok": False, "error": _clip_reason(exc), "latency_ms": latency_ms})
             return True
         # 视频 provider → ping endpoint 域名（DNS+TCP 可达性）
         try:
@@ -1246,7 +1270,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             _h_json(h, {"ok": True, "latency_ms": latency_ms, "http_status": resp.status_code})
         except Exception as exc:
             latency_ms = int(latency_ms or 0)
-            _h_json(h, {"ok": False, "error": str(exc)[:200], "latency_ms": latency_ms})
+            _h_json(h, {"ok": False, "error": _clip_reason(exc), "latency_ms": latency_ms})
         return True
 
     # ---- /api/video/generate ----
@@ -1638,11 +1662,11 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 _h_json(h, {
                     "project_id": pid, "title": mock["title"], "shots": mock["shots"],
                     "generated_by": "mock", "shots_count": len(mock["shots"]),
-                    "used_mock": True, "mock_reason": f"LLM 调用失败: {str(exc)[:200]}",
+                    "used_mock": True, "mock_reason": _clip_reason(f"LLM 调用失败: {exc}"),
                     "style_id": style_id, "used_custom_model": is_custom,
                 }, 200)
             except Exception as exc2:
-                _h_json(h, {"error": f"LLM 失败 + mock 也挂了: {str(exc2)[:200]}"}, 502)
+                _h_json(h, {"error": _clip_reason(f"LLM 失败 + mock 也挂了: {exc2}")}, 502)
         return True
 
     # ---- POST /api/bee/script/{project_id}/shots —— G4-P1: 保存 shots（自动保存） ----
@@ -1664,7 +1688,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             conn.commit(); conn.close()
             _h_json(h, {"ok": True, "saved_shots": len(shots)})
         except Exception as exc:
-            _h_json(h, {"error": str(exc)[:120]}, 500)
+            _h_json(h, {"error": _clip_reason(exc, 120)}, 500)
         return True
 
     # ---- POST /api/llm/script-edit —— C1：剧本改镜头（只改指定镜头，不重生成全剧） ----
@@ -1750,7 +1774,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
                 "used_custom_model": is_custom,
             })
         except Exception as exc:
-            _h_json(h, {"error": f"改镜头 LLM 失败: {str(exc)[:200]}",
+            _h_json(h, {"error": _clip_reason(f"改镜头 LLM 失败: {exc}"),
                          "used_custom_model": is_custom,
                          "raw_preview": (raw or "")[:500]}, 502)
         return True
@@ -1841,7 +1865,7 @@ def handle_post(h: BaseHTTPRequestHandler, path: str, body_bytes: bytes = b"", c
             except ProviderError as e:
                 return {"shot_index": idx, "status": "failed", "error": str(e)}
             except Exception as e:
-                return {"shot_index": idx, "status": "failed", "error": str(e)[:200]}
+                return {"shot_index": idx, "status": "failed", "error": _clip_reason(e)}
 
         with ThreadPoolExecutor(max_workers=min(max_workers, len(shot_list))) as pool:
             futures = {pool.submit(_one, i, s): i for i, s in enumerate(shot_list)}
