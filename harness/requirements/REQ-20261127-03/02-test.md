@@ -22,8 +22,8 @@ updated: 2026-11-27
 
 | 验收点 | 场景 | 步骤 | 预期 | 实际 | 结论 | 证据 |
 |---|---|---|---|---|---|---|
-| AC-01 | 自定义模型端点拒连 | 浏览器选 notice-probe 生成，MutationObserver 捕获 toast | warn 提示含原因与下一步，且无成功提示 | 仅 1 条 `toast warn`：「⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（LLM 调用失败: …HTTPConnectionPool(host='127.0.0.1', port=9)…）；请检查该自定义模型的 Base URL 与 API Key」，无 success/info | PASS | `logs/browser-verify.txt` + `logs/g3-fix-browser-verify.txt`（轮次 3） |
-| AC-02 | provider 无法解析（未知 id） | 注入 option `no-such-model` 生成，浏览器捕获 toast | 界面提示含后端 error 文案（catch 分支） | 400 后 toast 为 `⚠️ no-such-model 调用失败（未知 LLM provider: no-such-model） — 用 Mock 演示`，无 success | PASS | `harness/requirements/REQ-20261127-03/logs/g3-fix-browser-verify.txt`（轮次 4）+ `logs/ac02-unknown-provider.txt` |
+| AC-01 | 自定义模型端点拒连 | 浏览器选 notice-probe 生成，MutationObserver 捕获 toast | warn 提示含原因与下一步，且无成功提示 | 仅 1 条 `toast warn`：「⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（LLM 调用失败: …HTTPConnectionPool(host='127.0.0.1', port=9)…）；请检查该自定义模型的 Base URL 与 API Key」，无 success/info | PASS | `harness/requirements/REQ-20261127-03/logs/g3-fix-browser-verify.txt` |
+| AC-02 | provider 无法解析（未知 id） | 注入 option `no-such-model` 生成，浏览器捕获 toast | 界面提示含后端 error 文案（catch 分支） | 400 后 toast 为 `⚠️ no-such-model 调用失败（未知 LLM provider: no-such-model） — 用 Mock 演示`，无 success | PASS | `harness/requirements/REQ-20261127-03/logs/g3-fix-browser-verify.txt` |
 | AC-03 | 不误报 | ① 真实成功（`used_mock=false`）② `mock_reason="force_mock"` 响应 | 均不出现降级警告 | 成功路径维持原 success 提示；force_mock 判定为防御分支（UI 无主动 Mock 入口，DOM 全量扫描佐证） | PASS | `harness/requirements/REQ-20261127-03/logs/browser-verify.txt` |
 | AC-04 | script-edit 走不可达自定义端点 | `POST /api/llm/script-edit`，provider=notice-probe | 失败响应带原因 + 自定义模型上下文，前端拼接展示 | 502 `{error, used_custom_model:true, raw_preview}`；前端拼接逻辑由静态断言覆盖 | PASS | `harness/requirements/REQ-20261127-03/logs/ac04-edit-502.txt` |
 
