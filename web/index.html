@@ -332,9 +332,9 @@
             <div class="ref-upload" id="refUpload">
               <svg class="icon" aria-hidden="true" style="width:32px;height:32px"><use href="#i-upload"/></svg>
               <strong>拖入或选择一段录音</strong>
-              <span>WAV / MP3 / M4A · 建议 10–15 秒 · 单人说话</span>
+              <span>仅 WAV · 建议 10–15 秒 · 单人说话（其它格式请先转成 WAV）</span>
               <button class="btn-primary" type="button" id="refPickBtn" style="height:40px;padding:0 16px">选择文件</button>
-              <input type="file" id="refFile" accept="audio/*" hidden>
+              <input type="file" id="refFile" accept=".wav,audio/wav" hidden>
             </div>
             <div class="ref-player" id="refPlayer" hidden>
               <button class="play-sm" type="button" aria-label="播放参考音频" id="refPlayBtn"><svg class="icon"><use href="#i-play"/></svg></button>

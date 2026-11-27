@@ -1175,6 +1175,14 @@
   }
 
   async function uploadRef(file) {
+    // 参考音频统一走 WAV：选择器 accept 已过滤，但拖拽/改名绕过时在这里拦住并说清；
+    // 后端仍会做二进制校验兜底（防止有人直接改扩展名硬传）。
+    const okExt = /\.wav$/i.test(file.name || "");
+    const okType = (file.type || "").toLowerCase().includes("wav");
+    if (!okExt && !okType) {
+      toast("参考音频只支持 WAV 文件，请转换后再上传", true);
+      return;
+    }
     state.clone.file = file;
     state.clone.url = URL.createObjectURL(file);
     const fd = new FormData();

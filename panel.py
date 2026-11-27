@@ -44,6 +44,8 @@ ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("BREEZE_DATA") or (ROOT / "data")).resolve()
 REFS = DATA / "refs"
 AUDIOS = DATA / "audio"
+# 每个账本文件保留的历史版本数：写盘前自动留档，供误删/整批改写后回滚
+_HIST_KEEP = 20
 for d in (DATA, REFS, AUDIOS):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -395,6 +397,23 @@ def _save(name: str, items: list) -> None:
             try:
                 import shutil
                 shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+                # 带时间戳的历史版本：只靠单个 .bak 的话，一次误删/整批改写就永久追不回
+                # （2026-11-27 的现网事故：voices.json 里 8 条音色被一次写操作抹掉）。
+                hist_dir = DATA / "_ledger_history" / Path(name).stem
+                hist_dir.mkdir(parents=True, exist_ok=True)
+                # 精确到微秒：同一秒内连续写盘（批量删角色等）用秒级戳会互相覆盖，
+                # 反而丢掉中间版本。再补一个自增后缀彻底避免同名。
+                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                dest = hist_dir / f"{stamp}.json"
+                seq = 1
+                while dest.exists():
+                    dest = hist_dir / f"{stamp}_{seq}.json"
+                    seq += 1
+                shutil.copy2(target, dest)
+                olds = sorted(hist_dir.glob("*.json"))
+                for p in olds[:-_HIST_KEEP]:
+                    with contextlib.suppress(OSError):
+                        p.unlink()
             except Exception:
                 pass
         tmp = target.with_suffix(".json.tmp")
@@ -651,6 +670,47 @@ def wav_duration(data: bytes) -> float:
     if not (rate and ch and bits):
         return -1.0
     return dsize / (rate * ch * bits / 8)
+
+
+# 参考音频上限：50 MB / 600 秒。超了不让进解码，避免请求被拖死。
+REF_MAX_BYTES = 50 * 1024 * 1024
+REF_MAX_SECONDS = 600.0
+REF_TARGET_SR = 24000
+
+
+def normalize_ref_audio(data: bytes) -> tuple[bytes, float]:
+    """把上传的参考音频归一成 24 kHz / 单声道 / PCM16 WAV，返回 (字节, 时长秒)。
+
+    上游引擎只认标准 WAV，而用户常传 mp3/m4a。这里统一解码重编码：
+    解码失败（损坏、伪装扩展名、libsndfile 不支持该容器）抛 ValueError，
+    由调用方翻成 400，避免把坏文件写进 refs/ 让合成阶段才炸。
+    """
+    if len(data) > REF_MAX_BYTES:
+        raise ValueError(f"文件过大（{len(data)/1024/1024:.1f} MB > {REF_MAX_BYTES//1024//1024} MB）")
+    try:
+        import io
+        import numpy as np
+        import soundfile as sf
+        from tts_pipeline.ref_prep import to_mono, resample_linear, write_wav_bytes
+
+        samples, sr = sf.read(io.BytesIO(data), always_2d=True, dtype="float32")
+        if samples.size == 0:
+            raise ValueError("音频内容为空")
+        mono = to_mono(np.asarray(samples))
+        if int(sr) != REF_TARGET_SR:
+            mono = resample_linear(mono, int(sr), REF_TARGET_SR)
+        dur = len(mono) / float(REF_TARGET_SR)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"音频无法解码：{str(exc)[:120]}") from exc
+    if dur > REF_MAX_SECONDS:
+        raise ValueError(f"参考音频过长（{dur:.0f}s > {REF_MAX_SECONDS:.0f}s）")
+    out = write_wav_bytes(mono, REF_TARGET_SR)
+    if not out or out[:4] != b"RIFF" or out[8:12] != b"WAVE":
+        raise ValueError("转码结果异常，请换一个文件重试")
+    return out, round(dur, 3)
+
 
 
 def trim_wav_bytes(data: bytes, max_sec: float = 15.0) -> bytes:
@@ -2635,16 +2695,32 @@ class Handler(BaseHTTPRequestHandler):
             ext = Path(fname).suffix.lower() or ".wav"
             if ext not in (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".webm"):
                 return self._err("unsupported audio format")
-            safe = _safe_name(f"{vid}_{int(time.time())}{ext}")
-            (REFS / safe).write_bytes(data)
-            dur = wav_duration(data)
+            # 统一归一成标准 WAV（24k/单声道/PCM16）：非 WAV 或采样参数不一致都重编码。
+            # 解码失败/超限直接 400，绝不把坏文件写进 refs/ 让合成阶段才炸
+            # （现网案例：上传 mp3 成功但每次合成都被上游判 400 ref_audio must be RIFF/WAVE）。
+            try:
+                wav_bytes, dur = normalize_ref_audio(data)
+            except ValueError as exc:
+                return self._err(str(exc), 400)
+            safe = _safe_name(f"{vid}_{int(time.time())}.wav")
+            (REFS / safe).write_bytes(wav_bytes)
+
             def _set_ref(items, _vid=vid, _safe=safe, _dur=dur):
                 for v in items:
                     if v["id"] == _vid:
+                        _old = str(v.get("ref_audio") or "")
                         v["ref_audio"] = f"refs/{_safe}"
                         v["ref_duration"] = _dur
+                        return _old
+                return ""
 
-            _update_json("voices.json", _set_ref)
+            old_rel = _update_json("voices.json", _set_ref)
+            # 旧参考音频若已无人引用就删掉，避免重复上传在 refs/ 里堆孤儿文件
+            if old_rel and not any(
+                    str(v.get("ref_audio") or "") == old_rel
+                    for v in _load("voices.json")):
+                _purge_rel_file(old_rel)
+
             # W2-3c: 参考音频质检（可选，失败不阻断上传）
             quality = None
             try:
@@ -2847,6 +2923,13 @@ class Handler(BaseHTTPRequestHandler):
                     if v["id"] == role_rec["voice_id"]:
                         voice = v
                         break
+                # 绑定关系失效必须明说：静默回落会念出别的声音，用户无从判断。
+                # 两条合成路径口径统一（REQ-20261128-01）。
+                if voice is None:
+                    return self._err(
+                        f"角色「{role_rec.get('name', '')}」绑定的音色"
+                        f"（{role_rec['voice_id']}）已不存在，可能刚被删除："
+                        "请重新为该角色绑定音色，或取消角色改用默认发音人")
             # W2-3c: 文本规范化 + 发音词典（norm=2）——只应调用一次
             _scope = api_fields.get("voice_id", "") or ""
             _new_text, _text_changes = _apply_text_pipeline(
@@ -2949,6 +3032,12 @@ class Handler(BaseHTTPRequestHandler):
             if fields.get("voice_id") and voice is None:
                 return self._err(
                     f"指定的音色不存在（{fields.get('voice_id')}），请重新选择")
+            # 角色绑定的音色已失效（被删/改 id）：与流式路径口径统一，必须明说而不是静默回落
+            if vid and voice is None and not fields.get("voice_id"):
+                return self._err(
+                    f"角色「{(role or {}).get('name', '')}」绑定的音色（{vid}）"
+                    "已不存在，可能刚被删除：请重新为该角色绑定音色，"
+                    "或取消角色改用默认发音人")
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()
@@ -3092,6 +3181,12 @@ class Handler(BaseHTTPRequestHandler):
             if fields.get("voice_id") and voice is None:
                 return self._err(
                     f"指定的音色不存在（{fields.get('voice_id')}），请重新选择")
+            # 角色绑定的音色已失效（被删/改 id）：与流式路径口径统一，必须明说而不是静默回落
+            if vid and voice is None and not fields.get("voice_id"):
+                return self._err(
+                    f"角色「{(role or {}).get('name', '')}」绑定的音色（{vid}）"
+                    "已不存在，可能刚被删除：请重新为该角色绑定音色，"
+                    "或取消角色改用默认发音人")
             if voice:
                 _vref = voice.get("ref_audio")
                 _vtxt = (voice.get("ref_text") or "").strip()
