@@ -1,0 +1,36 @@
+REQ-20261127-03 浏览器验收证据（真实 DOM，非静态推断）
+
+验收环境：临时静态代理 http://127.0.0.1:7862/bee-studio.html（静态资源取工作树 web/，/api/* 反代到主面板 7861），
+         因此验收的是本分支前端代码；后端字段沿用 REQ-20261127-02 已合流的契约。
+构造场景：主面板注册表临时写入探针条目 notice-probe（base_url=http://127.0.0.1:9/v1，拒连），并配临时 Key；
+         测后注册表还原为 []，data/api_keys.json 已备份还原。
+
+——— 第 1 轮（改完降级分支后） ———
+结果：PASS，但暴露口径缺陷
+toast（class="toast warn"）：
+  ⚠️ notice-probe 不可用，已用演示数据代替（…eded with url: /v1/chat/completions (Caused by
+  NewConnectionError("HTTPConnection(host='127.0.0.1', port=9): Failed to e）；请检查该自定义模型的 Base URL 与 API Key
+同时出现（class="toast success"）：
+  📐 已创建 最终取证四号 · 5 镜头 · 可继续配音/生成视频/合成
+判读：降级可见（PASS）；但绿色成功提示与 warn 并存，会误导为「模型跑通了」→ 记为缺陷，需修。
+
+——— 第 2 轮（抑制降级时的成功提示后） ———
+结果：PASS
+toast 两条：warn（同上文案）+ info「📐 已用演示数据创建 复验主题B · 5 镜头 · 可继续编辑」
+无 toast success。
+判读：不再误导；但两条提示语义重复 → 记为改进项。
+
+——— 第 3 轮（合并为一条 warn 后，终验） ———
+结果：PASS
+密集采样 37 次，镜头列表更新为 5 个 .shot-card；捕获 toast 仅 1 条：
+  class="toast warn"
+  ⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（…e）；请检查该自定义模型的 Base URL 与 API Key
+无 toast success、无 toast info。
+判读：AC-01 达成（降级有可见提示、含原因与下一步、且不再显示成功）。
+
+AC-03（不误报）补充：浏览器全 DOM 扫描确认页面不存在主动 Mock 入口（force_mock 仅由失败后兜底函数
+`web/bee-studio.html:3244-3246` 使用），故「用户主动 Mock」路径 UI 不可达；判定逻辑 mockReason !== 'force_mock'
+为防御性分支，静态断言见 tests/test_bee_studio_notice.py::test_downgrade_branch_excludes_force_mock。
+
+截图：本环境 browser_take_screenshot 持续报 「Screenshot is currently unavailable」，未产出图片；
+      以 DOM 文本（class + textContent）作为证据，多次复现一致。

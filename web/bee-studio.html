@@ -1163,6 +1163,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   display:flex; align-items:center; gap: var(--space-2);
   animation: toast-in .25s ease-out;
   min-width: 220px;
+  /* REQ-20261127-03：降级原因最长可到 400 字，限宽并允许换行，
+     否则 toast 会被撑出视口右侧，用户看不到结尾 */
+  max-width: min(560px, 92vw);
 }
 .toast.success { border-left: 3px solid var(--success); }
 .toast.info    { border-left: 3px solid var(--primary); }
@@ -1803,6 +1806,28 @@ async function autosaveProject() {
 const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
 
+// 降级原因截断（REQ-20261127-03）：空值兜底；超长保留结尾，
+// 因为关键信息通常在末尾（如 connection refused / HTTP 401）。
+// 按码点切，避免把 emoji 代理对切成乱码；分隔符不含 '/'——
+// 它以 URL 结尾时会把 host 切掉，只剩 "v1" 这种没用的尾段。
+function truncateReason(text, max = 120) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return '未返回具体原因';
+  const chars = Array.from(t);
+  if (chars.length <= max) return t;
+  const headChars = chars.slice(-max);
+  let cut = -1;
+  for (let i = headChars.length - 1; i >= 0; i--) {
+    if (' \t，；、'.includes(headChars[i])) { cut = i; break; }
+  }
+  // 只在切出来的尾巴还够长时才切：否则会从词中间断开，
+  // 极端情况（分隔符贴着末尾）只剩一两个字符，等于把原因扔了
+  const TAIL_MIN = 12;
+  const tail = cut >= 0 ? headChars.length - cut - 1 : headChars.length;
+  return '…' + (tail >= TAIL_MIN ? headChars.slice(cut + 1).join('')
+                               : headChars.join(''));
+}
+
 function showToast(msg, type='info') {
   const stack = $('#toastStack');
   const t = document.createElement('div');
@@ -2216,7 +2241,20 @@ updateCost();
 const BT = /^https?:/.test(location.protocol) ? location.origin : 'http://localhost:7861';
 async function apiBT(path, opts={}) {
   const r = await fetch(BT + path, { headers: {'Content-Type':'application/json'}, ...opts });
-  if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+  if (!r.ok) {
+    // REQ-20261127-03：非 2xx 时把响应体挂到 Error 上。否则后端的人话错误
+    // （如「未知 LLM provider: xxx」）被丢掉，前端只剩 "400 Bad Request"，
+    // 用户照着做不了。message 保持原样，老调用方的文案不受影响。
+    let text = '';
+    try { text = await r.text(); } catch {}
+    let payload = null;
+    if (text) {
+      try { payload = JSON.parse(text); } catch { payload = { _raw: text }; }
+    }
+    const e = new Error(r.status + ' ' + r.statusText);
+    e.payload = payload;
+    throw e;
+  }
   return r.json();
 }
 
@@ -3300,7 +3338,10 @@ async function _llmGenerate(topic, numShots, totalDur, audience, style, provider
     audioUrl: null, videoReady: false,
     styleId: s.style_id || (currentStyleTemplate() || {}).id || 'cinematic'
   }));
-  return { title: r.title || topic, shots };
+  // 降级三字段原样带出（REQ-20261127-03）：调用处据此决定提示成功还是降级
+  return { title: r.title || topic, shots,
+           usedMock: !!r.used_mock, mockReason: r.mock_reason || '',
+           usedCustomModel: !!r.used_custom_model };
 }
 
 $('#scriptModalGen').addEventListener('click', async () => {
@@ -3315,21 +3356,39 @@ $('#scriptModalGen').addEventListener('click', async () => {
   if (!topic) { showToast('⚠️ 请先填视频主题', 'warn'); $('#scriptTopic').focus(); return; }
 
   btn.disabled = true; btn.textContent = '🎬 AI 正在构思...';
-  let shots, title, usedLLM = false, llmName = llmProvider;
+  let shots, title, usedLLM = false, llmName = llmProvider, degraded = false;
 
   // 1. 先尝试真实 LLM
   try {
     const result = await _llmGenerate(topic, numShots, totalDur, audience, style, llmProvider);
     shots = result.shots; title = result.title; usedLLM = true;
-    showToast(`✅ ${llmName} 生成 ${shots.length} 镜头 · 主题《${title}》`, 'success');
+    // REQ-20261127-03：后端 200 也可能是降级 mock，不能一律报成功。
+    // force_mock 是用户主动选的 Mock 演示，不算失败降级，保持原有成功提示。
+    if (result.usedMock && result.mockReason !== 'force_mock') {
+      degraded = true;
+      // 后端已把原因限长到 200（api/router.py:1641），前端放宽到 400：
+      // 再按 120 取尾段会把「Max retries exceeded」这类头部信息整段丢掉
+      const reason = truncateReason(result.mockReason, 400);
+      const step = result.usedCustomModel ? '；请检查该自定义模型的 Base URL 与 API Key' : '';
+      // 一条讲清：降级 + 原因 + 下一步 + 产出镜头数；不再另弹创建提示，避免两条重复
+      showToast(`⚠️ ${llmName} 不可用，已用演示数据生成 ${shots.length} 镜头（${reason}）${step}`, 'warn');
+    } else {
+      showToast(`✅ ${llmName} 生成 ${shots.length} 镜头 · 主题《${title}》`, 'success');
+    }
   } catch (err) {
-    // 2. 降级 mock
+    // 2. 降级 mock。真实 LLM 没走通（HTTP 错/超时/异常）一律算降级，
+    // 否则下面还会弹绿色「已创建」，与 warn 打架（REQ-20261127-03）
+    degraded = true;
     const result = await _mockGenerate(topic, numShots, totalDur, audience, style);
     shots = result.shots; title = result.title;
     if (err.message && err.message.includes('未配置')) {
       showToast(`⚠️ ${llmName} 未配置 Key — 用 Mock 演示（配置后换真实 AI）`, 'warn');
     } else {
-      showToast(`⚠️ ${llmName} 调用失败（${err.message.slice(0,40)}） — 用 Mock 演示`, 'warn');
+      // 优先用后端响应体里的 error 文案（apiBT 非 2xx 时会挂上 payload），
+      // 比 "400 Bad Request" 更能告诉用户该改什么
+      const backendMsg = (err.payload && err.payload.error) ? err.payload.error : '';
+      const detail = truncateReason(backendMsg || err.message, 80);
+      showToast(`⚠️ ${llmName} 调用失败（${detail}） — 用 Mock 演示`, 'warn');
     }
   }
 
@@ -3343,7 +3402,12 @@ $('#scriptModalGen').addEventListener('click', async () => {
   if (latest) {
     switchProject(latest.id);
     $('#scriptModal').classList.remove('open');
-    showToast(`📐 已创建 ${latest.name} · ${latest.shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+    // 降级时不能弹绿色「已创建」成功提示，否则与上面的 warn 互相打架、
+    // 用户会以为真实模型跑通了（REQ-20261127-03）
+    // 降级时不再弹「已创建」提示：信息已由上面那条 warn 一并说明
+    if (!degraded) {
+      showToast(`📐 已创建 ${latest.name} · ${latest.shots.length} 镜头 · 可继续配音/生成视频/合成`, 'success');
+    }
   }
 });
 
@@ -3978,7 +4042,10 @@ async function submitScriptEdit() {
     const data = await resp.json();
     if (!resp.ok) {
       const msg = (data.need_key ? '（需要先配 API Key）' : '') + (data.error || resp.status);
-      flashNotice('❌ 改镜头失败：' + msg);
+      // REQ-20261127-03：带上自定义模型上下文与返回片段，别让用户靠猜
+      const ctx = data.used_custom_model ? '（本次修改走的是你添加的自定义模型端点）' : '';
+      const preview = data.raw_preview ? `｜返回片段：${truncateReason(data.raw_preview, 80)}` : '';
+      flashNotice(`❌ 改镜头失败：${msg}${ctx}${preview}`);
       btn.disabled = false;
       label.textContent = '✨ AI 重写这个镜头';
       return;

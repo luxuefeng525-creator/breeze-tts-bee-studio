@@ -1,0 +1,38 @@
+REQ-20261127-03 · G3 整改后浏览器复验（代理 7862 = 工作树 web/ + 反代主面板 7861）
+
+页面：http://127.0.0.1:7862/bee-studio.html
+取数方式：点击前在 #toastStack 挂 MutationObserver，捕获 .toast 的 className / textContent
+（toast 仅存活约 3.2s，事后读栈必为空）
+
+探针：data/model_registry.json 临时条目 notice-probe（base_url=http://127.0.0.1:9/v1，拒连），
+     并配临时 Key；测后注册表还原为 []、api_keys.json 由备份还原。
+
+------------------------------------------------------------------------------
+轮次 1（G3 阻断项修复前基线复现）
+  场景：notice-probe 生成
+  结果：仅 1 条 toast warn
+  文案：⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（…e）；请检查该自定义模型的 Base URL 与 API Key
+  判定：FAIL —— 原因被截成「…e」，无信息量
+
+轮次 2（改为按码点切 + 移除 '/' 分隔符之后）
+  文案：⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（…eded with url: /v1/chat/completions
+        (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=9): Failed to e）；
+        请检查该自定义模型的 Base URL 与 API Key
+  判定：FAIL —— 前端已不二次截断（mock_reason 210 字 < max=400 时原样返回），
+        「…eded」「Failed to e」均来自后端 api/router.py:1641 的 str(exc)[:200] 头部硬切
+
+轮次 3（前端放宽到 max=400 后终验）
+  文案：⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（LLM 调用失败: LLM 调用失败（重试 1 次）:
+        HTTPConnectionPool(host='127.0.0.1', port=9): Max retries exceeded with url: /v1/chat/completions
+        (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=9): Failed to e）；
+        请检查该自定义模型的 Base URL 与 API Key
+  判定：PASS —— 原因主体完整可读（host/port/重试次数/请求路径），无成功提示；
+        尾部半词「Failed to e」属后端既有截断，非本需求范围（见 02-test.md §5）
+
+轮次 4（AC-02：未知 provider 走 catch + payload.error）
+  场景：注入 option value=no-such-model 并选中后生成；POST /api/llm/script-gen 返回 400
+  文案：⚠️ no-such-model 调用失败（未知 LLM provider: no-such-model） — 用 Mock 演示
+  判定：PASS —— 后端 error 文案进入 toast，未退化成「400 Bad Request」；无 success
+
+----------------------------------------------------------------------
+回归：pytest tests/test_bee_studio_notice.py tests/test_ui_contract.py -q → 12 passed

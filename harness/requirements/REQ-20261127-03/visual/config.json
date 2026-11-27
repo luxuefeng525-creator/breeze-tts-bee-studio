@@ -1,0 +1,19 @@
+{
+  "pages": [
+    {
+      "name": "bee-studio",
+      "path": "/bee-studio.html",
+      "states": ["default"],
+      "expect": [],
+      "emptyAllowed": []
+    }
+  ],
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "tablet", "width": 768, "height": 1024 },
+    { "name": "mobile", "width": 375, "height": 812 }
+  ],
+  "capture": {
+    "command": "见 05-visual.md §2（本机 headless Chrome；采集前需把工作树 web/ 用 7862 代理起来）"
+  }
+}
