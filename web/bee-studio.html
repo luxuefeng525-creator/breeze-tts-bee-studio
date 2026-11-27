@@ -1804,16 +1804,25 @@ const $ = (sel, root=document) => root.querySelector(sel);
 const $$ = (sel, root=document) => [...root.querySelectorAll(sel)];
 
 // 降级原因截断（REQ-20261127-03）：空值兜底；超长保留结尾，
-// 因为关键信息通常在末尾（如 connection refused / HTTP 401）
+// 因为关键信息通常在末尾（如 connection refused / HTTP 401）。
+// 按码点切，避免把 emoji 代理对切成乱码；分隔符不含 '/'——
+// 它以 URL 结尾时会把 host 切掉，只剩 "v1" 这种没用的尾段。
 function truncateReason(text, max = 120) {
   const t = String(text == null ? '' : text).trim();
   if (!t) return '未返回具体原因';
-  if (t.length <= max) return t;
-  const head = t.slice(-max);
-  // 别把单词/URL 切成半截（如 "Failed to e"）：优先在最近的分隔符处断开
-  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('，'),
-                       head.lastIndexOf('；'), head.lastIndexOf('/'));
-  return '…' + (cut > max * 0.5 ? head.slice(cut + 1) : head);
+  const chars = Array.from(t);
+  if (chars.length <= max) return t;
+  const headChars = chars.slice(-max);
+  let cut = -1;
+  for (let i = headChars.length - 1; i >= 0; i--) {
+    if (' \t，；、'.includes(headChars[i])) { cut = i; break; }
+  }
+  // 只在切出来的尾巴还够长时才切：否则会从词中间断开，
+  // 极端情况（分隔符贴着末尾）只剩一两个字符，等于把原因扔了
+  const TAIL_MIN = 12;
+  const tail = cut >= 0 ? headChars.length - cut - 1 : headChars.length;
+  return '…' + (tail >= TAIL_MIN ? headChars.slice(cut + 1).join('')
+                               : headChars.join(''));
 }
 
 function showToast(msg, type='info') {
@@ -2229,7 +2238,20 @@ updateCost();
 const BT = /^https?:/.test(location.protocol) ? location.origin : 'http://localhost:7861';
 async function apiBT(path, opts={}) {
   const r = await fetch(BT + path, { headers: {'Content-Type':'application/json'}, ...opts });
-  if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+  if (!r.ok) {
+    // REQ-20261127-03：非 2xx 时把响应体挂到 Error 上。否则后端的人话错误
+    // （如「未知 LLM provider: xxx」）被丢掉，前端只剩 "400 Bad Request"，
+    // 用户照着做不了。message 保持原样，老调用方的文案不受影响。
+    let text = '';
+    try { text = await r.text(); } catch {}
+    let payload = null;
+    if (text) {
+      try { payload = JSON.parse(text); } catch { payload = { _raw: text }; }
+    }
+    const e = new Error(r.status + ' ' + r.statusText);
+    e.payload = payload;
+    throw e;
+  }
   return r.json();
 }
 
@@ -3341,7 +3363,9 @@ $('#scriptModalGen').addEventListener('click', async () => {
     // force_mock 是用户主动选的 Mock 演示，不算失败降级，保持原有成功提示。
     if (result.usedMock && result.mockReason !== 'force_mock') {
       degraded = true;
-      const reason = truncateReason(result.mockReason);
+      // 后端已把原因限长到 200（api/router.py:1641），前端放宽到 400：
+      // 再按 120 取尾段会把「Max retries exceeded」这类头部信息整段丢掉
+      const reason = truncateReason(result.mockReason, 400);
       const step = result.usedCustomModel ? '；请检查该自定义模型的 Base URL 与 API Key' : '';
       // 一条讲清：降级 + 原因 + 下一步 + 产出镜头数；不再另弹创建提示，避免两条重复
       showToast(`⚠️ ${llmName} 不可用，已用演示数据生成 ${shots.length} 镜头（${reason}）${step}`, 'warn');
@@ -3349,13 +3373,19 @@ $('#scriptModalGen').addEventListener('click', async () => {
       showToast(`✅ ${llmName} 生成 ${shots.length} 镜头 · 主题《${title}》`, 'success');
     }
   } catch (err) {
-    // 2. 降级 mock
+    // 2. 降级 mock。真实 LLM 没走通（HTTP 错/超时/异常）一律算降级，
+    // 否则下面还会弹绿色「已创建」，与 warn 打架（REQ-20261127-03）
+    degraded = true;
     const result = await _mockGenerate(topic, numShots, totalDur, audience, style);
     shots = result.shots; title = result.title;
     if (err.message && err.message.includes('未配置')) {
       showToast(`⚠️ ${llmName} 未配置 Key — 用 Mock 演示（配置后换真实 AI）`, 'warn');
     } else {
-      showToast(`⚠️ ${llmName} 调用失败（${err.message.slice(0,40)}） — 用 Mock 演示`, 'warn');
+      // 优先用后端响应体里的 error 文案（apiBT 非 2xx 时会挂上 payload），
+      // 比 "400 Bad Request" 更能告诉用户该改什么
+      const backendMsg = (err.payload && err.payload.error) ? err.payload.error : '';
+      const detail = truncateReason(backendMsg || err.message, 80);
+      showToast(`⚠️ ${llmName} 调用失败（${detail}） — 用 Mock 演示`, 'warn');
     }
   }
 

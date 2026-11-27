@@ -22,8 +22,8 @@ updated: 2026-11-27
 
 | 验收点 | 场景 | 步骤 | 预期 | 实际 | 结论 | 证据 |
 |---|---|---|---|---|---|---|
-| AC-01 | 自定义模型端点拒连 | 浏览器选 notice-probe 生成，密集采样 toast | warn 提示含原因与下一步，且无成功提示 | 仅 1 条 `toast warn`：「⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（…）；请检查该自定义模型的 Base URL 与 API Key」，无 success/info | PASS | `harness/requirements/REQ-20261127-03/logs/browser-verify.txt` |
-| AC-02 | provider 无法解析（未知 id） | `POST /api/llm/script-gen`，provider=no-such-model | 界面提示含后端 error 文案（catch 分支既有） | 后端返回 400 `{"error":"未知 LLM provider: no-such-model","used_custom_model":false}`，前端 catch 弹 warn | PASS | `harness/requirements/REQ-20261127-03/logs/ac02-unknown-provider.txt` |
+| AC-01 | 自定义模型端点拒连 | 浏览器选 notice-probe 生成，MutationObserver 捕获 toast | warn 提示含原因与下一步，且无成功提示 | 仅 1 条 `toast warn`：「⚠️ notice-probe 不可用，已用演示数据生成 5 镜头（LLM 调用失败: …HTTPConnectionPool(host='127.0.0.1', port=9)…）；请检查该自定义模型的 Base URL 与 API Key」，无 success/info | PASS | `logs/browser-verify.txt` + `logs/g3-fix-browser-verify.txt`（轮次 3） |
+| AC-02 | provider 无法解析（未知 id） | 注入 option `no-such-model` 生成，浏览器捕获 toast | 界面提示含后端 error 文案（catch 分支） | 400 后 toast 为 `⚠️ no-such-model 调用失败（未知 LLM provider: no-such-model） — 用 Mock 演示`，无 success | PASS | `harness/requirements/REQ-20261127-03/logs/g3-fix-browser-verify.txt`（轮次 4）+ `logs/ac02-unknown-provider.txt` |
 | AC-03 | 不误报 | ① 真实成功（`used_mock=false`）② `mock_reason="force_mock"` 响应 | 均不出现降级警告 | 成功路径维持原 success 提示；force_mock 判定为防御分支（UI 无主动 Mock 入口，DOM 全量扫描佐证） | PASS | `harness/requirements/REQ-20261127-03/logs/browser-verify.txt` |
 | AC-04 | script-edit 走不可达自定义端点 | `POST /api/llm/script-edit`，provider=notice-probe | 失败响应带原因 + 自定义模型上下文，前端拼接展示 | 502 `{error, used_custom_model:true, raw_preview}`；前端拼接逻辑由静态断言覆盖 | PASS | `harness/requirements/REQ-20261127-03/logs/ac04-edit-502.txt` |
 
@@ -56,8 +56,19 @@ updated: 2026-11-27
 | 真实第三方 LLM（如 GLM/DeepSeek）降级提示的实际文案 | 本机无对应 Key，无法制造真实上游失败之外的成功对照 | 只证明降级与不误报口径 | 有 Key 时用真实模型跑一次成功对照 |
 | script-edit 失败提示的浏览器端实测 | browser_use 本轮调用已达上限（3 次） | 前端拼接逻辑靠静态断言 + 接口字段证据 | 另开一轮浏览器验收或人工点一次「AI 重写」看提示 |
 | 三视口截图 | 截图工具在本环境持续不可用（`Screenshot is currently unavailable`） | V 环需人工接管截图 | 人工截图或换环境 |
+| 后端 `mock_reason` 的尾部完整性 | `api/router.py:1641` 用 `str(exc)[:200]` 从**头部**硬切，实测尾部断在 `Failed to e`，丢掉 `establish a new connection: [Errno …]` | 原因主体仍可读（host/port/重试次数/路径齐全），但尾部 Errno 类信息永久缺失；换错误类型还会复现 | 另开需求统一 `str(e)[:200]` 截断模式（router.py 内 L263/L1184/L1219/L1249/L1641 等多处复用） |
 
-## 6. 结论
+## 6. G3 审查与整改
+
+| G3 问题 | 级别 | 整改 | 复验证据 |
+|---|---|---|---|
+| `apiBT` 非 2xx 丢弃响应体，后端 error 文案不可见（AC-02 证据不足） | 阻断 | `web/bee-studio.html:2230` apiBT 非 ok 时读 body 并挂 `e.payload`；catch 分支优先用 `err.payload.error` | 轮次 4：toast 显示「未知 LLM provider: no-such-model」 |
+| catch/兜底路径未置降级标志，仍会弹绿色「已创建」 | 阻断 | catch 分支开头 `degraded = true` | 轮次 1/3/4 均只有 warn，无 success |
+| `truncateReason` 用 `/` 当分隔符会切掉 URL host；按 UTF-16 切会切碎 emoji | 建议 | 移除 `/`；改 `Array.from` 按码点 |
+| 截断后只剩一两个字符（实测「…e」） | 阻断（实测发现） | 加 TAIL_MIN 保护；调用处 max 由 120 放宽到 400（后端已限长 200，前端不该二次截断） | 轮次 3：原因主体完整显示 |
+| 静态断言过弱（`assert len(fail)==1 or True`）/过严（绑变量名） | 建议 | 重写 5 条断言，新增 2 条覆盖 catch 与 apiBT | 12 passed |
+
+## 7. 结论
 
 - 验收点通过率：4/4（AC-04 的前端部分为静态断言 + 接口字段证据）
 - 是否可进入审查：是（核心降级路径已用真实 DOM 取证；未验证项已在 §5 列明）
