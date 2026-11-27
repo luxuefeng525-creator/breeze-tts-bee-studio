@@ -1,0 +1,1 @@
+2026-11-27 | 经验 | 前后端契约 | 后端 mock_reason 用 str(exc)[:200] 从头部硬切，异常尾部 Errno/连接细节永久丢失；前端再按短长度二次截断会丢头部（实测只剩「…e」）。两端都该改为尾部保留 + 分隔符断开 | harness/requirements/REQ-20261127-03/logs/g3-fix-browser-verify.txt | - | 2027-05-26
