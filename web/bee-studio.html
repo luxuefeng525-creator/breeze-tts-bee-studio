@@ -1163,6 +1163,9 @@ html, body { height: 100% !important; overflow: hidden !important; margin: 0; }
   display:flex; align-items:center; gap: var(--space-2);
   animation: toast-in .25s ease-out;
   min-width: 220px;
+  /* REQ-20261127-03：降级原因最长可到 400 字，限宽并允许换行，
+     否则 toast 会被撑出视口右侧，用户看不到结尾 */
+  max-width: min(560px, 92vw);
 }
 .toast.success { border-left: 3px solid var(--success); }
 .toast.info    { border-left: 3px solid var(--primary); }

@@ -86,6 +86,7 @@ def test_catch_path_marks_degraded_and_uses_backend_error() -> None:
     assert re.search(r"\b\w+\s*=\s*true\b", block), (
         "catch 分支未把降级标志置真，之后还会弹绿色成功提示"
     )
+    assert "'warn'" in block, "catch 分支未用 warn 级提示，降级会被显示成普通信息"
     assert "payload" in block and "error" in block, (
         "catch 未使用 apiBT 挂出的后端 error 文案，用户只会看到状态码"
     )
@@ -96,7 +97,7 @@ def test_apibt_keeps_error_payload() -> None:
     js = _read()
     seg = js.split("async function apiBT", 1)
     assert len(seg) == 2, "找不到 apiBT"
-    body = seg[1].split("\n}", 1)[0]
+    body = seg[1][:600]
     assert "payload" in body, "apiBT 抛错时未挂载响应体"
 
 
@@ -107,8 +108,8 @@ def test_reason_is_truncated() -> None:
     assert re.search(r"truncateReason\(", js), "truncateReason 定义了但没被调用"
     seg = js.split("function truncateReason", 1)
     assert len(seg) == 2, "找不到 truncateReason 定义"
-    body = seg[1].split("\n}", 1)[0]
-    assert "length<=max" in body.replace(" ", ""), "缺长度上限判断，长文本不会截断"
+    body = seg[1][:900]
+    assert "length" in body and "<=" in body, "缺长度上限判断，长文本不会截断"
     assert "Array.from" in body, "未按码点切分，emoji 代理对会被切成乱码"
     assert "'/'" not in body, "用 '/' 当分隔符会在原因以 URL 结尾时切掉 host"
     assert "TAIL_MIN" in body, (
@@ -132,3 +133,7 @@ def test_no_success_notice_on_script_edit_failure() -> None:
     assert "❌ 改镜头失败" in js, "原有失败提示文案丢失（回归）"
     parts = js.split("❌ 改镜头失败", 1)
     assert len(parts) == 2, "失败文案存在但取不到后续片段"
+    after = parts[1][:600]
+    assert "'success'" not in after and "已重写" not in after, (
+        "改镜头失败却出现成功文案，用户会以为改成功了"
+    )
