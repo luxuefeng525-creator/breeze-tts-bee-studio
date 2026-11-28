@@ -58,6 +58,33 @@ updated: 2026-11-28
 | 贴边显存下的真实 OOM 表现 | 每次都用 `--take-gpu` 先让出 | 已知会变慢或超时 | 需要时手动压测 |
 | 浏览器整页视觉比对（V 环） | 本轮只做 DOM 校验 | 版式回归未冻结 | G3 前补 |
 
+## 6. 发布后优化：3 秒音频耗时（合并后补充）
+
+**背景**：sidecar 接入后，3 秒音频合成实测首次 30~70 s、换音色首次 ~18 s，用户反馈「3 秒音频耗时 30 秒」。
+
+**根因（实测拆解，固定 seed）**：
+- 冷启动首次 67.65 s（模型加载 + CUDA 图捕获）；同音色热推理 3.52 s（cudagraph+32 步）
+- 换音色首次 18~30 s（参考音频语义编码）；同音色后续 5~10 s
+- `parallel_infer=false` → 29.7 s（必须保持 True）
+- 结论：慢在冷启动与换音色编码，不是每次推理本身
+
+**已落地优化**：
+1. `sample_steps` 32→16（默认，`BREEZE_SOVITS_STEPS` 可调回）
+2. `cache_dit=f16`（上游 V3/V4/V5 DiT 官方 DBCache 加速，`BREEZE_SOVITS_CACHE_DIT` 可调 off/f8；实测短文本无显著差异，保留作长文本/质量兜底）
+3. **预热**：sidecar 启动后自动用一条既有音色跑一句极短的话，把冷启动吸收到启动阶段；新增 `warming` 状态（前端显示「预热中…」），预热期间不误报「已就绪」
+4. 修复 2 个真实 bug：
+   - `netstat`/`nvidia-smi` 在中文 Windows 是 GBK 输出，`subprocess.run(text=True)` 按 utf-8 解码抛 `UnicodeDecodeError` → sidecar 一键启动直接报「启动异常」。改 `encoding="gbk", errors="replace"`（panel.py `_sovits_free_vram`、tools/gpt_sovits_sidecar.py `free_vram_mib`/`port_pids`）
+   - 参考文稿被 ASR 乱码污染（10.4 s 音频 ASR 转出「现在最潜艳的…」乱码并固化缓存）。`_sovits_ref_for` 改为优先用音色自带 `ref_text`（用户逐字校对稿），ASR 只作兜底
+
+**验证数据（面板一键启动 → 预热 → running → 合成）**：
+- 状态机 `starting → warming（约 60~65 s）→ running` 正常，预热 `code=200`
+- running 后同音色合成 3~4 秒音频：第 1 次 ~10~15 s（含参考编码）、后续 ~5~10 s（波动受 GPU 负载影响）
+- 换音色首次 ~10~30 s（参考语义编码是 sidecar 固有成本）
+- 面板产物正常：`/api/synthesize` 返回历史记录 JSON（`{"id":"h_..."}`），wav 落 `data/audio/`（实测 3.88~6.11 s、24 kHz 单声道）；曾误判「空产物」实为把返回 JSON 当 wav 解析
+
+**未进一步优化**：换音色首次的参考语义提取每次请求重复做，压到 3 s 内需改 GPT-SoVITS sidecar 源码加缓存（有回归风险）。用户已确认「接受当前耗时」。
+
+
 ## 6. 结论
 
 - 验收点通过率：6/6（AC-04 由 AC-03 的报错文案覆盖）

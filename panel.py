@@ -133,6 +133,12 @@ def _post_with_retry(api_path: str, body: bytes, content_type: str,
 # 使前端、历史记录、导出与 7860 链路完全一致。
 SOVITS_BASE = (os.environ.get("BREEZE_SOVITS_BASE") or "http://127.0.0.1:9880").rstrip("/")
 SOVITS_REF_DIR = DATA / "sovits_refs"
+# v3 是扩散式解码，步数直接决定耗时：32 步（上游默认）约 3.5 s/3 秒音频，
+# 16 步约 2.9 s，听感差异很小。要更高保真可以用环境变量调回 32。
+SOVITS_SAMPLE_STEPS = int(os.environ.get("BREEZE_SOVITS_STEPS") or 16)
+# cache_dit（DBCache）是上游对 V3/V4/V5 DiT 的官方加速：缓存前 Fn 块的残差，
+# 显著减少扩散前向次数、听感近一致。默认 f16；要更稳/更快用 f8，关掉用 off。
+SOVITS_CACHE_DIT = (os.environ.get("BREEZE_SOVITS_CACHE_DIT") or "f16").strip()
 
 # 裁段实现与命令行工具共用一份，避免两处逻辑漂移
 _TOOLS_DIR = ROOT / "tools"
@@ -183,8 +189,12 @@ def _sovits_ref_for(voice) -> tuple[Path, str]:
             "GPT-SoVITS 靠参考音频克隆，请先上传一段 5~10 秒的人声")
     path, text = _prepare(src, SOVITS_REF_DIR, voice["id"],
                           asr_fn=lambda p: _transcribe(p)["text"])
-    if not text:
-        text = (voice.get("ref_text") or "").strip()
+    # 用户逐字校对过的原稿比 ASR 转写更可信：裁段后参考文稿优先用音色自带 ref_text，
+    # 避免 ASR 转写失败（乱码）污染克隆音色（实测 10.4s 音频 ASR 出「现在最潜艳的…」乱码）。
+    # ASR 结果只作兜底，ref_text 缺失时才会落到它。
+    user_text = (voice.get("ref_text") or "").strip()
+    if user_text:
+        text = user_text
     if not text:
         raise ValueError(
             f"音色「{voice.get('name', '')}」缺少参考文稿："
@@ -210,6 +220,8 @@ def _sovits_synthesize(text: str, voice, timeout: int = 900) -> tuple[int, bytes
         "ref_audio_path": str(ref_path), "prompt_text": prompt_text,
         "prompt_lang": "zh", "media_type": "wav",
         "batch_size": "1", "speed_factor": "1.0",
+        "sample_steps": str(SOVITS_SAMPLE_STEPS),
+        "cache_dit": SOVITS_CACHE_DIT,
     })
     req = Request(SOVITS_BASE + "/tts?" + qs, method="GET")
     # 与 7860 共用一把锁：两条链路都只允许单并发，撞车只会两边一起卡死
@@ -263,10 +275,15 @@ def _sovits_switch_status() -> dict:
     with _SOVITS_SWITCH_LOCK:
         snap = dict(_SOVITS_SWITCH)
     alive = _sovits_probe(timeout=1.5)
-    # 以探针为准：进程可能被外部杀掉，或手工在命令行起过
+    # 以探针为准：进程可能被外部杀掉，或手工在命令行起过。
+    # starting / warming 是「还在准备」，不能被探针提前改判成 running。
+    if snap["state"] in ("starting", "warming"):
+        snap["running"] = alive
+        snap["free_vram_mib"] = _sovits_free_vram()
+        return snap
     if not alive and snap["state"] == "running":
         snap["state"], snap["detail"] = "idle", "服务已不在运行"
-    elif alive and snap["state"] != "starting":
+    elif alive and snap["state"] != "running":
         snap["state"] = "running"
     snap["running"] = alive
     snap["free_vram_mib"] = _sovits_free_vram()
@@ -279,16 +296,35 @@ def _sovits_free_vram() -> int | None:
         import subprocess
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15).stdout.strip().splitlines()
+            capture_output=True, text=True, encoding="gbk", errors="replace", timeout=15).stdout.strip().splitlines()
         return int(out[0]) if out and out[0].strip().isdigit() else None
     except Exception:
         return None
 
 
+def _sovits_warmup() -> None:
+    """首次合成要额外 60 秒做图捕获与编译，用户会以为卡死。
+
+    sidecar 启动后先用一条既有音色跑一句极短的话，把这份一次性开销提前吃掉，
+    之后用户真正合成时就是 3 秒级。失败不影响服务可用性，只记日志。
+    """
+    try:
+        voices = _load("voices.json")
+        cand = [v for v in voices if (v.get("ref_audio") or "").strip()]
+        # 优先预热已经标了 gpt-sovits 的音色：那才是用户马上要用的
+        cand.sort(key=lambda v: 0 if (v.get("engine") or "") == ENGINE_SOVITS else 1)
+        if not cand:
+            return
+        code, _ = _sovits_synthesize("预热。", cand[0], timeout=300)
+        sys.stderr.write(f"[panel] sovits 预热结束 code={code}\n")
+    except Exception as exc:
+        sys.stderr.write(f"[panel] sovits 预热失败（不影响使用）: {exc!r}\n")
+
+
 def _sovits_switch_start(take_gpu: bool = True) -> dict:
     with _SOVITS_SWITCH_LOCK:
-        if _SOVITS_SWITCH["state"] == "starting":
-            return {"state": "starting", "detail": "已经在启动中，请稍候"}
+        if _SOVITS_SWITCH["state"] in ("starting", "warming"):
+            return {"state": _SOVITS_SWITCH["state"], "detail": "已经在启动中，请稍候"}
     _sovits_switch_set("starting",
                        "正在让出显存并加载模型，约 60~90 秒；期间主力引擎会暂时停止")
 
@@ -297,6 +333,10 @@ def _sovits_switch_start(take_gpu: bool = True) -> dict:
             import gpt_sovits_sidecar as S  # noqa: PLC0415  tools/ 已在 sys.path
             code = S.start(take_gpu_first=take_gpu, wait=600)
             if code == 0:
+                # 预热同样持有推理锁。此时若报「已就绪」，用户点合成会干等一分钟，
+                # 看起来像卡死——必须先明确告诉他在预热。
+                _sovits_switch_set("warming", "正在预热模型（约 1 分钟），完成后即可合成")
+                _sovits_warmup()
                 _sovits_switch_set("running", "服务已就绪，可以合成")
             elif code == 2:
                 _sovits_switch_set(

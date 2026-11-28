@@ -2077,7 +2077,8 @@
       let s = null;
       try { s = await api("/api/engine/sovits"); } catch (e) { s = null; }
       if (!s) { el.innerHTML = '<p class="help-note">读不到 GPT-SoVITS 引擎状态。</p>'; return null; }
-      const label = { idle: "未启动", starting: "启动中…", running: "运行中", error: "出错" }[s.state] || s.state;
+      const label = { idle: "未启动", starting: "启动中…", warming: "预热中…", running: "运行中", error: "出错" }[s.state] || s.state;
+      const busy = s.state === "starting" || s.state === "warming";
       const vram = s.free_vram_mib == null ? "未知" : `${s.free_vram_mib} MiB`;
       el.innerHTML = `
         <div class="diag-row"><span>GPT-SoVITS</span><b>${esc(label)}</b></div>
@@ -2085,8 +2086,8 @@
         ${s.detail ? `<p class="help-note">${esc(s.detail)}</p>` : ""}
         <p class="help-note">启动会先停掉主力引擎（7860）腾出显存，约 60~90 秒；停止后守护会在 1 分钟内把它拉回来。</p>
         <button class="btn${s.running ? "" : "-primary"}" type="button" id="sovitsToggle"
-          ${s.state === "starting" ? "disabled" : ""}>
-          ${s.running ? "停止 GPT-SoVITS" : s.state === "starting" ? "启动中…" : "启动 GPT-SoVITS（让出显存）"}
+          ${busy ? "disabled" : ""}>
+          ${s.running ? "停止 GPT-SoVITS" : busy ? label : "启动 GPT-SoVITS（让出显存）"}
         </button>`;
       const btn = $("sovitsToggle");
       if (btn) btn.addEventListener("click", async () => {

@@ -70,8 +70,10 @@ def free_vram_mib() -> int | None:
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout.strip().splitlines()
+            capture_output=True, text=True, encoding="gbk", errors="replace", timeout=15,
+        ).stdout
+        # Windows 中文系统把 cmd 输出按 GBK 编码，utf-8 解码会抛 UnicodeDecodeError
+        return int(out.splitlines()[0]) if out and out.splitlines()[0].strip().isdigit() else None
         return int(out[0]) if out and out[0].strip().isdigit() else None
     except Exception:
         return None
@@ -82,10 +84,10 @@ def port_pids(port: int) -> list[int]:
     pids: list[int] = []
     try:
         out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, timeout=20).stdout
+                             text=True, encoding="gbk", errors="replace", timeout=20).stdout
     except Exception:
         return pids
-    for line in out.splitlines():
+    for line in (out or "").splitlines():
         parts = line.split()
         if len(parts) >= 5 and parts[0].upper() == "TCP" and parts[3].upper() == "LISTENING":
             if parts[1].rsplit(":", 1)[-1] == str(port):
