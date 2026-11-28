@@ -1294,6 +1294,18 @@
     }
   }
 
+  // 设计型音色没有参考音频，GPT-SoVITS 克隆不了它：直接禁选，别等保存才报错
+  function syncEngineOptions() {
+    const sel = $("voiceEngine");
+    if (!sel) return;
+    const designOnly = state.clone.type === "design";
+    const opt = sel.querySelector('option[value="gpt-sovits"]');
+    if (opt) opt.disabled = designOnly;
+    if (designOnly && sel.value === "gpt-sovits") sel.value = "qwen3-tts";
+    const hint = $("engineHint");
+    if (hint) hint.hidden = sel.value !== "gpt-sovits";
+  }
+
   async function saveCloneVoice() {
     const name = $("voiceName").value.trim();
     if (!name) { toast("请填写音色名称", true); return; }
@@ -1306,6 +1318,7 @@
         body: JSON.stringify({
           name,
           type: state.clone.type,
+          engine: ($("voiceEngine") && $("voiceEngine").value) || "qwen3-tts",
           instruction: $("voiceInstruction").value.trim(),
           ref_text: $("refText").value.trim(),
         }),
@@ -1315,6 +1328,7 @@
       state.clone = { file: null, url: null, quality: null, duration: 0,
                       type: state.clone.type, pendingId: null, audioUrl: null };
       $("voiceName").value = "";
+      if ($("voiceEngine")) { $("voiceEngine").value = "qwen3-tts"; syncEngineOptions(); }
       $("refText").value = "";
       $("voiceInstruction").value = "";
       $("consentBox").checked = false;
@@ -1351,7 +1365,7 @@
           <span class="voice-avatar">${esc((v.name || "?").slice(0, 1))}</span>
           <div>
             <h3>${esc(v.name)}</h3>
-            <span class="card-type">${({ clone: "克隆", design: "设计", direction: "导向" })[v.type] || v.type}</span>
+            <span class="card-type">${({ clone: "克隆", design: "设计", direction: "导向" })[v.type] || v.type}${v.engine === "gpt-sovits" ? " · GPT-SoVITS" : ""}</span>
           </div>
           <button class="icon-btn" type="button" data-preview="${esc(v.id)}" aria-label="试听 ${esc(v.name)}" title="试听一句"><svg class="icon icon-sm"><use href="#i-play"/></svg></button>
           <button class="icon-btn" type="button" data-edit="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}"><svg class="icon icon-sm"><use href="#i-edit"/></svg></button>
@@ -1944,8 +1958,18 @@
       $("cloneTypeChips").querySelectorAll(".chip").forEach((x) => {
         x.setAttribute("aria-pressed", String(x === b));
       });
+      syncEngineOptions();
       refreshCloneState();
     });
+    if ($("voiceEngine")) {
+      $("voiceEngine").addEventListener("change", syncEngineOptions);
+      // 深链：?engine=gpt-sovits 直接选中该引擎，便于分享链接与视觉验收可重放
+      const _qe = new URLSearchParams(location.search).get("engine");
+      if (_qe && [...$("voiceEngine").options].some((o) => o.value === _qe && !o.disabled)) {
+        $("voiceEngine").value = _qe;
+      }
+      syncEngineOptions();
+    }
     $("saveVoiceBtn").addEventListener("click", saveCloneVoice);
     $("refPlayBtn").addEventListener("click", () => {
       if (!state.clone.audioUrl) return;
@@ -2044,7 +2068,51 @@
            <p class="help-note">这些是排查用的技术信息。数据目录：<code>data/</code></p>`
         : `<p class="help-note">推理服务（7860）当前未连接。请先启动推理服务，面板才能合成。</p>`;
       $("settingsDlg").showModal();
+      pollSovits();
     };
+    // GPT-SoVITS 引擎开关：启动要 60~90 秒，所以先返回 starting 再每 3 秒轮询
+    async function renderSovitsBlock() {
+      const el = $("sovitsBlock");
+      if (!el) return null;
+      let s = null;
+      try { s = await api("/api/engine/sovits"); } catch (e) { s = null; }
+      if (!s) { el.innerHTML = '<p class="help-note">读不到 GPT-SoVITS 引擎状态。</p>'; return null; }
+      const label = { idle: "未启动", starting: "启动中…", running: "运行中", error: "出错" }[s.state] || s.state;
+      const vram = s.free_vram_mib == null ? "未知" : `${s.free_vram_mib} MiB`;
+      el.innerHTML = `
+        <div class="diag-row"><span>GPT-SoVITS</span><b>${esc(label)}</b></div>
+        <div class="diag-row"><span>空闲显存</span><b>${esc(vram)}</b></div>
+        ${s.detail ? `<p class="help-note">${esc(s.detail)}</p>` : ""}
+        <p class="help-note">启动会先停掉主力引擎（7860）腾出显存，约 60~90 秒；停止后守护会在 1 分钟内把它拉回来。</p>
+        <button class="btn${s.running ? "" : "-primary"}" type="button" id="sovitsToggle"
+          ${s.state === "starting" ? "disabled" : ""}>
+          ${s.running ? "停止 GPT-SoVITS" : s.state === "starting" ? "启动中…" : "启动 GPT-SoVITS（让出显存）"}
+        </button>`;
+      const btn = $("sovitsToggle");
+      if (btn) btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await api(s.running ? "/api/engine/sovits/stop" : "/api/engine/sovits/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: s.running ? "" : JSON.stringify({ take_gpu: true }),
+          });
+          await pollSovits();
+        } catch (e) {
+          toast(e.message, true);
+          btn.disabled = false;
+        }
+      });
+      return s;
+    }
+
+    async function pollSovits() {
+      const s = await renderSovitsBlock();
+      if (s && s.state === "starting" && $("settingsDlg").open) {
+        setTimeout(pollSovits, 3000);
+      }
+    }
+
     $("settingsBtn").addEventListener("click", openDiag);
     // 错误态里的「查看诊断」以前是死按钮：点了毫无反应
     $("diagBtn").addEventListener("click", openDiag);
@@ -2058,6 +2126,13 @@
     $("editName").value = v.name || "";
     $("editInstruction").value = v.instruction || "";
     $("editRefText").value = v.ref_text || "";
+    if ($("editEngine")) {
+      $("editEngine").value = v.engine === "gpt-sovits" ? "gpt-sovits" : "qwen3-tts";
+      // 设计型音色没有参考音频，GPT-SoVITS 克隆不了
+      const opt = $("editEngine").querySelector('option[value="gpt-sovits"]');
+      if (opt) opt.disabled = v.type === "design";
+      if (v.type === "design") $("editEngine").value = "qwen3-tts";
+    }
     $("editDlg").showModal();
   }
 
@@ -2070,6 +2145,7 @@
           name: $("editName").value.trim(),
           instruction: $("editInstruction").value.trim(),
           ref_text: $("editRefText").value.trim(),
+          engine: ($("editEngine") && $("editEngine").value) || "qwen3-tts",
         }),
       });
       $("editDlg").close();

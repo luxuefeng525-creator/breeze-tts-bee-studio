@@ -1,0 +1,26 @@
+{
+  "pages": [
+    {
+      "name": "qwen3-tts",
+      "path": "/index.html?screen=clone&engine=qwen3-tts",
+      "states": ["default"],
+      "expect": [],
+      "emptyAllowed": []
+    },
+    {
+      "name": "gpt-sovits",
+      "path": "/index.html?screen=clone&engine=gpt-sovits",
+      "states": ["default"],
+      "expect": [],
+      "emptyAllowed": []
+    }
+  ],
+  "viewports": [
+    { "name": "desktop", "width": 1440, "height": 900 },
+    { "name": "tablet", "width": 768, "height": 1024 },
+    { "name": "mobile", "width": 375, "height": 812 }
+  ],
+  "capture": {
+    "command": "见 05-visual.md §2（本机 headless Chrome，按 engine 深链分别截 7861）"
+  }
+}

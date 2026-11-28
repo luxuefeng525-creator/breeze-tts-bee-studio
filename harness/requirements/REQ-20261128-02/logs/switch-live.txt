@@ -1,0 +1,25 @@
+面板一键开关 · 真实环境实测记录
+生成时间：2026-11-28 10:14（本机 7861 面板 + 真实 sidecar）
+
+$ curl/requests 依次调用（脚本 test_sovits_switch.py，跑完已删除）
+
+初始 7860/9880: True False
+初始状态: {'state': 'idle', 'detail': '', 'ts': 0.0, 'running': False, 'free_vram_mib': 945}
+start 返回: 200 starting （1.6s 内返回，HTTP 不等启动完成）
+  6s: starting | 正在让出显存并加载模型，约 60~90 秒；期间主力引擎会暂时停止
+  19s: starting | 正在让出显存并加载模型，约 60~90 秒；期间主力引擎会暂时停止
+  31s: running | 服务已就绪，可以合成
+--- 运行期端口 ---
+7860(主力): False | 9880(sidecar): True
+stop 返回: 200 idle 已停止；主力引擎会在 1 分钟内由守护自动拉起
+等待守护恢复 7860 ...
+7860 已恢复 after 80s
+一键开关总体: PASS
+
+DOM 核对（真实浏览器，诊断弹窗打开后）：
+  dlgOpen: true
+  blockText: GPT-SoVITS | 未启动 | 空闲显存 | 1879 MiB | 已停止；主力引擎会在 1 分钟内由守护自动拉起 | 启动会先停掉主力引擎（7860）腾出显存，约 60~90 秒… | 启动 GPT-SoVITS（让出显存）
+  btnText: 启动 GPT-SoVITS（让出显存）
+  btnDisabled: false
+
+未做：真实鼠标点击按钮（按钮绑定的是已实测的同一组 API；DOM 与文案已核对）。

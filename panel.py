@@ -23,7 +23,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urlencode
 from urllib.request import Request, urlopen
 import http.client as _httpclient
 
@@ -123,6 +123,203 @@ def _post_with_retry(api_path: str, body: bytes, content_type: str,
             if attempt < 59:
                 time.sleep(3.0)
     return code, raw
+
+
+# ---------------------------------------------------------------------------
+# GPT-SoVITS sidecar（可选第二引擎）
+# ---------------------------------------------------------------------------
+# 本机 8 GB 显存装不下两个常驻 TTS：sidecar 按需启动，启动前先让 7860 让出显存
+# （口径见 tools/gpt_sovits_sidecar.py）。这里只负责「按音色路由 + 统一产物格式」，
+# 使前端、历史记录、导出与 7860 链路完全一致。
+SOVITS_BASE = (os.environ.get("BREEZE_SOVITS_BASE") or "http://127.0.0.1:9880").rstrip("/")
+SOVITS_REF_DIR = DATA / "sovits_refs"
+
+# 裁段实现与命令行工具共用一份，避免两处逻辑漂移
+_TOOLS_DIR = ROOT / "tools"
+if _TOOLS_DIR.is_dir() and str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+ENGINE_QWEN = "qwen3-tts"
+ENGINE_SOVITS = "gpt-sovits"
+
+
+def voice_engine(voice) -> str:
+    """音色指定的合成引擎。缺省 qwen3-tts —— 老数据完全不受影响。"""
+    raw = str((voice or {}).get("engine") or "").strip().lower()
+    return ENGINE_SOVITS if raw == ENGINE_SOVITS else ENGINE_QWEN
+
+
+def _sovits_probe(timeout: float = 2.0) -> bool:
+    """探针：/tts 缺参数会回 4xx，只要有响应就说明服务活着（与 CLI 口径一致）。"""
+    try:
+        with urlopen(SOVITS_BASE + "/tts", timeout=timeout) as resp:
+            resp.read(1)
+        return True
+    except HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+def _sovits_unavailable() -> str:
+    return ("GPT-SoVITS 服务未启动或不可达（" + SOVITS_BASE + "）。"
+            "本机只有 8 GB 显存，它与主力引擎不能同时常驻：请先在命令行运行 "
+            "tools\\gpt_sovits_sidecar.py start --take-gpu 启动它，合成完会自动让回。")
+
+
+def _sovits_ref_for(voice) -> tuple[Path, str]:
+    """取/生成该音色可用的参考音频与文稿。
+
+    超过 10 秒的参考音频会被裁成语音最密集的片段，并用 ASR 重配文稿
+    （v3 不支持无文稿模式，见上游 TTS.py:1275）。
+    """
+    from sovits_ref import prepare as _prepare  # noqa: PLC0415  延迟导入
+
+    rel = (voice.get("ref_audio") or "").strip()
+    src = DATA / rel if rel else None
+    if not src or not src.is_file():
+        raise ValueError(
+            f"音色「{voice.get('name', '')}」没有可用的参考音频文件。"
+            "GPT-SoVITS 靠参考音频克隆，请先上传一段 5~10 秒的人声")
+    path, text = _prepare(src, SOVITS_REF_DIR, voice["id"],
+                          asr_fn=lambda p: _transcribe(p)["text"])
+    if not text:
+        text = (voice.get("ref_text") or "").strip()
+    if not text:
+        raise ValueError(
+            f"音色「{voice.get('name', '')}」缺少参考文稿："
+            "请点编辑把参考音频里说的话一字不差补上")
+    return path, text
+
+
+def _sovits_synthesize(text: str, voice, timeout: int = 900) -> tuple[int, bytes]:
+    """调 sidecar 合成，返回 (200, wav_bytes) 或 (错误码, 可直接回前端的 JSON)。"""
+    text = (text or "").strip()
+    if not text:
+        return 400, json.dumps({"detail": "text required"}, ensure_ascii=False).encode()
+    if not _sovits_probe():
+        return 503, json.dumps({"detail": _sovits_unavailable()},
+                               ensure_ascii=False).encode()
+    try:
+        ref_path, prompt_text = _sovits_ref_for(voice)
+    except ValueError as exc:
+        return 400, json.dumps({"detail": str(exc)}, ensure_ascii=False).encode()
+
+    qs = urlencode({
+        "text": text, "text_lang": "zh",
+        "ref_audio_path": str(ref_path), "prompt_text": prompt_text,
+        "prompt_lang": "zh", "media_type": "wav",
+        "batch_size": "1", "speed_factor": "1.0",
+    })
+    req = Request(SOVITS_BASE + "/tts?" + qs, method="GET")
+    # 与 7860 共用一把锁：两条链路都只允许单并发，撞车只会两边一起卡死
+    with _INFER_LOCK:
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                return 200, resp.read()
+        except HTTPError as exc:
+            body = exc.read()[:400]
+            try:
+                parsed = json.loads(body)
+                msg = parsed.get("Exception") or parsed.get("message") or str(parsed)
+            except Exception:
+                msg = body.decode("utf-8", "replace")
+            return exc.code, json.dumps(
+                {"detail": f"GPT-SoVITS 合成失败：{msg}"}, ensure_ascii=False).encode()
+        except Exception as exc:
+            return 502, json.dumps(
+                {"detail": f"GPT-SoVITS 请求异常：{exc}"}, ensure_ascii=False).encode()
+
+
+def _wav_to_pcm(wav: bytes) -> bytes:
+    """把 sidecar 返回的 WAV 解成 24 kHz / 单声道 s16le，与 7860 链路同口径。"""
+    import io
+    import numpy as np
+    import soundfile as sf
+
+    data, sr = sf.read(io.BytesIO(wav), dtype="float32", always_2d=True)
+    mono = data.mean(axis=1) if data.shape[1] > 1 else data[:, 0]
+    if sr != SAMPLE_RATE and len(mono):
+        n = max(1, int(round(len(mono) * SAMPLE_RATE / sr)))
+        x = np.linspace(0, len(mono) - 1, n, dtype=np.float64)
+        mono = np.interp(x, np.arange(len(mono)), mono).astype(np.float32)
+    return (np.clip(mono, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+
+# ---- 一键开关：面板内直接启停 sidecar ----
+# 启动要 60~90 秒（停 7860 → 等驱动回收显存 → 加载模型），不能让 HTTP 请求干等，
+# 所以做成「立即返回 starting + 前端轮询状态」。实现直接复用 CLI 的同一套逻辑，
+# 避免面板与命令行两份启停代码各修各的。
+_SOVITS_SWITCH_LOCK = threading.Lock()
+_SOVITS_SWITCH = {"state": "idle", "detail": "", "ts": 0.0}
+
+
+def _sovits_switch_set(state: str, detail: str = "") -> None:
+    with _SOVITS_SWITCH_LOCK:
+        _SOVITS_SWITCH.update(state=state, detail=detail, ts=time.time())
+
+
+def _sovits_switch_status() -> dict:
+    with _SOVITS_SWITCH_LOCK:
+        snap = dict(_SOVITS_SWITCH)
+    alive = _sovits_probe(timeout=1.5)
+    # 以探针为准：进程可能被外部杀掉，或手工在命令行起过
+    if not alive and snap["state"] == "running":
+        snap["state"], snap["detail"] = "idle", "服务已不在运行"
+    elif alive and snap["state"] != "starting":
+        snap["state"] = "running"
+    snap["running"] = alive
+    snap["free_vram_mib"] = _sovits_free_vram()
+    return snap
+
+
+def _sovits_free_vram() -> int | None:
+    """给前端显示「还差多少显存」用；拿不到就返回 None，不阻断。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15).stdout.strip().splitlines()
+        return int(out[0]) if out and out[0].strip().isdigit() else None
+    except Exception:
+        return None
+
+
+def _sovits_switch_start(take_gpu: bool = True) -> dict:
+    with _SOVITS_SWITCH_LOCK:
+        if _SOVITS_SWITCH["state"] == "starting":
+            return {"state": "starting", "detail": "已经在启动中，请稍候"}
+    _sovits_switch_set("starting",
+                       "正在让出显存并加载模型，约 60~90 秒；期间主力引擎会暂时停止")
+
+    def _run():
+        try:
+            import gpt_sovits_sidecar as S  # noqa: PLC0415  tools/ 已在 sys.path
+            code = S.start(take_gpu_first=take_gpu, wait=600)
+            if code == 0:
+                _sovits_switch_set("running", "服务已就绪，可以合成")
+            elif code == 2:
+                _sovits_switch_set(
+                    "error", "显存不足且未允许让出主力引擎，请重试并允许「让出显存」")
+            else:
+                _sovits_switch_set(
+                    "error", f"启动失败（退出码 {code}），详见 F:\\TTS2\\logs\\gpt-sovits-api.log")
+        except Exception as exc:
+            _sovits_switch_set("error", f"启动异常：{exc}")
+
+    threading.Thread(target=_run, daemon=True, name="sovits-switch").start()
+    return _sovits_switch_status()
+
+
+def _sovits_switch_stop() -> dict:
+    try:
+        import gpt_sovits_sidecar as S  # noqa: PLC0415
+        S.stop()
+        S.clear_hold()
+        _sovits_switch_set("idle", "已停止；主力引擎会在 1 分钟内由守护自动拉起")
+    except Exception as exc:
+        _sovits_switch_set("error", f"停止失败：{exc}")
+    return _sovits_switch_status()
 
 
 def _header_get(headers: dict, name: str) -> str:
@@ -2321,6 +2518,46 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+    def _stream_pcm(self, pcm: bytes, save_as: str = "") -> None:
+        """把已生成好的整段 PCM 按 chunked 假流式发出去。
+
+        GPT-SoVITS 是一次性返回整段 WAV（官方 streaming_mode 也只是内部切段），
+        所以先拿整段再分块写。响应头与 `_proxy_stream` 对齐，前端无需区分引擎。
+        """
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("X-Sample-Rate", str(SAMPLE_RATE))
+            self.send_header("X-Sample-Format", "s16le")
+            self.send_header("X-Adapter-Route", ENGINE_SOVITS)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            step = 8192
+            for i in range(0, len(pcm), step):
+                chunk = pcm[i:i + step]
+                self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                self.wfile.flush()
+            save_error = None
+            if save_as:
+                try:
+                    safe = _safe_name(save_as)
+                    if not safe.lower().endswith(".wav"):
+                        safe += ".wav"
+                    (AUDIOS / safe).write_bytes(pcm_to_wav(pcm, normalize=False))
+                except Exception as exc:
+                    save_error = exc
+                    sys.stderr.write(f"[panel] sovits 分段落盘失败 {save_as!r}: {exc!r}\n")
+            if save_error is not None:
+                # 与 7860 链路同口径：不能让客户端以为成功却没文件
+                self.wfile.write(b"!!save-failed\r\n")
+                self.wfile.flush()
+                return
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception as exc:
+            sys.stderr.write(f"[panel] sovits 流式写出中断: {exc!r}\n")
+
     def _infer_with_retry(self, api_path: str, body: bytes, content_type: str,
                           timeout: int = 600, headers_out: dict | None = None):
         """上游单并发：锁内排队 + 409 撞车自动重试（跨进程/外部客户端撞车也能消化）。"""
@@ -2453,6 +2690,9 @@ class Handler(BaseHTTPRequestHandler):
             # 运维可见性：现在「在跑什么、排队几个、引擎在不在、数据文件坏没坏」
             # 全都要靠猜。这个端点一次给全，故障排查时先看它。
             self._json(_status_snapshot())
+            return
+        if path == "/api/engine/sovits":
+            self._json(_sovits_switch_status())
             return
         if path.startswith("/api/audio/"):
             target = _resolve_audio(path[len("/api/audio/"):])   # 模块级函数，不是方法
@@ -2645,6 +2885,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "entry": entry.to_dict()})
             return
 
+        if path == "/api/engine/sovits/start":
+            take_gpu = True
+            if body:
+                try:
+                    take_gpu = bool(json.loads(body).get("take_gpu", True))
+                except Exception:
+                    pass          # body 非法就按默认（让出显存）处理，不因此拒绝启动
+            self._json(_sovits_switch_start(take_gpu))
+            return
+        if path == "/api/engine/sovits/stop":
+            self._json(_sovits_switch_stop())
+            return
+
         if path == "/api/voices":
             try:
                 d = json.loads(body or b"{}")
@@ -2669,12 +2922,21 @@ class Handler(BaseHTTPRequestHandler):
                     return self._err(f"不认识的原型「{arch}」")
                 if not instruction:
                     instruction = (ARCHETYPES[arch].get("instruction") or "").strip()
+            _engine = str(d.get("engine") or ENGINE_QWEN).strip().lower()
+            if _engine not in (ENGINE_QWEN, ENGINE_SOVITS):
+                return self._err("engine 只能是 qwen3-tts 或 gpt-sovits")
+            # 设计型靠文字描述造声，没有参考音频；GPT-SoVITS 是克隆引擎，存进去也合不出声
+            if vtype == "design" and _engine == ENGINE_SOVITS:
+                return self._err(
+                    "设计型音色没有参考音频，GPT-SoVITS 无法克隆："
+                    "请改用 Qwen3-TTS，或把类型改成「克隆」并上传参考音频")
             voice = {
                 "id": _new_id("v"),
                 "name": d["name"],
                 "type": vtype,
                 "instruction": instruction,
                 "archetype": arch,
+                "engine": _engine,
                 "ref_audio": None,
                 "ref_text": d.get("ref_text", ""),
                 "cfg_scale": float(d.get("cfg_scale", 4)),
@@ -2976,6 +3238,17 @@ class Handler(BaseHTTPRequestHandler):
             # save_as 是面板自己的参数，不能透给上游：必须先摘掉再序列化。
             _save_as = (api_fields.get("save_as") or "").strip()
             api_fields.pop("save_as", None)
+            if voice_engine(voice) == ENGINE_SOVITS:
+                _code, _payload = _sovits_synthesize(api_fields.get("text", ""), voice)
+                if _code != 200:
+                    self.send_response(_code)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(_payload)))
+                    self.end_headers()
+                    self.wfile.write(_payload)
+                    return
+                self._stream_pcm(_wav_to_pcm(_payload), _save_as)
+                return
             out_body, out_ctype = _remultipart(api_fields, files)
             self._proxy_stream("/v1/audio/speech", out_body, out_ctype,
                                save_as=_save_as)
@@ -3089,8 +3362,13 @@ class Handler(BaseHTTPRequestHandler):
             # 取回上游响应头：X-Adapter-Note 承载静默降级原因，必须回显给 UI。
             out_body, out_ctype = _remultipart(api_fields, files)
             _up_hdrs: dict = {}
-            code, raw = self._infer_with_retry("/v1/audio/speech", out_body, out_ctype,
-                                               headers_out=_up_hdrs)
+            if voice_engine(voice) == ENGINE_SOVITS:
+                code, raw = _sovits_synthesize(api_fields.get("text", ""), voice)
+                if code == 200:
+                    raw = _wav_to_pcm(raw)
+            else:
+                code, raw = self._infer_with_retry("/v1/audio/speech", out_body, out_ctype,
+                                                   headers_out=_up_hdrs)
             if code != 200:
                 try:
                     self.send_response(code)
@@ -3232,8 +3510,23 @@ class Handler(BaseHTTPRequestHandler):
                 cfg_used = "1"
             out_body, out_ctype = _remultipart(api_fields, files)
             _up_hdrs: dict = {}
-            code, raw = self._infer_with_retry("/v1/audio/speech/batch", out_body, out_ctype,
-                                               headers_out=_up_hdrs)
+            if voice_engine(voice) == ENGINE_SOVITS:
+                # sidecar 没有批量接口：逐条合成再拼成一条，语义与上游批量一致
+                _parts = []
+                for _t in texts:
+                    _c, _p = _sovits_synthesize(_t, voice)
+                    if _c != 200:
+                        self.send_response(_c)
+                        self.send_header("Content-Type", "application/json; charset=utf-8")
+                        self.send_header("Content-Length", str(len(_p)))
+                        self.end_headers()
+                        self.wfile.write(_p)
+                        return
+                    _parts.append(_wav_to_pcm(_p))
+                code, raw = 200, b"".join(_parts)
+            else:
+                code, raw = self._infer_with_retry("/v1/audio/speech/batch", out_body, out_ctype,
+                                                   headers_out=_up_hdrs)
             if code != 200:
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3341,6 +3634,16 @@ class Handler(BaseHTTPRequestHandler):
                         for k in ("name", "type", "instruction", "ref_text", "archetype"):
                             if k in d:
                                 v[k] = d[k]
+                        if "engine" in d:
+                            _e = str(d.get("engine") or ENGINE_QWEN).strip().lower()
+                            if _e not in (ENGINE_QWEN, ENGINE_SOVITS):
+                                raise _ValidationError("engine 只能是 qwen3-tts 或 gpt-sovits")
+                            # 组合校验放在最终值上：本次可能同时改了 type 与 engine
+                            if str(v.get("type")) == "design" and _e == ENGINE_SOVITS:
+                                raise _ValidationError(
+                                    "设计型音色没有参考音频，GPT-SoVITS 无法克隆："
+                                    "请改用 Qwen3-TTS，或把类型改成「克隆」并上传参考音频")
+                            v["engine"] = _e
                         if "cfg_scale" in d:
                             v["cfg_scale"] = float(d["cfg_scale"])
                         if v.get("type") in ("clone", "direction") and not (v.get("ref_text") or "").strip():
