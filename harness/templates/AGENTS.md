@@ -42,3 +42,4 @@ node harness/engine/harness.mjs begin "<一句话需求>"
 
 - 一会话一工作树一分支：`worktree <tool>` → `session/<tool>-<yyyymmdd>`；结项后 `merge <branch> <REQ>` 回 main。见 `harness/references/manual.md`。
 - 跨会话回执：`node harness/engine/harness.mjs msg --to <REQ|all> --text "…"`；`begin` 直出未读回执。
+- 共享运行时（7860/7861/8188/显存）不能每会话一份，协议见 `F:/TTS2/ops/README.md`「多会话并发占用协议」。
