@@ -2925,6 +2925,11 @@ class Handler(BaseHTTPRequestHandler):
             _engine = str(d.get("engine") or ENGINE_QWEN).strip().lower()
             if _engine not in (ENGINE_QWEN, ENGINE_SOVITS):
                 return self._err("engine 只能是 qwen3-tts 或 gpt-sovits")
+            # 设计型靠文字描述造声，没有参考音频；GPT-SoVITS 是克隆引擎，存进去也合不出声
+            if vtype == "design" and _engine == ENGINE_SOVITS:
+                return self._err(
+                    "设计型音色没有参考音频，GPT-SoVITS 无法克隆："
+                    "请改用 Qwen3-TTS，或把类型改成「克隆」并上传参考音频")
             voice = {
                 "id": _new_id("v"),
                 "name": d["name"],
@@ -3633,6 +3638,11 @@ class Handler(BaseHTTPRequestHandler):
                             _e = str(d.get("engine") or ENGINE_QWEN).strip().lower()
                             if _e not in (ENGINE_QWEN, ENGINE_SOVITS):
                                 raise _ValidationError("engine 只能是 qwen3-tts 或 gpt-sovits")
+                            # 组合校验放在最终值上：本次可能同时改了 type 与 engine
+                            if str(v.get("type")) == "design" and _e == ENGINE_SOVITS:
+                                raise _ValidationError(
+                                    "设计型音色没有参考音频，GPT-SoVITS 无法克隆："
+                                    "请改用 Qwen3-TTS，或把类型改成「克隆」并上传参考音频")
                             v["engine"] = _e
                         if "cfg_scale" in d:
                             v["cfg_scale"] = float(d["cfg_scale"])

@@ -1365,7 +1365,7 @@
           <span class="voice-avatar">${esc((v.name || "?").slice(0, 1))}</span>
           <div>
             <h3>${esc(v.name)}</h3>
-            <span class="card-type">${({ clone: "克隆", design: "设计", direction: "导向" })[v.type] || v.type}</span>
+            <span class="card-type">${({ clone: "克隆", design: "设计", direction: "导向" })[v.type] || v.type}${v.engine === "gpt-sovits" ? " · GPT-SoVITS" : ""}</span>
           </div>
           <button class="icon-btn" type="button" data-preview="${esc(v.id)}" aria-label="试听 ${esc(v.name)}" title="试听一句"><svg class="icon icon-sm"><use href="#i-play"/></svg></button>
           <button class="icon-btn" type="button" data-edit="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}"><svg class="icon icon-sm"><use href="#i-edit"/></svg></button>

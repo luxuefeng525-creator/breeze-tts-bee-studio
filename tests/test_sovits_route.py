@@ -165,3 +165,17 @@ def test_engine_field_validated_on_create(base_url, data_isolation):
     except urllib.error.HTTPError as e:
         code = e.code
     assert code == 400
+
+
+def test_design_voice_cannot_use_sovits(base_url, data_isolation):
+    """设计型没有参考音频，GPT-SoVITS 克隆不了：创建与更新都要在入库前拦下。"""
+    create = json.dumps({"name": "设计加错引擎", "type": "design",
+                         "engine": "gpt-sovits"}).encode()
+    r = urllib.request.Request(base_url + "/api/voices", data=create, method="POST")
+    r.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(r, timeout=20) as resp:
+            code = resp.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    assert code == 400
