@@ -1963,6 +1963,11 @@
     });
     if ($("voiceEngine")) {
       $("voiceEngine").addEventListener("change", syncEngineOptions);
+      // 深链：?engine=gpt-sovits 直接选中该引擎，便于分享链接与视觉验收可重放
+      const _qe = new URLSearchParams(location.search).get("engine");
+      if (_qe && [...$("voiceEngine").options].some((o) => o.value === _qe && !o.disabled)) {
+        $("voiceEngine").value = _qe;
+      }
       syncEngineOptions();
     }
     $("saveVoiceBtn").addEventListener("click", saveCloneVoice);
