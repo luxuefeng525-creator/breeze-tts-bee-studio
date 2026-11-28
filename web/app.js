@@ -1294,6 +1294,18 @@
     }
   }
 
+  // 设计型音色没有参考音频，GPT-SoVITS 克隆不了它：直接禁选，别等保存才报错
+  function syncEngineOptions() {
+    const sel = $("voiceEngine");
+    if (!sel) return;
+    const designOnly = state.clone.type === "design";
+    const opt = sel.querySelector('option[value="gpt-sovits"]');
+    if (opt) opt.disabled = designOnly;
+    if (designOnly && sel.value === "gpt-sovits") sel.value = "qwen3-tts";
+    const hint = $("engineHint");
+    if (hint) hint.hidden = sel.value !== "gpt-sovits";
+  }
+
   async function saveCloneVoice() {
     const name = $("voiceName").value.trim();
     if (!name) { toast("请填写音色名称", true); return; }
@@ -1306,6 +1318,7 @@
         body: JSON.stringify({
           name,
           type: state.clone.type,
+          engine: ($("voiceEngine") && $("voiceEngine").value) || "qwen3-tts",
           instruction: $("voiceInstruction").value.trim(),
           ref_text: $("refText").value.trim(),
         }),
@@ -1315,6 +1328,7 @@
       state.clone = { file: null, url: null, quality: null, duration: 0,
                       type: state.clone.type, pendingId: null, audioUrl: null };
       $("voiceName").value = "";
+      if ($("voiceEngine")) { $("voiceEngine").value = "qwen3-tts"; syncEngineOptions(); }
       $("refText").value = "";
       $("voiceInstruction").value = "";
       $("consentBox").checked = false;
@@ -1944,8 +1958,13 @@
       $("cloneTypeChips").querySelectorAll(".chip").forEach((x) => {
         x.setAttribute("aria-pressed", String(x === b));
       });
+      syncEngineOptions();
       refreshCloneState();
     });
+    if ($("voiceEngine")) {
+      $("voiceEngine").addEventListener("change", syncEngineOptions);
+      syncEngineOptions();
+    }
     $("saveVoiceBtn").addEventListener("click", saveCloneVoice);
     $("refPlayBtn").addEventListener("click", () => {
       if (!state.clone.audioUrl) return;
@@ -2058,6 +2077,13 @@
     $("editName").value = v.name || "";
     $("editInstruction").value = v.instruction || "";
     $("editRefText").value = v.ref_text || "";
+    if ($("editEngine")) {
+      $("editEngine").value = v.engine === "gpt-sovits" ? "gpt-sovits" : "qwen3-tts";
+      // 设计型音色没有参考音频，GPT-SoVITS 克隆不了
+      const opt = $("editEngine").querySelector('option[value="gpt-sovits"]');
+      if (opt) opt.disabled = v.type === "design";
+      if (v.type === "design") $("editEngine").value = "qwen3-tts";
+    }
     $("editDlg").showModal();
   }
 
@@ -2070,6 +2096,7 @@
           name: $("editName").value.trim(),
           instruction: $("editInstruction").value.trim(),
           ref_text: $("editRefText").value.trim(),
+          engine: ($("editEngine") && $("editEngine").value) || "qwen3-tts",
         }),
       });
       $("editDlg").close();

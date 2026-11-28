@@ -369,6 +369,12 @@
             <button class="chip" type="button" data-vtype="design" aria-pressed="false">设计</button>
             <button class="chip" type="button" data-vtype="direction" aria-pressed="false">导向</button>
           </div>
+          <label class="field-label" for="voiceEngine">合成引擎</label>
+          <select class="input" id="voiceEngine">
+            <option value="qwen3-tts">Qwen3-TTS · 默认，速度快</option>
+            <option value="gpt-sovits">GPT-SoVITS · 更接近本人，需先启动服务</option>
+          </select>
+          <p class="profile-hint" id="engineHint">GPT-SoVITS 必须配参考音频，且使用前要在本机启动 sidecar（会暂时让出主力引擎）。设计型音色只能用 Qwen3-TTS。</p>
           <label class="field-label" for="voiceInstruction">声音描述（设计/导向音色用）</label>
           <input class="input" id="voiceInstruction" placeholder="例如：一位温柔自信的年轻女性，声音清晰">
           <label class="consent"><input type="checkbox" id="consentBox"> <span>我确认已获得声音本人的书面授权，并了解这份参考音频只保存在本机。</span></label>
@@ -605,6 +611,11 @@
     <input class="input" id="editName">
     <label class="field-label" for="editInstruction">声音描述</label>
     <input class="input" id="editInstruction" placeholder="例如：沉稳男声，播报腔">
+    <label class="field-label" for="editEngine">合成引擎</label>
+    <select class="input" id="editEngine">
+      <option value="qwen3-tts">Qwen3-TTS · 默认，速度快</option>
+      <option value="gpt-sovits">GPT-SoVITS · 更接近本人，需先启动服务</option>
+    </select>
     <label class="field-label" for="editRefText">参考文稿（克隆音色必填，须与音频逐字一致）</label>
     <textarea class="sheet sheet-input" id="editRefText" rows="4"></textarea>
     <div class="dlg-actions">
