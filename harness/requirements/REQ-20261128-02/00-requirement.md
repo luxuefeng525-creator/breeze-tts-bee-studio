@@ -5,7 +5,7 @@ status: active
 size: L
 owner: trae（breeze-tts 主工作区）
 updated: 2026-11-28
-acceptance: [AC-01, AC-02, AC-03, AC-04, AC-05]
+acceptance: [AC-01, AC-02, AC-03, AC-04, AC-05, AC-06]
 ---
 
 # 需求
@@ -44,6 +44,13 @@ acceptance: [AC-01, AC-02, AC-03, AC-04, AC-05]
 - 验收点 AC-04：在 7860 常驻（显存接近占满）的情况下直接请求 gpt-sovits，返回的错误文案包含处置指引；此时守护日志中能看到 sidecar 启动/退出的原因记录。
 - 边界：显存不足属极端值场景，不允许出现「面板显示成功但历史里没有音频」的情况。
 
+### R-04
+
+当用户在面板「设置与诊断」里点「启动 GPT-SoVITS」时，系统应在不阻塞界面的前提下让出显存并拉起 sidecar，界面状态从「启动中」实时变为「运行中」；点「停止」应停掉 sidecar 并让守护自动把主力引擎拉回来，以便用户不必开命令行。
+
+- 验收点 AC-06：`POST /api/engine/sovits/start` 在 3 秒内返回 `starting`；随后 `GET /api/engine/sovits` 能看到状态迁移到 `running`（实测 31 秒）；运行期 9880 可连、7860 已让出；`POST /api/engine/sovits/stop` 后状态回 `idle`，7860 在 2 分钟内由守护恢复。
+- 边界：重复点击启动不得叠加多个进程（已在途时直接返回 starting）；启动失败必须落到 `error` 并给出日志路径，不能停在 starting 卡死。
+
 ## 3. 验收点汇总
 
 | 编号 | 对应需求 | 判定方式 | 优先级 |
@@ -53,6 +60,7 @@ acceptance: [AC-01, AC-02, AC-03, AC-04, AC-05]
 | AC-03 | R-02 | 停掉 sidecar 后三条路径分别请求，均返回含指引的错误 | P0 |
 | AC-04 | R-03 | 制造显存紧张后请求，查错误文案与日志 | P1 |
 | AC-05 | R-01 | 用 14.7 秒真实参考音频 → 自动裁到 ≤10 秒且 ASR 文稿匹配 → 合成 200 | P0 |
+| AC-06 | R-04 | 面板一键：start 3 秒内返回 starting → 轮询到 running → stop 后 7860 恢复 | P0 |
 
 ## 4. 代码证据与边界反例
 

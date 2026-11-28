@@ -26,6 +26,7 @@ updated: 2026-11-28
 | AC-03 | sidecar 未启动 | 停 sidecar 后三条路径分别请求 | 均明确报错、不静默回落 7860 | 三条均 503，文案含「GPT-SoVITS 服务未启动或不可达…start --take-gpu」 | PASS | 证据：tests/test_sovits_route.py |
 | AC-05 | 超长参考音频 | 14.745 s 音色直接合成 | 自动裁到 3~10 s 并重配文稿 | 裁到 9.65 s（窗口 0.2~9.85 s），ASR 重配 35 字简体文稿 | PASS | 证据：tests/test_sovits_route.py |
 | AC-04 | 显存不足处置 | 7860 占用时请求 gpt-sovits | 错误文案含处置指引 | 503 文案同时给出启动命令与 8 GB 显存说明 | PASS | 证据：tests/test_sovits_route.py |
+| AC-06 | 面板一键开关 | 诊断弹窗点启动 → 轮询状态 → 点停止 | start 立即返回、状态迁移到 running、stop 后 7860 恢复 | start 1.6 s 返回 starting；31 s 变 running；运行期 7860 停/9880 通；stop 后 80 s 恢复 7860 | PASS | 证据：harness/requirements/REQ-20261128-02/logs/switch-live.txt |
 | 覆盖 qwen3-tts | 默认引擎回归 | 不标 engine 的音色合成 | 仍走 7860，行为不变 | `voice_engine` 缺省/非法值均回落 qwen3-tts；三条原分支未改 | PASS | 证据：tests/test_sovits_route.py |
 | 覆盖 gpt-sovits | 新引擎链路 | 标 engine=gpt-sovits 后合成 | 走 sidecar 且产物同格式 | 三条路径 200，产物 24 kHz 单声道 | PASS | 证据：data/audio/20261128_092628_h_6fbde397.wav |
 
@@ -59,5 +60,5 @@ updated: 2026-11-28
 
 ## 6. 结论
 
-- 验收点通过率：5/5（AC-04 由 AC-03 的报错文案覆盖）
+- 验收点通过率：6/6（AC-04 由 AC-03 的报错文案覆盖）
 - 是否可进入审查：是

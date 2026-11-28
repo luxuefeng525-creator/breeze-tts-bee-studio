@@ -2063,7 +2063,51 @@
            <p class="help-note">这些是排查用的技术信息。数据目录：<code>data/</code></p>`
         : `<p class="help-note">推理服务（7860）当前未连接。请先启动推理服务，面板才能合成。</p>`;
       $("settingsDlg").showModal();
+      pollSovits();
     };
+    // GPT-SoVITS 引擎开关：启动要 60~90 秒，所以先返回 starting 再每 3 秒轮询
+    async function renderSovitsBlock() {
+      const el = $("sovitsBlock");
+      if (!el) return null;
+      let s = null;
+      try { s = await api("/api/engine/sovits"); } catch (e) { s = null; }
+      if (!s) { el.innerHTML = '<p class="help-note">读不到 GPT-SoVITS 引擎状态。</p>'; return null; }
+      const label = { idle: "未启动", starting: "启动中…", running: "运行中", error: "出错" }[s.state] || s.state;
+      const vram = s.free_vram_mib == null ? "未知" : `${s.free_vram_mib} MiB`;
+      el.innerHTML = `
+        <div class="diag-row"><span>GPT-SoVITS</span><b>${esc(label)}</b></div>
+        <div class="diag-row"><span>空闲显存</span><b>${esc(vram)}</b></div>
+        ${s.detail ? `<p class="help-note">${esc(s.detail)}</p>` : ""}
+        <p class="help-note">启动会先停掉主力引擎（7860）腾出显存，约 60~90 秒；停止后守护会在 1 分钟内把它拉回来。</p>
+        <button class="btn${s.running ? "" : "-primary"}" type="button" id="sovitsToggle"
+          ${s.state === "starting" ? "disabled" : ""}>
+          ${s.running ? "停止 GPT-SoVITS" : s.state === "starting" ? "启动中…" : "启动 GPT-SoVITS（让出显存）"}
+        </button>`;
+      const btn = $("sovitsToggle");
+      if (btn) btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await api(s.running ? "/api/engine/sovits/stop" : "/api/engine/sovits/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: s.running ? "" : JSON.stringify({ take_gpu: true }),
+          });
+          await pollSovits();
+        } catch (e) {
+          toast(e.message, true);
+          btn.disabled = false;
+        }
+      });
+      return s;
+    }
+
+    async function pollSovits() {
+      const s = await renderSovitsBlock();
+      if (s && s.state === "starting" && $("settingsDlg").open) {
+        setTimeout(pollSovits, 3000);
+      }
+    }
+
     $("settingsBtn").addEventListener("click", openDiag);
     // 错误态里的「查看诊断」以前是死按钮：点了毫无反应
     $("diagBtn").addEventListener("click", openDiag);

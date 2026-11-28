@@ -246,6 +246,82 @@ def _wav_to_pcm(wav: bytes) -> bytes:
     return (np.clip(mono, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
 
+# ---- 一键开关：面板内直接启停 sidecar ----
+# 启动要 60~90 秒（停 7860 → 等驱动回收显存 → 加载模型），不能让 HTTP 请求干等，
+# 所以做成「立即返回 starting + 前端轮询状态」。实现直接复用 CLI 的同一套逻辑，
+# 避免面板与命令行两份启停代码各修各的。
+_SOVITS_SWITCH_LOCK = threading.Lock()
+_SOVITS_SWITCH = {"state": "idle", "detail": "", "ts": 0.0}
+
+
+def _sovits_switch_set(state: str, detail: str = "") -> None:
+    with _SOVITS_SWITCH_LOCK:
+        _SOVITS_SWITCH.update(state=state, detail=detail, ts=time.time())
+
+
+def _sovits_switch_status() -> dict:
+    with _SOVITS_SWITCH_LOCK:
+        snap = dict(_SOVITS_SWITCH)
+    alive = _sovits_probe(timeout=1.5)
+    # 以探针为准：进程可能被外部杀掉，或手工在命令行起过
+    if not alive and snap["state"] == "running":
+        snap["state"], snap["detail"] = "idle", "服务已不在运行"
+    elif alive and snap["state"] != "starting":
+        snap["state"] = "running"
+    snap["running"] = alive
+    snap["free_vram_mib"] = _sovits_free_vram()
+    return snap
+
+
+def _sovits_free_vram() -> int | None:
+    """给前端显示「还差多少显存」用；拿不到就返回 None，不阻断。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15).stdout.strip().splitlines()
+        return int(out[0]) if out and out[0].strip().isdigit() else None
+    except Exception:
+        return None
+
+
+def _sovits_switch_start(take_gpu: bool = True) -> dict:
+    with _SOVITS_SWITCH_LOCK:
+        if _SOVITS_SWITCH["state"] == "starting":
+            return {"state": "starting", "detail": "已经在启动中，请稍候"}
+    _sovits_switch_set("starting",
+                       "正在让出显存并加载模型，约 60~90 秒；期间主力引擎会暂时停止")
+
+    def _run():
+        try:
+            import gpt_sovits_sidecar as S  # noqa: PLC0415  tools/ 已在 sys.path
+            code = S.start(take_gpu_first=take_gpu, wait=600)
+            if code == 0:
+                _sovits_switch_set("running", "服务已就绪，可以合成")
+            elif code == 2:
+                _sovits_switch_set(
+                    "error", "显存不足且未允许让出主力引擎，请重试并允许「让出显存」")
+            else:
+                _sovits_switch_set(
+                    "error", f"启动失败（退出码 {code}），详见 F:\\TTS2\\logs\\gpt-sovits-api.log")
+        except Exception as exc:
+            _sovits_switch_set("error", f"启动异常：{exc}")
+
+    threading.Thread(target=_run, daemon=True, name="sovits-switch").start()
+    return _sovits_switch_status()
+
+
+def _sovits_switch_stop() -> dict:
+    try:
+        import gpt_sovits_sidecar as S  # noqa: PLC0415
+        S.stop()
+        S.clear_hold()
+        _sovits_switch_set("idle", "已停止；主力引擎会在 1 分钟内由守护自动拉起")
+    except Exception as exc:
+        _sovits_switch_set("error", f"停止失败：{exc}")
+    return _sovits_switch_status()
+
+
 def _header_get(headers: dict, name: str) -> str:
     """HTTP 头名大小写不敏感；uvicorn 会统一发送小写头名。"""
     target = name.lower()
@@ -2615,6 +2691,9 @@ class Handler(BaseHTTPRequestHandler):
             # 全都要靠猜。这个端点一次给全，故障排查时先看它。
             self._json(_status_snapshot())
             return
+        if path == "/api/engine/sovits":
+            self._json(_sovits_switch_status())
+            return
         if path.startswith("/api/audio/"):
             target = _resolve_audio(path[len("/api/audio/"):])   # 模块级函数，不是方法
             if target is None:
@@ -2804,6 +2883,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(str(exc))
             _save_dict(dictionary)
             self._json({"ok": True, "entry": entry.to_dict()})
+            return
+
+        if path == "/api/engine/sovits/start":
+            take_gpu = True
+            if body:
+                try:
+                    take_gpu = bool(json.loads(body).get("take_gpu", True))
+                except Exception:
+                    pass          # body 非法就按默认（让出显存）处理，不因此拒绝启动
+            self._json(_sovits_switch_start(take_gpu))
+            return
+        if path == "/api/engine/sovits/stop":
+            self._json(_sovits_switch_stop())
             return
 
         if path == "/api/voices":
