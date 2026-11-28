@@ -2109,7 +2109,9 @@
 
     async function pollSovits() {
       const s = await renderSovitsBlock();
-      if (s && s.state === "starting" && $("settingsDlg").open) {
+      // starting 和 warming 都属于「还在准备」，都要继续轮询；
+      // 否则预热中会停在「预热中…」永远刷不到 running（历史 bug）。
+      if (s && (s.state === "starting" || s.state === "warming") && $("settingsDlg").open) {
         setTimeout(pollSovits, 3000);
       }
     }
