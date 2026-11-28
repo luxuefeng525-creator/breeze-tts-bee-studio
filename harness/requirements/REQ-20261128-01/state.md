@@ -1,6 +1,6 @@
 ---
 req_id: REQ-20261128-01
-stage: test
+stage: done
 status: active
 owner: trae
 updated: 2026-11-28
