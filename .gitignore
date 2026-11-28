@@ -20,6 +20,8 @@ htmlcov/
 # local runtime artifacts
 *.log
 *.log.err
+harness/logs/*
+!harness/logs/.gitkeep
 check_*.bin
 *.bak-depthgraph
 .wheels/
