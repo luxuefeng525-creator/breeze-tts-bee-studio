@@ -1,9 +1,9 @@
 ---
 req_id: REQ-20261126-01
-stage: requirement
+stage: archive
 status: active
 owner: <维护者>
-updated: 2026-11-26
+updated: 2026-11-28
 size: S | M | L
 entry: /harness init
 hits: []
@@ -15,8 +15,7 @@ hits: []
 
 > 只记工作项，不复述门禁结论。门禁唯一来源是 §4 门禁记录；本节不要写 `- [ ] G1 门禁` 这类门禁勾选，否则同一状态两处表示必然漂移。
 
-- [ ] <已完成项>
-- [ ] <进行中项>
+- [x] 2026-11-28 归档：本包自 init 后从未填写（00~05 全为模板占位），无实际需求内容，归档后不再计入「未收口」
 
 ## 2. 阻塞
 

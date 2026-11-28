@@ -20,7 +20,8 @@ hits: ["surgical-patch"]
 - [x] 定向回归通过（截断相关 5 个测试文件，57 passed）
 - [x] 全量 `pytest -q` 回归通过（651 passed，退出码 0）
 - [x] G3 独立只读审查 + 整改（文档计数、静态扫描正则、单独日志、`__str__` 兜底、AC 措辞）
-- [ ] G3 人确认 → G4 发布收口 → 合流 main + 重启面板 7861
+- [x] 合流 main（b28ccb7，2026-11-28 06:36）
+- [x] 重启面板 7861 使新后端生效（2026-11-28 18:44:55，pid 26384，`/api/voices` 200，18 条音色）
 
 ## 2. 阻塞
 
@@ -67,10 +68,7 @@ G4: PASS | 确认人: 用户 | 时间: 2026-11-28 06:28 | 确认原文: "G4 通�
 
 ## 6. 下一步
 
-1. 跑 `gate REQ-20261128-01 --stage G4 --dir f:\TTS2\breeze-tts-trae` 并回填结论
-2. 合流 main（git merge --no-ff session/trae-20261128）
-3. 重启面板 7861 使新后端生效
-4. 清理工作树与分支
+1. 无 —— 已合流 main 并重启面板；后续如需扩到 `api/video_upscale.py:335`、`api/cost_calc.py:182`、`api/comfy_templates.py:79`，另开需求单。
 
 ## 7. 交接摘要（可选）
 
